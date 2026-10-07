@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -91,7 +90,7 @@ namespace TailRemote
             }
             IgnoreUdpResets(_udp.Client);
 
-            lock (_gate) UpdateCapture();
+            lock (_gate) StartCapture();
             _wifi = new WlanStreaming("host"); // steady Wi-Fi while hosting
             new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote accept" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote host udp" }.Start();
@@ -103,14 +102,17 @@ namespace TailRemote
             _wifi?.Dispose();
             try { _listener.Stop(); } catch { }
             try { _udp.Dispose(); } catch { }
+            LoopbackCapture? c;
             lock (_gate)
             {
                 foreach (var s in AllSessions()) End(s, null);
                 _controller = null;
                 _listeners.Clear();
                 Rebuild();
-                UpdateCapture();
+                c = _capture;
+                _capture = null;
             }
+            c?.Dispose();
         }
 
         /// <summary>
@@ -213,38 +215,42 @@ namespace TailRemote
         /// <summary>Switches to recording another output (null: Windows' default) without stopping hosting.</summary>
         public void SetCaptureDevice(string? id)
         {
-            lock (_gate)
+            lock (_switching)
             {
-                if (_captureDevice == id || _stop) return;
-                _captureDevice = id;
-                var old = _capture;
-                _capture = null;
-                if (old != null) ThreadPool.QueueUserWorkItem(_ => old.Dispose());
-                UpdateCapture();
+                LoopbackCapture? old;
+                lock (_gate)
+                {
+                    if (_captureDevice == id || _stop) return;
+                    _captureDevice = id;
+                    old = _capture;
+                    _capture = null;
+                }
+                // The old capture must stop before the new one starts: the packet number is
+                // the audio nonce, and two captures counting at once would repeat one. Outside
+                // _gate, because stopping waits for the capture thread.
+                StopCapture(old);
+                lock (_gate) StartCapture();
             }
         }
 
-        /// <summary>One capture serves everyone; it runs only while someone is connected. Call under _gate.</summary>
-        private void UpdateCapture()
+        private readonly object _switching = new();
+        private uint _nextSeq;
+
+        /// <summary>Capture runs for as long as this PC hosts; with nobody connected it sends nothing. Call under _gate.</summary>
+        private void StartCapture()
         {
-            // Runs for as long as this PC hosts, so connecting and disconnecting never
-            // start or stop audio capture. With nobody connected it sends nothing.
-            bool anyone = !_stop;
-            if (anyone && _capture == null)
-            {
-                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice);
-                _capture.Burst += ms => { _burstMs = ms; DiagLog.Write("host: capture device's typical chunk is " + ms + " ms"); SendToAll(BurstMessage(ms)); };
-            }
-            else if (!anyone && _capture != null)
-            {
-                var c = _capture;
-                _capture = null;
-                // Disposing joins the capture thread, which may be waiting on _gate: do it outside.
-                ThreadPool.QueueUserWorkItem(_ => c.Dispose());
-            }
+            if (!_stop && _capture == null)
+                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice, _nextSeq);
         }
 
-        private volatile int _burstMs;
+        private void StopCapture(LoopbackCapture? c)
+        {
+            if (c == null) return;
+            bool stopped = c.Stop();
+            // A second's gap (the player starts fresh); far more if the thread would not stop.
+            _nextSeq = c.NextSeq + (stopped ? 172u : 1u << 24);
+        }
+
         private readonly WlanStreaming _wifi;
         private int _txPackets, _txBytes;
 
@@ -264,24 +270,10 @@ namespace TailRemote
                 foreach (var s in AllSessions())
                     sb.Append(" [").Append(s.Address).Append(s.Role == Protocol.RoleControl ? " control" : " listen")
                       .Append(", quality step ").Append(s.Quality).Append(s.AudioTo == null ? ", no audio address yet" : "").Append(']');
-                DiagLog.Write("host: capturing " + LoopbackCapture.DeviceInfo + ", biggest chunk " + chunk + " ms, typical " + _burstMs +
+                DiagLog.Write("host: capturing " + LoopbackCapture.DeviceInfo + ", biggest chunk " + chunk +
                     " ms, silence added " + fills + "x (" + fillMs + " ms), count skips " + skips + ", sent " + packets + " packets, " +
                     (bytes * 8 / 1000) + " kbit/s, sessions" + (sb.Length == 0 ? " none" : sb.ToString()));
             }
-        }
-
-        private static byte[] BurstMessage(int ms)
-        {
-            byte[] m = new byte[3];
-            m[0] = Protocol.CaptureBurst;
-            BitConverter.TryWriteBytes(m.AsSpan(1), (ushort)Math.Clamp(ms, 0, 1000));
-            return m;
-        }
-
-        private void SendToAll(byte[] m)
-        {
-            foreach (var s in AllSessions())
-                ThreadPool.QueueUserWorkItem(_ => { try { s.Link.Send(s.Stream, m); } catch { } });
         }
 
         private void Broadcast(string msg)
@@ -380,7 +372,6 @@ namespace TailRemote
                     Link = new SecureLink(key, nonce, clientNonce, isHost: true),
                 };
                 s.Link.Send(s.Stream, Protocol.FeaturesMessage(SecureAttention != null ? Protocol.FeatureSecureAttention : 0));
-                if (_burstMs > 0) s.Link.Send(s.Stream, BurstMessage(_burstMs));
                 EndHandshake(remote);
                 counted = false;
                 lock (_gate)
@@ -402,7 +393,6 @@ namespace TailRemote
                         _listeners.Add(s);
                     }
                     Rebuild();
-                    UpdateCapture();
                 }
                 _status((role == Protocol.RoleControl ? "Connected: " : "Listening: ") + remote + ".");
 
@@ -423,11 +413,13 @@ namespace TailRemote
                     {
                         if (_controller == s) { _controller = null; was = true; }
                         else if (_listeners.Remove(s)) was = true;
-                        if (was) { End(s, null); Rebuild(); UpdateCapture(); }
+                        if (was) { End(s, null); Rebuild(); }
                     }
                     if (was) _status((s.Role == Protocol.RoleControl ? "Disconnected: " : "Stopped listening: ") + remote + ".");
+                    else s.Tcp.Dispose(); // never registered (the host was stopping, or full)
                 }
                 else if (!handedOff) tcp.Dispose();
+                Native.LeaveDesktop();
             }
         }
 
@@ -471,8 +463,8 @@ namespace TailRemote
                         catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
-                        // Sample-rate steps for PCs that understand them, bit steps for 1.5.0.
-                        s.Quality = Math.Min((int)m[1], (s.PeerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4);
+                        // Sample-rate steps, for PCs that understand them. Older ones always get full quality.
+                        s.Quality = (s.PeerFeatures & Protocol.FeatureRate) != 0 ? Math.Min((int)m[1], Protocol.Rates.Length - 1) : 0;
                         DiagLog.Write("host: " + s.Address + " asked for quality step " + s.Quality);
                         break;
                     case Protocol.Features when m.Length >= 5:
@@ -512,10 +504,7 @@ namespace TailRemote
             });
         }
 
-        /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
         private readonly byte[] _packed = new byte[Protocol.PacketFrames * 4];
-        private readonly byte[][] _packed2 = { new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4] };
-        private readonly int[] _packed2Length = new int[5];
 
         // Lower sample rates: one streaming downsampler per rate, so there is no seam between packets.
         private readonly Resampler?[] _down = new Resampler?[Protocol.Rates.Length];
@@ -538,31 +527,42 @@ namespace TailRemote
             _downFrames[_downLevel] = f + 1;
         }
 
+        /// <summary>
+        /// Every lower rate is converted for every packet while anyone could use it,
+        /// so a converter is always warm: switching rate never starts one from
+        /// silence, which dipped and popped.
+        /// </summary>
+        private void DownsampleAll(uint seq, short[] pcm)
+        {
+            for (int i = 0; i < _downIn.Length; i++) _downIn[i] = pcm[i] / 32768f;
+            for (int level = 1; level < Protocol.Rates.Length; level++)
+            {
+                var rs = _down[level] ??= new Resampler(Protocol.AudioRate, Protocol.Rates[level]);
+                if (_downNext[level] != seq) rs.Reset(); // after a pause: start clean
+                _downNext[level] = seq + 1;
+                _downLevel = level;
+                _downFrames[level] = 0;
+                rs.Process(_downIn, _downEmit ??= DownEmit);
+            }
+        }
+
         /// <summary>This packet at a lower rate, packed once for everyone on that rate. -1 if it would not pack.</summary>
-        private int Rated(int level, uint seq, short[] pcm)
+        private int Rated(int level)
         {
             if (_ratedLength[level] != -2) return _ratedLength[level];
-            var rs = _down[level] ??= new Resampler(Protocol.AudioRate, Protocol.Rates[level]);
-            if (_downNext[level] != seq) rs.Reset(); // not used for a while: start clean
-            _downNext[level] = seq + 1;
-            for (int i = 0; i < _downIn.Length; i++) _downIn[i] = pcm[i] / 32768f;
-            _downLevel = level;
-            _downFrames[level] = 0;
-            rs.Process(_downIn, _downEmit ??= DownEmit);
             int n = _downFrames[level];
             _ratedLength[level] = Lossless2.EncodeRate(_downPcm[level].AsSpan(0, n * 2), n, level, _rated[level]);
             return _ratedLength[level];
         }
 
+        /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
         private void SendAudio(uint seq, short[]? pcm)
         {
             var all = AllSessions();
             if (all.Length == 0) return;
-            // Packed once, losslessly, for everyone whose PC can unpack it: about half the data.
-            int packedLength = pcm != null && Array.Exists(all, x => (x.PeerFeatures & (Protocol.FeatureLossless | Protocol.FeatureLossless2)) == Protocol.FeatureLossless)
-                ? Lossless.Encode(pcm, _packed) : -1;
-            Array.Fill(_packed2Length, -2); // -2: not packed yet at that quality; each is packed once, for all who want it
+            int packedLength = -2; // -2: not packed yet; each form is packed once, for everyone who wants it
             Array.Fill(_ratedLength, -2);
+            if (pcm != null && Array.Exists(all, x => (x.PeerFeatures & Protocol.FeatureRate) != 0)) DownsampleAll(seq, pcm);
             foreach (var s in all)
             {
                 var to = s.AudioTo;
@@ -572,10 +572,9 @@ namespace TailRemote
                 int payload;
                 bool byRate = (s.PeerFeatures & Protocol.FeatureRate) != 0;
                 int q = s.Quality;
-                int bits = byRate ? 0 : Math.Min(q, 4); // a rate-capable PC steps by rate, never by bits
-                if (pcm != null && (s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[bits] == -2)
-                    _packed2Length[bits] = Lossless2.Encode(pcm, bits, _packed2[bits]);
-                int ratedLength = pcm != null && byRate && q > 0 ? Rated(q, seq, pcm) : -1;
+                if (pcm != null && (s.PeerFeatures & Protocol.FeatureLossless2) != 0 && packedLength == -2)
+                    packedLength = Lossless2.Encode(pcm, 0, _packed); // losslessly, about half the data
+                int ratedLength = pcm != null && byRate && q > 0 ? Rated(q) : -1;
                 if (pcm == null) { a[0] = Protocol.UdpSilence; payload = 0; }
                 else if (ratedLength > 0)
                 {
@@ -583,15 +582,9 @@ namespace TailRemote
                     payload = ratedLength;
                     _rated[q].AsSpan(0, payload).CopyTo(a.AsSpan(5));
                 }
-                else if ((s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[bits] > 0)
+                else if ((s.PeerFeatures & Protocol.FeatureLossless2) != 0 && packedLength > 0)
                 {
                     a[0] = Protocol.UdpPacked2;
-                    payload = _packed2Length[bits];
-                    _packed2[bits].AsSpan(0, payload).CopyTo(a.AsSpan(5));
-                }
-                else if (packedLength > 0 && (s.PeerFeatures & Protocol.FeatureLossless) != 0)
-                {
-                    a[0] = Protocol.UdpPacked;
                     payload = packedLength;
                     _packed.AsSpan(0, payload).CopyTo(a.AsSpan(5));
                 }

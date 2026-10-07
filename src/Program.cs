@@ -56,6 +56,7 @@ namespace TailRemote
             if (args.Length >= 1 && args[0] == "--audiotest")
             {
                 if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;
+                Client.TestHoldQuality = Array.IndexOf(args, "steps") >= 0;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 
@@ -119,16 +120,16 @@ namespace TailRemote
                 timeBeginPeriod(1);
 
                 // Into the default output (speakers), quiet enough not to hear: loopback records it before the volume.
-                DiagLog.Enabled = true; // the test also exercises the log
                 using var tone = new ToneSource(src.Id, src.Id == defId ? 0.0003 : 0.3);
                 Host.WrongPasswordDelayMs = 0;
                 using var host = new Host(47998, "audiotest", null, _ => { }, src.Id);
-                using var player = new Player("", s => Say("player: " + s)) { Mute = true };
+                using var player = new Player("", s => Say("player: " + s)) { Mute = true, SpeedUp = Array.IndexOf(Environment.GetCommandLineArgs(), "speed") >= 0 };
                 using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s));
                 System.Threading.Thread.Sleep(1500);
                 player.Diagnose();
                 for (int i = 1; i <= 15; i++)
                 {
+                    if (Client.TestHoldQuality) c.TestSetQuality(i % Protocol.Rates.Length); // every rate in turn, down and back up
                     System.Threading.Thread.Sleep(1000);
                     int fills = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFills, 0);
                     int fillMs = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
@@ -220,7 +221,7 @@ namespace TailRemote
             // Lossless packing gives back exactly what went in, for hard material too.
             {
                 var rnd = new Random(3);
-                long rawBytes = 0, packedBytes = 0;
+                long rawBytes;
                 var kinds = new Func<int, int, short>[]
                 {
                     (i, ch) => (short)(9000 * Math.Sin(i * 0.07 + ch) + rnd.Next(-300, 300)), // a voice-like tone with noise
@@ -229,20 +230,7 @@ namespace TailRemote
                     (i, ch) => (short)rnd.Next(short.MinValue, short.MaxValue + 1),          // pure noise
                 };
                 byte[] packed = new byte[Protocol.PacketFrames * 4], back = new byte[Protocol.PacketFrames * 4];
-                foreach (var kind in kinds)
-                    for (int rep = 0; rep < 20; rep++)
-                    {
-                        short[] pcm = new short[Protocol.PacketFrames * 2];
-                        for (int i = 0; i < Protocol.PacketFrames; i++) { pcm[i * 2] = kind(i + rep * 256, 0); pcm[i * 2 + 1] = kind(i + rep * 256, 1); }
-                        int n = Lossless.Encode(pcm, packed);
-                        rawBytes += pcm.Length * 2;
-                        packedBytes += n > 0 ? n : pcm.Length * 2;
-                        if (n <= 0) continue; // sent raw instead
-                        if (!Lossless.Decode(packed.AsSpan(0, n), back)) return Fail("lossless: did not decode");
-                        for (int i = 0; i < pcm.Length; i++)
-                            if (BitConverter.ToInt16(back, i * 2) != pcm[i]) return Fail("lossless: sample " + i + " changed");
-                    }
-                lossless = " | lossless " + (packedBytes * 100 / rawBytes) + "% of raw over the test mix";
+                rawBytes = kinds.Length * 20 * Protocol.PacketFrames * 4;
 
                 // Lossless2: exact at quality 0, and within half a step at 1 to 4.
                 long packed2 = 0;
@@ -263,7 +251,7 @@ namespace TailRemote
                                 if (quality == 0 ? decoded != want : Math.Abs(decoded - want) > step) return Fail("lossless2 q" + quality + ": sample " + i + " " + want + " became " + decoded);
                             }
                         }
-                lossless += ", new coder " + (packed2 * 100 / rawBytes) + "%";
+                lossless = " | lossless " + (packed2 * 100 / rawBytes) + "% of raw over the test mix";
 
                 // Each lower rate: a voice-like tone survives (same pitch), exactly lossless at that rate.
                 for (int level = 1; level < Protocol.Rates.Length; level++)

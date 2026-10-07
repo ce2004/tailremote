@@ -30,7 +30,7 @@ namespace TailRemote
         public const int SERVICE_WIN32_OWN_PROCESS = 0x10;
         public const int SERVICE_START_PENDING = 2, SERVICE_RUNNING = 4, SERVICE_STOP_PENDING = 3, SERVICE_STOPPED = 1;
         public const int SERVICE_ACCEPT_STOP = 1, SERVICE_ACCEPT_SHUTDOWN = 4, SERVICE_ACCEPT_SESSIONCHANGE = 0x80;
-        public const int SERVICE_CONTROL_STOP = 1, SERVICE_CONTROL_SHUTDOWN = 5, SERVICE_CONTROL_SESSIONCHANGE = 14, SERVICE_CONTROL_INTERROGATE = 4;
+        public const int SERVICE_CONTROL_STOP = 1, SERVICE_CONTROL_SHUTDOWN = 5, SERVICE_CONTROL_SESSIONCHANGE = 14;
 
         // ---- Starting the agent in the console session, as SYSTEM ----
 
@@ -66,7 +66,7 @@ namespace TailRemote
         [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool GetUserProfileDirectoryW(IntPtr token, System.Text.StringBuilder? path, ref int size);
 
-        public const uint TOKEN_ALL_ACCESS = 0xF01FF, TOKEN_DUPLICATE = 2, TOKEN_QUERY = 8;
+        public const uint TOKEN_ALL_ACCESS = 0xF01FF;
         public const int TokenSessionId = 12, SecurityImpersonation = 2, TokenPrimary = 1;
         public const uint CREATE_NO_WINDOW = 0x08000000, CREATE_UNICODE_ENVIRONMENT = 0x400;
 

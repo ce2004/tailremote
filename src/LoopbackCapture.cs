@@ -21,28 +21,21 @@ namespace TailRemote
         private readonly Action<float, float> _emit; // made once: a new one per packet was garbage every 5.8 ms
         private uint _seq;
 
-        private readonly string? _deviceId;
+        /// <summary>The next packet number. The host carries it to the next capture, because it is also the audio nonce and must never repeat.</summary>
+        public uint NextSeq => _seq;
 
-        /// <summary>
-        /// The largest chunk (ms) the device hands over at once, measured every 2
-        /// seconds and raised when it changes by 2 ms or more. A normal output
-        /// gives 10 ms; Bluetooth, USB and some virtual devices give 20 to 40,
-        /// which arrive at the other PC as a burst its buffer has to cover.
-        /// </summary>
-        public event Action<int>? Burst;
+        private readonly string? _deviceId;
 
         /// <summary>Test only (--audiotest): silence inserted for timestamp gaps, and packet-count skips.</summary>
         public static int TestGapFills, TestGapFillMs, TestSeqSkips, TestChunkMax;
 
         /// <summary>The device being recorded, for the log.</summary>
         public static string DeviceInfo = "none yet";
-        private int _burstReported, _burstPrevious, _burstWindows;
-        private readonly System.Collections.Generic.List<int> _chunks = new(512);
-        private long _burstCheckedAt;
 
-        /// <summary>deviceId: the output to record, or null for Windows' default (followed when it changes).</summary>
-        public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status, string? deviceId = null)
+        /// <summary>deviceId: the output to record, or null for Windows' default (followed when it changes). firstSeq: the first packet number.</summary>
+        public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status, string? deviceId, uint firstSeq)
         {
+            _seq = firstSeq;
             _deviceId = string.IsNullOrEmpty(deviceId) ? null : deviceId;
             _onPacket = onPacket;
             _emit = Emit;
@@ -51,10 +44,13 @@ namespace TailRemote
             _thread.Start();
         }
 
-        public void Dispose()
+        public void Dispose() => Stop();
+
+        /// <summary>Stops and waits for the capture thread. False if it did not stop within 2 seconds.</summary>
+        public bool Stop()
         {
             _stop = true;
-            _thread.Join(2000);
+            return _thread.Join(2000);
         }
 
         private void Run()
@@ -82,11 +78,6 @@ namespace TailRemote
 
         private void CaptureUntilDeviceChanges()
         {
-            var enumerator = Wasapi.Enumerator();
-            _burstWindows = 0;
-            _burstPrevious = 0;
-            _chunks.Clear();
-            _burstCheckedAt = Environment.TickCount64; // windows count from the moment the device opens
             // The chosen output, or Windows' default when none is chosen or it has gone.
             var dev = Wasapi.OutputDevice(_deviceId);
             dev.GetId(out string devId);
@@ -112,7 +103,7 @@ namespace TailRemote
             long lastDataAt = Environment.TickCount64, lastDeviceCheck = lastDataAt;
             ulong expectedPos = 0;  // the device's own sample counter where the next audio should start
             bool havePos = false;
-            float[] silence = new float[2 * 4096];
+            float[] silence = new float[2 * (fmt.Rate / 5)]; // as long as the biggest gap that is filled (200 ms)
             try
             {
                 while (!_stop)
@@ -163,26 +154,7 @@ namespace TailRemote
                     if (drained > 0)
                     {
                         int ms = drained * 1000 / fmt.Rate;
-                        if (_chunks.Count < 2000) _chunks.Add(ms);
                         if (ms > TestChunkMax) TestChunkMax = ms;
-                    }
-                    if (now - _burstCheckedAt >= 2000)
-                    {
-                        _burstCheckedAt = now;
-                        // The typical chunk (the median), not the biggest: one odd chunk must not
-                        // move the other PC's buffer. Over the last two 2-second windows, from the
-                        // second window after the device opens (its first moments come in big
-                        // start-up chunks), and only a change of 3 ms or more.
-                        int median = 0;
-                        if (_chunks.Count > 0) { _chunks.Sort(); median = _chunks[_chunks.Count / 2]; }
-                        _chunks.Clear();
-                        int steady = Math.Max(median, _burstPrevious);
-                        _burstPrevious = median;
-                        if (++_burstWindows >= 2 && steady > 0 && Math.Abs(steady - _burstReported) >= 3)
-                        {
-                            _burstReported = steady;
-                            try { Burst?.Invoke(steady); } catch { }
-                        }
                     }
                     // The tail of a sound: after a real stop, send the part-filled packet
                     // rather than hold it. Not sooner: late audio is not the end of a sound.

@@ -20,7 +20,10 @@ namespace TailRemote
     internal sealed class KeyCapture : IDisposable
     {
         private const int VK_RETURN = 0x0D, VK_SHIFT = 0x10, VK_CONTROL = 0x11, VK_MENU = 0x12, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
-        private const uint WM_APP_REHOOK = 0x8001, WM_QUIT = 0x0012;
+        private const uint WM_APP_REHOOK = 0x8001, WM_QUIT = 0x0012, WM_TIMER = 0x0113;
+
+        [DllImport("user32.dll")] private static extern IntPtr SetTimer(IntPtr hwnd, IntPtr id, uint ms, IntPtr proc);
+        private bool _away;
 
         private readonly Func<IntPtr> _ourWindow;
         private readonly Native.HookProc _proc; // kept alive for the hook's lifetime
@@ -61,10 +64,12 @@ namespace TailRemote
         {
             _threadId = Native.GetCurrentThreadId();
             Hook();
+            SetTimer(IntPtr.Zero, IntPtr.Zero, 250, IntPtr.Zero);
             _ready.Set();
             while (Native.GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
             {
                 if (msg.message == WM_APP_REHOOK) { Unhook(); Hook(); }
+                else if (msg.message == WM_TIMER && _remote) CheckDesktop();
             }
             Unhook();
         }
@@ -101,6 +106,29 @@ namespace TailRemote
             }
             c?.ReleaseAll();
             if (announce) ModeChanged?.Invoke(false);
+        }
+
+        /// <summary>
+        /// Control Alt Delete or locking this PC switches it to the secure desktop,
+        /// where the hook sees nothing, not even the keys being let go. Whatever
+        /// was held (Control and Alt, at least) is released on the remote PC, or
+        /// they would stay down there.
+        /// </summary>
+        private void CheckDesktop()
+        {
+            IntPtr d = NativeService.OpenInputDesktop(0, false, 0x0001 /* DESKTOP_READOBJECTS */);
+            bool ours = d != IntPtr.Zero && NativeService.DesktopName(d) == "Default";
+            if (d != IntPtr.Zero) NativeService.CloseDesktop(d);
+            if (ours) { _away = false; return; }
+            if (_away) return;
+            _away = true;
+            var c = _client;
+            lock (_held)
+            {
+                if (c != null) foreach (var (vk, ext) in _held) c.SendKey((ushort)vk, 0, true, ext);
+                _held.Clear();
+            }
+            c?.ReleaseAll();
         }
 
         private static bool Down(int vk) => Native.GetAsyncKeyState(vk) < 0;

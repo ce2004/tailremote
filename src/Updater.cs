@@ -66,7 +66,9 @@ namespace TailRemote
                 using (var h = Http())
                 {
                     byte[] data = await h.GetByteArrayAsync(r.Url);
-                    if (r.Sha256 != null && !Convert.ToHexString(SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
+                    // No checksum from GitHub means nothing to check against: refuse rather than trust it.
+                    if (r.Sha256 == null) throw new InvalidOperationException("GitHub gave no checksum for the download, so it was not installed. Try again later.");
+                    if (!Convert.ToHexString(SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("The download was damaged. Nothing was changed.");
                     await File.WriteAllBytesAsync(fresh, data);
                 }

@@ -11,8 +11,7 @@ namespace TailRemote
         private const int Half = 16;
         private const int Phases = 512;
 
-        private readonly double _baseStep;
-        private double _step;
+        private readonly double _step;
         private readonly float[] _table; // (Phases + 1) rows of 2 * Half taps
         private float[] _buf = new float[8192]; // interleaved stereo frames
         private int _frames;
@@ -20,7 +19,7 @@ namespace TailRemote
 
         public Resampler(int inRate, int outRate)
         {
-            _baseStep = _step = (double)inRate / outRate;
+            _step = (double)inRate / outRate;
             double fc = Math.Min(1.0, (double)outRate / inRate) * 0.92;
             _table = new float[(Phases + 1) * 2 * Half];
             double i0b = BesselI0(8.0);
@@ -38,6 +37,26 @@ namespace TailRemote
             Reset();
         }
 
+        /// <summary>
+        /// Starts a fresh stream as if the signal had been sitting at (l, r): the
+        /// new stream carries on from where the old one stopped instead of rising
+        /// out of silence, so a sample-rate change neither dips nor pops.
+        /// </summary>
+        public void Prime(float l, float r)
+        {
+            _frames = Half;
+            for (int i = 0; i < Half; i++) { _buf[i * 2] = l; _buf[i * 2 + 1] = r; }
+            _pos = Half;
+        }
+
+        /// <summary>Plays out the last samples still held back by the filter, holding (l, r) after them.</summary>
+        public void Flush(float l, float r, Action<float, float> emit)
+        {
+            Span<float> hold = stackalloc float[Half * 2];
+            for (int i = 0; i < Half; i++) { hold[i * 2] = l; hold[i * 2 + 1] = r; }
+            Process(hold, emit);
+        }
+
         public void Reset()
         {
             _frames = Half;
@@ -45,12 +64,6 @@ namespace TailRemote
             _pos = Half;
         }
 
-        /// <summary>
-        /// Plays slightly faster (positive) or slower (negative), as a fraction:
-        /// 0.005 is half a percent, which nobody hears. This is how the player
-        /// steers its buffer back to target without ever cutting audio.
-        /// </summary>
-        public void SetSpeed(double adjust) => _step = _baseStep * (1 + adjust);
 
         /// <summary>Feeds interleaved stereo frames; calls emit for each output frame.</summary>
         public void Process(ReadOnlySpan<float> stereo, Action<float, float> emit)

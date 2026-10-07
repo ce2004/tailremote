@@ -85,7 +85,7 @@ namespace TailRemote
         /// <summary>Set by the service's agent: send keys to whichever desktop is showing, secure desktop included.</summary>
         public static bool FollowInputDesktop;
 
-        [ThreadStatic] private static IntPtr _desktop;
+        [ThreadStatic] private static IntPtr _desktop, _originalDesktop;
         [ThreadStatic] private static string? _desktopName;
 
         /// <summary>Moves this thread to the desktop that has the keyboard (Default, Winlogon for the lock screen and UAC).</summary>
@@ -95,6 +95,7 @@ namespace TailRemote
             if (d == IntPtr.Zero) return;
             string name = NativeService.DesktopName(d);
             if (_desktop != IntPtr.Zero && name == _desktopName) { NativeService.CloseDesktop(d); return; }
+            if (_originalDesktop == IntPtr.Zero) _originalDesktop = NativeService.GetThreadDesktop(GetCurrentThreadId()); // never closed
             if (NativeService.SetThreadDesktop(d))
             {
                 if (_desktop != IntPtr.Zero) NativeService.CloseDesktop(_desktop);
@@ -102,6 +103,32 @@ namespace TailRemote
                 _desktopName = name;
             }
             else NativeService.CloseDesktop(d);
+        }
+
+        /// <summary>Call before a thread that sent keys ends: puts it back on its own desktop and closes the one it followed.</summary>
+        public static void LeaveDesktop()
+        {
+            if (_desktop == IntPtr.Zero) return;
+            if (!NativeService.SetThreadDesktop(_originalDesktop)) return; // still in use: leave it
+            NativeService.CloseDesktop(_desktop);
+            _desktop = IntPtr.Zero;
+            _desktopName = null;
+        }
+
+        /// <summary>Runs a console program with no window; its exit code, or -1 if it would not start.</summary>
+        public static int RunHidden(string file, string args)
+        {
+            try
+            {
+                using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(file, args)
+                    { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!;
+                var errors = p.StandardError.ReadToEndAsync(); // both pipes are read, so a chatty program never blocks on a full one
+                p.StandardOutput.ReadToEnd();
+                p.WaitForExit();
+                errors.Wait();
+                return p.ExitCode;
+            }
+            catch { return -1; }
         }
 
         public static bool SendKey(ushort vk, ushort scan, bool up, bool extended)

@@ -44,7 +44,9 @@ How it keeps delay down
 - Audio is 16-bit 44.1 kHz stereo, packed losslessly like FLAC: well under half of the 1.4 megabits per second raw sound would take, and on a struggling connection it steps the sample rate down, as far as 8 kHz, instead of lagging, nothing when it is silent, and well under a millisecond of delay.
 - Audio goes over UDP in 5.8 millisecond packets and is never waited for or resent.
 - The buffer sizes itself to how unevenly packets arrive (98 percent of the last 10 seconds), then holds steady. A rare spike makes one short gap rather than raising the delay.
-- The buffer is steered by playing up to half a percent faster or slower, which you cannot hear, so the audio is never cut to catch up. Only a pile-up after a long network stall is cut.
+- The pitch never changes. When the sound falls behind (a burst after a network stall, or the two PCs' clocks drifting apart), TailRemote skips ahead to its normal delay with a tiny fade.
+- Catch up by fast-forwarding (Alt Y, Control mode): instead of skipping, the sound plays at 2x, or 4x when it is far behind, at its own pitch, until it has caught up.
+- Sound quality steps down as soon as packets go missing and comes back to full the moment the connection is clean again. Each change glides with no gap or pop.
 - A lost packet fades out instead of clicking.
 - Playback uses the smallest audio period the sound driver offers.
 - Keys go over TCP with no batching, so each key is sent the moment it is pressed.

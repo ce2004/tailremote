@@ -60,7 +60,8 @@ namespace TailRemote
         {
             try
             {
-                if (File.Exists(LogPath) && new FileInfo(LogPath).Length > 512 * 1024) File.Delete(LogPath);
+                // Kept, not wiped: the previous half megabyte moves to service.log.old.
+                if (File.Exists(LogPath) && new FileInfo(LogPath).Length > 512 * 1024) File.Move(LogPath, LogPath + ".old", overwrite: true);
                 File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + line + Environment.NewLine);
             }
             catch { }
@@ -217,28 +218,17 @@ namespace TailRemote
         {
             for (int i = 0; i < 40; i++)
             {
-                if (Process.GetProcessesByName("TailRemote").Length == 0) return;
                 bool any = false;
                 foreach (var p in Process.GetProcessesByName("TailRemote"))
                 {
-                    try { if (string.Equals(p.MainModule?.FileName, InstalledExe, StringComparison.OrdinalIgnoreCase)) any = true; } catch { }
+                    using (p) try { if (string.Equals(p.MainModule?.FileName, InstalledExe, StringComparison.OrdinalIgnoreCase)) any = true; } catch { }
                 }
                 if (!any) return;
                 Thread.Sleep(250);
             }
         }
 
-        private static int RunHidden(string file, string args)
-        {
-            try
-            {
-                using var p = Process.Start(new ProcessStartInfo(file, args) { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!;
-                p.StandardOutput.ReadToEnd();
-                p.WaitForExit();
-                return p.ExitCode;
-            }
-            catch { return -1; }
-        }
+        private static int RunHidden(string file, string args) => Native.RunHidden(file, args);
 
         // ================= The service itself (--service) =================
 
@@ -300,7 +290,7 @@ namespace TailRemote
 
             Process? agent = null;
             uint agentSession = uint.MaxValue;
-            long lastStart = 0;
+            long lastStart = 0, wait = 2000;
             while (!Stop.WaitOne(0))
             {
                 if (Restarting)
@@ -313,9 +303,14 @@ namespace TailRemote
                 }
                 uint session = NativeService.WTSGetActiveConsoleSessionId();
                 bool alive = agent != null && !agent.HasExited;
-                if (session != 0xFFFFFFFF && (!alive || session != agentSession) && Environment.TickCount64 - lastStart > 2000)
+                if (session != 0xFFFFFFFF && (!alive || session != agentSession) && Environment.TickCount64 - lastStart > wait)
                 {
                     try { if (alive) agent!.Kill(); } catch { }
+                    // An agent that keeps failing straight away is retried less and less often
+                    // (up to once a minute), so it cannot fill the log or keep the CPU busy.
+                    bool quickFailure = !alive && session == agentSession && Environment.TickCount64 - lastStart < 10_000;
+                    wait = quickFailure ? Math.Min(wait * 2, 60_000) : 2000;
+                    agent?.Dispose();
                     lastStart = Environment.TickCount64;
                     agent = StartAgent(session);
                     agentSession = session;
@@ -323,6 +318,7 @@ namespace TailRemote
                 WaitHandle.WaitAny(new WaitHandle[] { Stop, Wake }, 1000);
             }
             try { if (agent != null && !agent.HasExited) agent.Kill(); } catch { }
+            agent?.Dispose();
             Log("Service stopped.");
             Report(NativeService.SERVICE_STOPPED);
         }

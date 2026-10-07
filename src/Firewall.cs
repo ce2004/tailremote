@@ -43,16 +43,6 @@ namespace TailRemote
             return tcp == 0 && udp == 0 ? 0 : 1;
         }
 
-        private static int Run(string file, string args)
-        {
-            try
-            {
-                using var p = Process.Start(new ProcessStartInfo(file, args) { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!;
-                p.StandardOutput.ReadToEnd();
-                p.WaitForExit();
-                return p.ExitCode;
-            }
-            catch { return -1; }
-        }
+        private static int Run(string file, string args) => Native.RunHidden(file, args);
     }
 }

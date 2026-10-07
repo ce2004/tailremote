@@ -104,7 +104,7 @@ namespace TailRemote
         private void Add()
         {
             string? problem = Protocol.PortProblem(_newPort.Text.Trim(), out int port);
-            if (problem != null) { Speech.Speak(problem); MessageBox.Show(this, problem, "Port editor"); _newPort.Focus(); return; }
+            if (problem != null) { MessageBox.Show(this, problem, "Port editor"); _newPort.Focus(); return; } // NVDA reads the box; speaking too said it twice
             Remember(_settings, port);
             if (!_state.ContainsKey(port)) _state[port] = false;
             _newPort.Clear();

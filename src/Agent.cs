@@ -20,8 +20,8 @@ namespace TailRemote
         public static int Run()
         {
             Native.FollowInputDesktop = true;
-            DiagLog.Enabled = ServiceHost.LoadConfig()?.Logging == true;
             var cfg = ServiceHost.LoadConfig();
+            DiagLog.Enabled = cfg?.Logging == true;
             if (cfg == null) { ServiceHost.Log("Agent: no settings, so not hosting."); return 1; }
             ApplicationConfiguration.Initialize();
             try { Application.Run(new Agent(cfg)); }

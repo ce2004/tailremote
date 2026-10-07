@@ -22,6 +22,7 @@ namespace TailRemote
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
         private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
         private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
+        private readonly CheckBox _speedUp = new() { Text = "Catch up b&y fast-forwarding the sound at 2x or 4x, same pitch (otherwise it skips ahead)", AutoSize = true, MaximumSize = new Size(560, 0) };
         private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly CheckBox _service = new() { Text = "Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts, and Control Alt End sends Control Alt Delete", AutoSize = true, MaximumSize = new Size(560, 0) };
@@ -85,6 +86,7 @@ namespace TailRemote
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
+            table.Controls.Add(_speedUp); table.SetColumnSpan(_speedUp, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
             table.Controls.Add(_service); table.SetColumnSpan(_service, 2);
 
@@ -110,6 +112,8 @@ namespace TailRemote
             _listenPassword.Text = _settings.ListenPassword;
             _shareClipboard.Checked = _settings.ShareClipboard;
             _logging.Checked = _settings.Logging;
+            _speedUp.Checked = _settings.CatchUpBySpeed;
+            _speedUp.CheckedChanged += (_, _) => { SaveSettings(); if (_player != null) _player.SpeedUp = _speedUp.Checked; };
             DiagLog.Enabled = _settings.Logging;
             _startup.Checked = Startup.IsEnabled();
             _settingService = true;
@@ -181,6 +185,7 @@ namespace TailRemote
             _savedLabel.Visible = _saved.Visible = _savedButtons.Visible = !host;
             _listenLabel.Visible = _listenPassword.Visible = host;
             _captureLabel.Visible = _captureFrom.Visible = host;
+            _speedUp.Visible = !host; // it is about how this PC plays the sound
             _toggle.Visible = !host;
             _restart.Visible = !host;
             _startup.Visible = host;
@@ -193,11 +198,28 @@ namespace TailRemote
         {
             bool busy = _client != null || _host != null || _reconnecting;
             _mode.Enabled = !busy;
-            if (HostMode) _go.Text = _service.Checked ? "&Apply settings to the service" : _host == null ? "&Start hosting" : "&Stop hosting";
+            if (HostMode) _go.Text = _service.Checked ? "Apply &settings to the service" : _host == null ? "&Start hosting" : "&Stop hosting";
             else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
             _restart.Enabled = _client != null && !_client.ListenOnly;
+            SaveResumeState();
         }
+
+        /// <summary>
+        /// Remembers at once whether this PC is hosting or connected, so an update or
+        /// a crash comes back the same way. Not before the window is shown: until
+        /// then the state from last time has not been used yet.
+        /// </summary>
+        private void SaveResumeState()
+        {
+            if (!_shown) return;
+            string state = _host != null ? "host" : _client != null || _reconnecting || _connecting ? "connect" : "";
+            if (state == _settings.ResumeState) return;
+            _settings.ResumeState = state;
+            try { _settings.Save(); } catch { }
+        }
+
+        private bool _shown;
 
         protected override void OnHandleCreated(EventArgs e)
         {
@@ -340,9 +362,10 @@ namespace TailRemote
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            _shown = true;
             _keys = new KeyCapture(() => _handle);
-            _keys.ModeChanged += remote => BeginInvoke(() => ModeChanged(remote));
-            _keys.NotConnected += () => BeginInvoke(() => Say("Not connected."));
+            _keys.ModeChanged += remote => Later(() => ModeChanged(remote));
+            _keys.NotConnected += () => Later(() => Say("Not connected."));
             _titleTimer.Start();
             if (_updated) Say("Updated to version " + Updater.Current + ".");
             OfferServiceUpdate();
@@ -391,11 +414,13 @@ namespace TailRemote
             _settings.ListenPassword = _listenPassword.Text;
             _settings.ShareClipboard = _shareClipboard.Checked;
             _settings.Logging = _logging.Checked;
+            _settings.CatchUpBySpeed = _speedUp.Checked;
             _settings.Save();
         }
 
         private void Go()
         {
+            if (_connecting) return; // a second press while connecting would start a second connection
             SaveSettings();
             if (HostMode && _service.Checked) ApplyService();
             else if (HostMode) { if (_host == null) StartHost(); else StopHost(); }
@@ -512,6 +537,7 @@ namespace TailRemote
                     _player = new Player(device, msg => Later(() => Say(msg)));
                     _playerDevice = device;
                 }
+                _player.SpeedUp = _speedUp.Checked;
                 var player = _player;
                 var c = await System.Threading.Tasks.Task.Run(() =>
                     Client.Connect(address, port, pw, player, msg => Later(() => Say(msg))));

@@ -7,14 +7,13 @@ namespace TailRemote
     /// <summary>The handful of WASAPI interfaces TailRemote needs, declared by hand.</summary>
     internal static class Wasapi
     {
-        public const int eRender = 0, eConsole = 0, eMultimedia = 1;
+        public const int eRender = 0, eConsole = 0;
         public const uint DEVICE_STATE_ACTIVE = 1;
         public const uint CLSCTX_ALL = 23;
         public const uint AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000;
         public const uint AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x00040000;
         public const uint AUDCLNT_BUFFERFLAGS_SILENT = 2;
 
-        public static readonly Guid IID_IAudioClient = new("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         public static readonly Guid IID_IAudioClient3 = new("7ED4EE07-8E67-4CD4-8C1A-2B7A5987AD42");
         public static readonly Guid IID_IAudioCaptureClient = new("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
         public static readonly Guid IID_IAudioRenderClient = new("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
@@ -19,22 +20,21 @@ namespace TailRemote
         private volatile bool _closed;
         private long _lastPong;
         private int _closing;
+        private FileChannel? _files;
+        private WlanStreaming? _wifi;
+        private uint _peerFeatures;
+        private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
 
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
         /// <summary>Clipboard text from the host. Raised on a network thread.</summary>
         public event Action<string>? ClipboardReceived;
-        /// <summary>True when the host let us in with its listen-only password: audio only, no keys.</summary>
-        public bool ListenOnly { get; private set; }
         /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
         public event Action<string>? FileMessage;
-        private FileChannel? _files;
-        private WlanStreaming? _wifi;
-        private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
-
-        /// <summary>0 = full quality; above that, a lower sample rate (or, with a 1.5.0 host, fewer bits) while the connection struggles.</summary>
+        /// <summary>True when the host let us in with its listen-only password: audio only, no keys.</summary>
+        public bool ListenOnly { get; private set; }
+        /// <summary>0 = full quality; above that, a lower sample rate while the connection struggles.</summary>
         public int AudioQuality { get; private set; }
-        private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
@@ -44,12 +44,16 @@ namespace TailRemote
             _tcp = tcp; _stream = stream; _udp = udp; _token = token; _player = player; _link = link;
         }
 
-        /// <summary>Connects and checks the password; throws with a readable message on failure.</summary>
-        /// <summary>The player is the caller's and outlives the connection, so connecting never opens or closes an audio device.</summary>
+        /// <summary>
+        /// Connects and checks the password; throws with a readable message on failure.
+        /// The player is the caller's and outlives the connection, so connecting never
+        /// opens or closes an audio device.
+        /// </summary>
         public static Client Connect(string address, int port, string password, Player player, Action<string> status)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
             tcp.Client.DualMode = true;
+            tcp.Client.SendTimeout = 5000; // a host that stops taking data is dropped, never waited on forever
             try
             {
                 IPAddress[] addrs;
@@ -73,6 +77,7 @@ namespace TailRemote
 
             var stream = tcp.GetStream();
             stream.ReadTimeout = 8000;
+            UdpClient? udp = null;
             try
             {
                 byte[] hello = new byte[20];
@@ -103,7 +108,7 @@ namespace TailRemote
                 stream.ReadTimeout = 10_000;
 
                 var hostEp = (IPEndPoint)tcp.Client.RemoteEndPoint!;
-                var udp = new UdpClient(AddressFamily.InterNetworkV6);
+                udp = new UdpClient(AddressFamily.InterNetworkV6);
                 udp.Client.DualMode = true;
                 udp.Client.ReceiveBufferSize = 1 << 20;
                 Host.IgnoreUdpResets(udp.Client);
@@ -120,8 +125,8 @@ namespace TailRemote
                 c.Start();
                 return c;
             }
-            catch (System.IO.IOException) { tcp.Dispose(); throw new InvalidOperationException("The host closed the connection."); }
-            catch { tcp.Dispose(); throw; }
+            catch (System.IO.IOException) { udp?.Dispose(); tcp.Dispose(); throw new InvalidOperationException("The host closed the connection."); }
+            catch { udp?.Dispose(); tcp.Dispose(); throw; }
         }
 
         /// <summary>The second connection, for files. Without it everything else still works.</summary>
@@ -152,6 +157,7 @@ namespace TailRemote
 
         private void Start()
         {
+            new Thread(SendLoop) { IsBackground = true, Name = "TailRemote send", Priority = ThreadPriority.AboveNormal }.Start();
             new Thread(TcpLoop) { IsBackground = true, Name = "TailRemote tcp" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote udp", Priority = ThreadPriority.Highest }.Start();
             new Thread(Heartbeat) { IsBackground = true, Name = "TailRemote heartbeat" }.Start();
@@ -166,15 +172,47 @@ namespace TailRemote
             if (Interlocked.Exchange(ref _closing, 1) == 1) return;
             DiagLog.Write("client: connection closed" + (why != null ? ": " + why : " by this PC"));
             _closed = true;
+            _toSend.Release();
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
             _files?.Dispose();
             _wifi?.Dispose();
             if (why != null) Disconnected?.Invoke(why);
-            // The link is left for the garbage collector: a hook-thread SendKey may still be using it.
         }
 
-        /// <summary>Sends one key. Called from the keyboard hook; never blocks for long.</summary>
+        // ---- Sending: one thread, keys first ----
+        // Every send goes through this queue, so the keyboard hook and the window
+        // never wait on the network. Keys and commands always go before clipboard
+        // text: a large copy can never hold up a keystroke, and a hook that waits
+        // gets removed by Windows, after which keys silently stay on this PC.
+
+        private readonly ConcurrentQueue<byte[]> _urgent = new(), _bulk = new();
+        private readonly SemaphoreSlim _toSend = new(0);
+
+        private void Write(ReadOnlySpan<byte> message)
+        {
+            if (_closed) return;
+            _urgent.Enqueue(message.ToArray());
+            _toSend.Release();
+        }
+
+        private void SendLoop()
+        {
+            while (!_closed)
+            {
+                _toSend.Wait();
+                if (_closed) return;
+                if (!_urgent.TryDequeue(out var m) && !_bulk.TryDequeue(out m)) continue;
+                try { _link.Send(_stream, m); }
+                catch
+                {
+                    Close("Disconnected: the host stopped taking data.");
+                    return;
+                }
+            }
+        }
+
+        /// <summary>Sends one key. Called from the keyboard hook: only queues it.</summary>
         public void SendKey(ushort vk, ushort scan, bool up, bool extended)
         {
             if (_closed) return;
@@ -190,9 +228,7 @@ namespace TailRemote
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
         /// <summary>How the sound is reduced right now, for the title; null at full quality.</summary>
-        public string? ReducedSound => AudioQuality == 0 ? null
-            : (_peerFeatures & Protocol.FeatureRate) != 0 ? (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz"
-            : (16 - AudioQuality) + "-bit";
+        public string? ReducedSound => AudioQuality == 0 ? null : (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz";
 
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
@@ -204,17 +240,12 @@ namespace TailRemote
         /// <summary>Asks the host PC to restart.</summary>
         public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
 
-        /// <summary>Sends clipboard text to the host, if it shares the clipboard. Not for listeners.</summary>
+        /// <summary>Sends clipboard text to the host, behind any keys. Not for listeners.</summary>
         public void SendClipboard(string text)
         {
-            if (ListenOnly || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
-            Write(Protocol.TextMessage(Protocol.Clipboard, text));
-        }
-
-        private void Write(ReadOnlySpan<byte> f)
-        {
-            try { _link.Send(_stream, f); }
-            catch { }
+            if (_closed || ListenOnly || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
+            _bulk.Enqueue(Protocol.TextMessage(Protocol.Clipboard, text));
+            _toSend.Release();
         }
 
         private void TcpLoop()
@@ -231,11 +262,7 @@ namespace TailRemote
                         _lastPong = Environment.TickCount64;
                     }
                     else if (m.Length >= 1 && m[0] == Protocol.Message)
-                    {
                         Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
-                    }
-                    else if (m.Length >= 3 && m[0] == Protocol.CaptureBurst)
-                        _player.HostBurstMs = BitConverter.ToUInt16(m, 1);
                     else if (m.Length >= 5 && m[0] == Protocol.Features)
                     {
                         _peerFeatures = BitConverter.ToUInt32(m, 1);
@@ -252,30 +279,30 @@ namespace TailRemote
             }
         }
 
+        // ---- Receiving audio ----
+
         /// <summary>Test only (--audiotest): delay each audio packet by a random 0 to N ms, like a bumpy network.</summary>
         public static int TestJitterMs;
         private readonly SortedList<(long Due, long N), byte[]> _jitterQueue = new();
+        private readonly Stopwatch _jitterClock = Stopwatch.StartNew();
         private long _jitterN;
 
         private void JitterLoop()
         {
-            var sw = Stopwatch.StartNew();
             while (!_closed)
             {
                 byte[]? next = null;
                 lock (_jitterQueue)
                 {
-                    if (_jitterQueue.Count > 0 && _jitterQueue.Keys[0].Due <= sw.ElapsedMilliseconds)
+                    if (_jitterQueue.Count > 0 && _jitterQueue.Keys[0].Due <= _jitterClock.ElapsedMilliseconds)
                     {
                         next = _jitterQueue.Values[0];
                         _jitterQueue.RemoveAt(0);
                     }
                 }
-                if (next != null) HandlePacket(next); else Thread.Sleep(1);
+                if (next != null) SafeHandle(next); else Thread.Sleep(1);
             }
         }
-
-        private readonly Stopwatch _jitterClock = Stopwatch.StartNew();
 
         private void UdpLoop()
         {
@@ -294,19 +321,28 @@ namespace TailRemote
                     lock (_jitterQueue) _jitterQueue.Add((_jitterClock.ElapsedMilliseconds + Random.Shared.Next(TestJitterMs + 1), _jitterN++), d);
                     continue;
                 }
-                HandlePacket(d);
+                SafeHandle(d);
             }
+        }
+
+        /// <summary>A bad packet or a player hiccup must never take the whole app down.</summary>
+        private void SafeHandle(byte[] d)
+        {
+            try { HandlePacket(d); }
+            catch (Exception e) { DiagLog.Write("client: audio packet failed: " + e.Message); }
         }
 
         // ---- Putting swapped packets back in order ----
         // Networks (and Windows' own loopback) sometimes deliver two neighbouring
         // packets swapped. Played as they come, that is a lost packet (a fade-out
-        // gap) followed by a late one (thrown away), and it made the quality steps
-        // think the line was bad. So a packet that arrives one ahead is held until
-        // the next arrival: if that is the missing one, both play in order; if not,
-        // the missing one really was lost. Only a gap costs a packet's wait.
+        // gap) and a late one (thrown away). So a packet that arrives one ahead is
+        // held until the next arrival: if that is the missing one, both play in
+        // order; if not, the missing one really was lost. A held packet more than
+        // 30 ms old is dropped rather than played, so a scrap of old sound never
+        // plays in front of new sound after a pause.
 
         private byte[]? _held;
+        private long _heldAt;
         private uint _lastSeq;
         private bool _haveLastSeq;
 
@@ -315,17 +351,14 @@ namespace TailRemote
             if (d.Length < Protocol.SilencePacketBytes || d[0] < Protocol.UdpAudio || d[0] > Protocol.UdpPackedRate || !_link.OpenAudio(d, d.Length)) return;
             uint seq = BitConverter.ToUInt32(d, 1);
             int ahead = _haveLastSeq ? (int)(seq - _lastSeq) : 1;
-            if (_held == null)
-            {
-                if (ahead == 2) { _held = d; return; } // one missing: give it one arrival to turn up
-            }
-            else
+            if (_held != null)
             {
                 var held = _held;
                 _held = null;
                 if (ahead == 1) { Deliver(d); Deliver(held); return; } // it turned up: both in order
-                Deliver(held);                                         // it really was lost
+                if (Environment.TickCount64 - _heldAt <= 30) Deliver(held); // it really was lost
             }
+            else if (ahead == 2) { _held = d; _heldAt = Environment.TickCount64; return; } // one missing: give it one arrival to turn up
             Deliver(d);
         }
 
@@ -334,28 +367,32 @@ namespace TailRemote
         {
             uint seq = BitConverter.ToUInt32(d, 1);
             if (!_haveLastSeq || (int)(seq - _lastSeq) > 0) { _lastSeq = seq; _haveLastSeq = true; }
-            {
-                // Forged or damaged packets fail to open and are dropped.
-                if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio)
-                    _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
-                else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence)
-                    _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
-                else if (d[0] == Protocol.UdpPackedRate && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && Lossless2.DecodeRate(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked, out int level, out int frames))
-                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked.AsSpan(0, frames * 4), frames, Protocol.Rates[level]);
-                else if (d[0] == Protocol.UdpPacked2 && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && Lossless2.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
-                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
-                else if (d[0] == Protocol.UdpPacked && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && Lossless.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
-                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
-            }
+            int body = d.Length - Protocol.SilencePacketBytes;
+            if (d[0] == Protocol.UdpAudio && d.Length == Protocol.AudioPacketBytes)
+                _player.Push(seq, d.AsSpan(5, Protocol.PacketFrames * 4));
+            else if (d[0] == Protocol.UdpSilence && body == 0)
+                _player.Push(seq, ReadOnlySpan<byte>.Empty);
+            else if (d[0] == Protocol.UdpPackedRate && body > 0 && Lossless2.DecodeRate(d.AsSpan(5, body), _unpacked, out int level, out int frames))
+                _player.Push(seq, _unpacked.AsSpan(0, frames * 4), frames, Protocol.Rates[level]);
+            else if (d[0] == Protocol.UdpPacked2 && body > 0 && Lossless2.Decode(d.AsSpan(5, body), _unpacked))
+                _player.Push(seq, _unpacked);
         }
+
+        // ---- Quality steps ----
 
         private const int QualityTickMs = 200;
         private int _cleanTicks;
-        private int _upAfterTicks = 8; // 1.6 s of clean sound before the first step back up
+        private int _upAfterTicks = 3; // 0.6 s of clean sound, then straight back to full quality
         private long _lastUpAt;
+
+        /// <summary>Test only (--audiotest ... steps): hold the quality where the test puts it.</summary>
+        public static bool TestHoldQuality;
+
+        public void TestSetQuality(int q)
+        {
+            AudioQuality = q;
+            Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
+        }
 
         private void QualityLoop()
         {
@@ -368,6 +405,41 @@ namespace TailRemote
             }
         }
 
+        /// <summary>
+        /// Five times a second. Two or more packets that never arrived in 0.2 s step
+        /// the sample rate down at once, two steps when it is heavy. After 0.6 clean
+        /// seconds it goes straight back to full quality. If that brings trouble
+        /// straight back, the wait before the next try doubles, up to 8 seconds,
+        /// and resets once full quality has held for 10 seconds.
+        /// </summary>
+        private void AdaptQuality()
+        {
+            var (packets, lost, late) = _player.TakeStats();
+            if (TestHoldQuality || (_peerFeatures & Protocol.FeatureRate) == 0 || packets == 0) return; // silence: nothing to judge
+            // Only packets that never came: one that arrived late was counted lost first,
+            // then late, and lateness is not a bandwidth problem a lower rate could fix.
+            int bad = Math.Max(0, lost - late);
+            long now = Environment.TickCount64;
+            int q = AudioQuality;
+            if (bad >= 2)
+            {
+                _cleanTicks = 0;
+                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 40); // the last return was too soon
+                q = Math.Min(Protocol.Rates.Length - 1, q + (bad >= 6 ? 2 : 1));
+            }
+            else if (++_cleanTicks >= _upAfterTicks && q > 0)
+            {
+                q = 0; // the connection is good again: straight back to full quality, not step by step
+                _lastUpAt = now;
+                _cleanTicks = 0;
+            }
+            else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 3;
+            if (q == AudioQuality) return;
+            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (in 0.2 s: " + packets + " packets, " + lost + " lost, " + late + " late)");
+            AudioQuality = q;
+            Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
+        }
+
         // ---- The once-a-second log line (only while logging is on) ----
         private int _rxPackets, _rxBytes, _keysSent;
         private readonly int[] _rxTypes = new int[6]; // A0 to A5
@@ -378,55 +450,9 @@ namespace TailRemote
             var t = new int[6];
             for (int i = 0; i < 6; i++) t[i] = Interlocked.Exchange(ref _rxTypes[i], 0);
             DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, quality step " + AudioQuality +
-                (ReducedSound is string r ? " (" + r + ")" : "") + ", host chunk " + _player.HostBurstMs + " ms" +
-                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", packed " + t[3] + ", packed2 " + t[4] + ", lower rate " + t[5] + ")" +
+                (ReducedSound is string r ? " (" + r + ")" : "") +
+                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", full rate " + t[4] + ", lower rate " + t[5] + ")" +
                 ", keys sent " + keys + ", playing on " + _player.DeviceInfo);
-        }
-
-        /// <summary>
-        /// Five times a second. Trouble (2 or more lost or late packets in 0.2 s,
-        /// or the buffer running dry) steps the sound down at once, two steps when
-        /// it is heavy. After 1.6 clean seconds it steps back up, then one more
-        /// step every clean second. If stepping up brings trouble straight back,
-        /// the wait before the next try doubles, up to 8 seconds, and resets once
-        /// full quality has held for 10 seconds. Smaller packets instead of a
-        /// bigger buffer, so the delay never grows.
-        /// </summary>
-        private void AdaptQuality()
-        {
-            var (packets, lost, late, starved) = _player.TakeStats();
-            if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return; // silence: nothing to judge
-            // Only packets that never came: one that arrived late was counted lost first,
-            // then late, and lateness is not a bandwidth problem a lower rate could fix.
-            int bad = Math.Max(0, lost - late);
-            // Only lost or late packets count. With a fixed, tiny buffer the player runs
-            // dry on any jitter by design, and that alone must not lower the sound.
-            bool struggling = bad >= 2;
-            bool heavy = bad >= 6;
-            int lowest = (_peerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4;
-            long now = Environment.TickCount64;
-            int q = AudioQuality;
-            if (struggling)
-            {
-                _cleanTicks = 0;
-                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 40); // the last step up was too soon
-                q = Math.Min(lowest, q + (heavy ? 2 : 1));
-            }
-            else
-            {
-                _cleanTicks++;
-                if (q > 0 && _cleanTicks >= _upAfterTicks)
-                {
-                    q--;
-                    _lastUpAt = now;
-                    _cleanTicks = Math.Max(0, _upAfterTicks - 1000 / QualityTickMs); // next step after one more clean second
-                }
-                else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 8;
-            }
-            if (q == AudioQuality) return;
-            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (in 0.2 s: " + packets + " packets, " + lost + " lost, " + late + " late)");
-            AudioQuality = q;
-            Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
 
         private void Heartbeat()

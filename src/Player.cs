@@ -6,22 +6,22 @@ using System.Threading;
 namespace TailRemote
 {
     /// <summary>
-    /// Plays the host's audio with as little delay as the network allows, and
-    /// works out for itself how little that is.
+    /// Plays the host's audio. The pitch never changes.
     ///
-    /// Every packet's arrival is compared with when it should have arrived. The
-    /// worst lateness seen in the last 15 seconds sets the buffer: just enough
-    /// to ride it out, plus one packet and one device period. A rough patch
-    /// raises the buffer at once; when the network calms down it comes back
-    /// down over the following seconds.
+    /// The buffer is sized to the connection: it covers 98% of how late packets
+    /// were over the last 10 seconds (Wi-Fi and Tailscale always bunch packets),
+    /// plus one packet, a 2 ms margin and the device period. It rises at once
+    /// and comes down gently.
     ///
-    /// The buffer is steered to that size by playing up to half a percent
-    /// faster or slower, which nobody hears, never by cutting audio. Only a
-    /// pile-up after a long network stall is cut, because hearing the backlog
-    /// late would be worse.
+    /// When the buffer is too full (clock drift, or a burst after a stall) it
+    /// catches up one of two ways, never by changing the speed of the sound:
+    /// by default it skips straight back, fading over 2 ms; with Catch up by
+    /// speeding up the sound it fast-forwards, playing 10 ms pieces at their
+    /// own pitch and skipping one (2x) or three (4x) between them, until it is
+    /// back on time.
     ///
-    /// A lost packet fades the last sound out instead of clicking to silence,
-    /// and the next one fades back in.
+    /// A lost packet fades out instead of clicking, and a change of sample rate
+    /// glides: the old rate plays out and the new one starts from its last value.
     /// </summary>
     internal sealed class Player : IDisposable
     {
@@ -30,7 +30,6 @@ namespace TailRemote
 
         private const double PacketMs = Protocol.PacketFrames * 1000.0 / Protocol.AudioRate;
         private const double MarginMs = 2;
-        private const int JitterBuckets = 15; // seconds of history
 
         private readonly string? _deviceId;
         private readonly Action<string> _status;
@@ -41,44 +40,48 @@ namespace TailRemote
         private readonly object _gate = new();
         private readonly float[] _ring = new float[192000 * 2 * 2]; // 2 s of stereo at up to 192 kHz
         private int _read, _count; // in floats
-        private bool _playing, _starved;
-        private int _statPackets, _statLost, _statLate, _statStarved; // since the last TakeStats
+        private bool _playing;
         private float _gain, _lastL, _lastR;
         private int _fadeOut;
         private double _avgMs;
+        private int _ffFactor, _grainPos; // fast-forward: 0 = off, else 2x or 4x
 
         private volatile int _deviceRate;
         private double _periodMs = 10;
-        private double _speed; // read by the network thread
+        private volatile float _targetMs = 20;
 
         // Network-thread state.
         private Resampler? _rs;
-        private int _rsRate;
+        private int _rsRate, _rsIn, _lastFrames;
         private uint _expect, _spurtSeq;
-        private bool _haveSeq;
-        private double _ref;
-        private readonly double[] _jitter = new double[JitterBuckets];
-        private long _bucketSecond;
-        private double _extraMs;
-        private volatile float _targetMs = 20;
-        private bool _fadeIn;
+        private bool _haveSeq, _fadeIn;
+        private double _ref, _silenceCarry;
         private float[] _scratch = new float[8192];
         private int _scratchLen;
         private Action<float, float>? _collect; // made once, not per packet
-        private int _rsIn, _lastFrames;
-        private double _silenceCarry;
-
-        /// <summary>Frames in one 5.8 ms packet at this rate, carrying the fraction so time never drifts.</summary>
-        private int PacketAt(int inRate)
-        {
-            if (inRate == Protocol.AudioRate) return Protocol.PacketFrames;
-            double exact = Protocol.PacketFrames * (double)inRate / Protocol.AudioRate + _silenceCarry;
-            int n = (int)exact;
-            _silenceCarry = exact - n;
-            return n;
-        }
         private readonly float[] _in = new float[Protocol.PacketFrames * 2];
         private readonly float[] _last = new float[Protocol.PacketFrames * 2];
+
+        // Lateness of the last 1720 packets (10 seconds), and the buffer worked out from it.
+        private readonly float[] _late = new float[1720];
+        private readonly float[] _lateSorted = new float[1720];
+        private int _lateAt, _lateCount, _sinceTarget;
+        private float _coverMs;
+
+        // How the connection is coping, for the quality steps (since the last TakeStats).
+        private int _statPackets, _statLost, _statLate;
+
+        /// <summary>
+        /// Catch up by speeding up the sound (a setting, off by default): fast-forward
+        /// in pieces at the same pitch instead of skipping.
+        /// </summary>
+        public volatile bool SpeedUp;
+
+        /// <summary>Test only: play silence, with all the timing of the real thing.</summary>
+        public bool Mute;
+
+        /// <summary>The playback device, for the log.</summary>
+        public string DeviceInfo = "none yet";
 
         public Player(string? deviceId, Action<string> status)
         {
@@ -89,84 +92,83 @@ namespace TailRemote
             _thread.Start();
         }
 
-        /// <summary>
-        /// Forgets the last connection's audio, ready for the next. The output
-        /// stream stays open, so connecting never opens or closes a device.
-        /// Call only while no connection is feeding it.
-        /// </summary>
-        public void Reset()
-        {
-            lock (_gate)
-            {
-                _read = 0; _count = 0; _playing = false; _starved = false; _fadeOut = 0; _gain = 0;
-            }
-            _haveSeq = false;
-        }
-
-        /// <summary>Packets, lost, late and ran-dry counts since the last call: how the connection is coping.</summary>
-        public (int Packets, int Lost, int Late, int Starved) TakeStats()
-        {
-            int starved;
-            lock (_gate) { starved = _statStarved; _statStarved = 0; }
-            return (Interlocked.Exchange(ref _statPackets, 0), Interlocked.Exchange(ref _statLost, 0), Interlocked.Exchange(ref _statLate, 0), starved);
-        }
-
         public void Dispose()
         {
             _stop = true;
             _thread.Join(2000);
         }
 
+        /// <summary>
+        /// Forgets the last connection, ready for the next. The output stream stays
+        /// open, so connecting never opens or closes a device. Call only while no
+        /// connection is feeding it.
+        /// </summary>
+        public void Reset()
+        {
+            lock (_gate)
+            {
+                _read = 0; _count = 0; _playing = false; _fadeOut = 0; _gain = 0; _ffFactor = 0;
+            }
+            _haveSeq = false;
+            _lateCount = 0; _lateAt = 0; _coverMs = 0; // the old connection's lateness must not size the new buffer
+        }
+
+        /// <summary>Packets, lost and late since the last call: how the connection is coping.</summary>
+        public (int Packets, int Lost, int Late) TakeStats() =>
+            (Interlocked.Exchange(ref _statPackets, 0), Interlocked.Exchange(ref _statLost, 0), Interlocked.Exchange(ref _statLate, 0));
+
         /// <summary>Audio delay right now: what is buffered plus the device, in ms. -1 when idle.</summary>
-        /// <summary>The playback device, for the log.</summary>
-        public string DeviceInfo = "none yet";
+        public int DelayMs { get { lock (_gate) return DelayUnlocked(); } }
+        private int DelayUnlocked() => _playing ? (int)Math.Round(_avgMs + _periodMs) : -1;
 
-        /// <summary>Test only: play silence, with all the timing of the real thing.</summary>
-        public bool Mute;
+        // ---- Diagnostics for the log and the audio test ----
         private int _diagDry, _diagSkips, _diagLost, _diagLate, _diagSpurts;
-        private readonly uint[] _diagSeqs = new uint[16];
-        private int _diagSeqAt;
-        private string? _diagOrder;
-        private double _diagSkippedMs, _diagLevelMin = double.MaxValue, _diagLevelMax;
+        private double _diagSkippedMs, _diagFastMs, _diagLevelMin = double.MaxValue, _diagLevelMax;
+        private float _diagJump, _prevOut; // biggest sample-to-sample step: a pop shows up as a big one
 
-        /// <summary>Test only: what happened since the last call.</summary>
+        /// <summary>What happened since the last call.</summary>
         public string Diagnose()
         {
             lock (_gate)
             {
-                string s = $"lost {_diagLost}, late {_diagLate}, restarts {_diagSpurts}, dry {_diagDry}, skips {_diagSkips} ({_diagSkippedMs:0} ms), buffer {(_diagLevelMin == double.MaxValue ? 0 : _diagLevelMin):0.0}-{_diagLevelMax:0.0} ms, target {_targetMs + _periodMs:0.0} ms, device period {_periodMs:0.0} ms, delay {DelayMsUnlocked()} ms";
-                if (_diagOrder != null) { s += " | arrival order: " + _diagOrder; _diagOrder = null; }
-                _diagDry = 0; _diagSkips = 0; _diagLost = 0; _diagLate = 0; _diagSpurts = 0; _diagSkippedMs = 0; _diagLevelMin = double.MaxValue; _diagLevelMax = 0;
+                string s = $"lost {_diagLost}, late {_diagLate}, restarts {_diagSpurts}, dry {_diagDry}, skips {_diagSkips} ({_diagSkippedMs:0} ms)" +
+                    $", fast-forwarded {_diagFastMs:0} ms, buffer {(_diagLevelMin == double.MaxValue ? 0 : _diagLevelMin):0.0}-{_diagLevelMax:0.0} ms" +
+                    $", target {_targetMs + _periodMs:0.0} ms, device period {_periodMs:0.0} ms, delay {DelayUnlocked()} ms, biggest step {_diagJump:0.0000000}";
+                _diagDry = 0; _diagSkips = 0; _diagLost = 0; _diagLate = 0; _diagSpurts = 0; _diagJump = 0;
+                _diagSkippedMs = 0; _diagFastMs = 0; _diagLevelMin = double.MaxValue; _diagLevelMax = 0;
                 return s;
             }
         }
 
-        private int DelayMsUnlocked() => _playing ? (int)Math.Round(_avgMs + _periodMs) : -1;
-
-        public int DelayMs
-        {
-            get { lock (_gate) return _playing ? (int)Math.Round(_avgMs + _periodMs) : -1; }
-        }
-
-        /// <summary>Called from the network thread with one packet; empty means a silent one.</summary>
         /// <summary>
-        /// One packet: always 5.8 ms of sound, at inRate (lower while the
-        /// connection struggles), straight to the device's rate in one step.
-        /// Empty pcm means a silent packet.
+        /// One packet: always 5.8 ms of sound, at inRate (lower while the connection
+        /// struggles), straight to the device's rate in one step. Empty pcm means a
+        /// silent packet. Called from the network thread only.
         /// </summary>
         public void Push(uint seq, ReadOnlySpan<byte> pcm, int frames = Protocol.PacketFrames, int inRate = Protocol.AudioRate)
         {
             int rate = _deviceRate;
             if (rate == 0) return;
+            if (pcm.IsEmpty && _rsIn != 0) inRate = _rsIn; // silence at the current rate: no needless rate change
+
+            Resampler? finishing = null;
+            float holdL = 0, holdR = 0;
             if (_rs == null || _rsRate != rate || _rsIn != inRate)
             {
                 bool rateChanged = _rs != null && _rsRate == rate;
+                if (rateChanged)
+                {
+                    // The host changed sample rate. Glide: play out what the old rate still
+                    // holds, and start the new one from its last value. No gap, dip or pop.
+                    finishing = _rs;
+                    if (_lastFrames > 0) { holdL = _last[(_lastFrames - 1) * 2]; holdR = _last[(_lastFrames - 1) * 2 + 1]; }
+                }
                 _rs = new Resampler(inRate, rate);
+                if (rateChanged) _rs.Prime(holdL, holdR);
+                else { _haveSeq = false; _fadeIn = true; }
                 _rsRate = rate;
                 _rsIn = inRate;
                 _lastFrames = 0; // the old rate's last packet cannot stand in for a lost one
-                if (!rateChanged) _haveSeq = false;
-                _fadeIn = true;
             }
 
             double now = Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
@@ -181,39 +183,23 @@ namespace TailRemote
                 _fadeIn = true;
             }
 
-            // How late this packet is, against the earliest any packet has been.
-            // The reference creeps later at 200 ppm so a host clock that runs
-            // slow is not mistaken for growing lateness.
+            // How late this packet is, against the earliest any packet has been. The
+            // reference creeps later at 200 ppm so a slow host clock is not mistaken
+            // for growing lateness.
             double raw = now - (int)(seq - _spurtSeq) * PacketMs;
             _ref = Math.Min(raw, _ref + PacketMs * 0.0002);
-            RecordJitter(now, raw - _ref);
-            // Every packet's lateness, for the last 10 seconds.
             _late[_lateAt++ % _late.Length] = (float)Math.Min(raw - _ref, 400);
             if (_lateCount < _late.Length) _lateCount++;
-
-            lock (_gate)
-            {
-                if (_starved && !newSpurt && diff == 0) { _extraMs = Math.Min(_extraMs + 3, 60); _statStarved++; } // ran dry mid-sound
-                _starved = false;
-            }
-            _extraMs *= 0.9997; // back down about 5% a second
             UpdateTarget();
 
             Interlocked.Increment(ref _statPackets);
-            _diagSeqs[_diagSeqAt++ & 15] = seq;
-            if (diff < 0 && _diagOrder == null)
-            {
-                var order = new System.Text.StringBuilder();
-                for (int i = 0; i < 16; i++) order.Append(_diagSeqs[(_diagSeqAt + i) & 15] % 1000).Append(' ');
-                _diagOrder = order.ToString();
-            }
-            if (diff < 0) { Interlocked.Increment(ref _statLate); _diagLate++; return; } // late; its moment has passed
+            if (diff < 0) { Interlocked.Increment(ref _statLate); _diagLate++; return; } // late: its moment has passed
             if (diff > 0) { Interlocked.Add(ref _statLost, diff); _diagLost += diff; }
             _haveSeq = true;
             _expect = seq + 1;
 
-            _rs.SetSpeed(Volatile.Read(ref _speed));
             _scratchLen = 0;
+            finishing?.Flush(holdL, holdR, _collect ??= Collect);
             for (int lost = 0; lost < diff; lost++)
             {
                 // Lost: fade the last packet out over the first gap, then silence,
@@ -257,57 +243,33 @@ namespace TailRemote
             }
         }
 
-        private void RecordJitter(double nowMs, double lateMs)
+        /// <summary>Frames in one 5.8 ms packet at this rate, carrying the fraction so time never drifts.</summary>
+        private int PacketAt(int inRate)
         {
-            long sec = (long)(nowMs / 1000);
-            if (sec != _bucketSecond)
-            {
-                // Clear the buckets for the seconds that went by.
-                for (long s = Math.Max(_bucketSecond + 1, sec - JitterBuckets + 1); s <= sec; s++)
-                    _jitter[s % JitterBuckets] = 0;
-                _bucketSecond = sec;
-            }
-            int b = (int)(sec % JitterBuckets);
-            if (lateMs > _jitter[b]) _jitter[b] = Math.Min(lateMs, 400);
+            if (inRate == Protocol.AudioRate) return Protocol.PacketFrames;
+            double exact = Protocol.PacketFrames * (double)inRate / Protocol.AudioRate + _silenceCarry;
+            int n = (int)exact;
+            _silenceCarry = exact - n;
+            return n;
         }
 
-        // Lateness of the last 1720 packets (10 seconds), and the target worked out from it.
-        private readonly float[] _late = new float[1720];
-        private readonly float[] _lateSorted = new float[1720];
-        private int _lateAt, _lateCount, _sinceTarget;
-        private float _coverMs;
-
         /// <summary>
-        /// Sized to the connection, then held steady. Packets never arrive evenly
-        /// over Wi-Fi and Tailscale (20 to 50 ms of bunching is normal), and a
-        /// buffer smaller than that runs dry and overflows over and over: the
-        /// chopping in Brock's 1.7.6 log, with 172 packets a second all arriving.
-        /// So the buffer covers 98% of how late packets were over the last 10
-        /// seconds, worked out every half second. A rare spike (a Wi-Fi scan)
-        /// costs one short gap instead of raising the delay for everyone. It rises
-        /// at once when needed and comes down a little at a time, and the player
-        /// reaches it by playing up to 1% fast or slow, never by cutting.
+        /// The buffer covers 98% of the last 10 seconds' lateness, worked out every
+        /// half second: up at once, down 20% of the way each time. A rare spike (a
+        /// Wi-Fi scan) costs one short gap rather than raising the delay.
         /// </summary>
         private void UpdateTarget()
         {
-            if (++_sinceTarget >= 86 && _lateCount >= 86) // about every half second
+            if (++_sinceTarget >= 86 && _lateCount >= 86)
             {
                 _sinceTarget = 0;
                 Array.Copy(_late, _lateSorted, _lateCount);
                 Array.Sort(_lateSorted, 0, _lateCount);
                 float p98 = _lateSorted[(int)(_lateCount * 0.98) - 1];
-                _coverMs = p98 > _coverMs ? p98 : _coverMs + (p98 - _coverMs) * 0.2f; // up at once, down gently
+                _coverMs = p98 > _coverMs ? p98 : _coverMs + (p98 - _coverMs) * 0.2f;
             }
-            _targetMs = (float)(PacketMs + MarginMs + _coverMs + Math.Max(0, HostBurstMs - 11));
+            _targetMs = (float)(PacketMs + MarginMs + _coverMs);
         }
-
-        /// <summary>
-        /// The largest chunk the host's capture device hands over at once (ms),
-        /// sent by the host. A normal 10 ms device adds nothing; a device that
-        /// hands over 30 ms at a time adds 20 ms. Fixed for that device: it never
-        /// grows with the network.
-        /// </summary>
-        public volatile int HostBurstMs;
 
         private void Collect(float l, float r)
         {
@@ -366,7 +328,7 @@ namespace TailRemote
 
             lock (_gate)
             {
-                _read = 0; _count = 0; _playing = false; _starved = false;
+                _read = 0; _count = 0; _playing = false; _ffFactor = 0;
                 _periodMs = periodMs;
             }
             _deviceRate = fmt.Rate;
@@ -411,6 +373,8 @@ namespace TailRemote
             int ch = fmt.Channels;
             int cap = _ring.Length;
             double floatsPerMs = fmt.Rate * 2 / 1000.0;
+            int fadeLen = Math.Max(1, fmt.Rate / 500); // 2 ms
+            int grainLen = Math.Max(fadeLen * 3, fmt.Rate / 100); // 10 ms fast-forward pieces
             lock (_gate)
             {
                 double target = _targetMs + _periodMs;
@@ -422,27 +386,32 @@ namespace TailRemote
                 if (_playing)
                 {
                     _avgMs += 0.02 * (levelMs - _avgMs);
-                    // Steer toward the target: 10 ms off plays 0.5% fast or slow.
-                    // Steer back to the target by playing up to 1% fast or slow (10 ms off = 1%),
-                    // which nobody hears. Normal swings are smoothed out this way, never cut.
-                    double speed = Math.Clamp((_avgMs - target) * 0.001, -0.01, 0.01);
-                    Volatile.Write(ref _speed, speed);
-
-                    // Only a real pile-up (60 ms over, after a network stall) is cut back at
-                    // once. Cutting at 20 ms threw away about 100 ms of sound a second on Wi-Fi.
-                    if (levelMs > target + 60)
+                    double over = levelMs - target;
+                    if (SpeedUp && over < 300)
                     {
-                        int drop = (int)((levelMs - target) * floatsPerMs) & ~1;
-                        _read = (_read + drop) % cap;
-                        _count -= drop;
-                        _avgMs = target;
-                        _gain = 0; // fade in after the jump rather than click
-                        _diagSkips++;
-                        _diagSkippedMs += drop / floatsPerMs;
+                        // Fast-forward: on at 12 ms behind on average (or 40 at once), 4x from
+                        // 120 ms behind, off once back within 2 ms.
+                        if (_ffFactor == 0 && (_avgMs > target + 12 || over > 40)) { _ffFactor = 2; _grainPos = 0; }
+                        if (_ffFactor > 0) _ffFactor = over <= 2 ? 0 : over > 120 ? 4 : 2;
+                    }
+                    else if (_avgMs > target + 12 || over > 60)
+                    {
+                        // Skip straight back to the target, fading over 2 ms so it does not click.
+                        int drop = (int)(over * floatsPerMs) & ~1;
+                        if (drop > 0)
+                        {
+                            _read = (_read + drop) % cap;
+                            _count -= drop;
+                            _avgMs = target;
+                            _gain = 0;
+                            _ffFactor = 0;
+                            _diagSkips++;
+                            _diagSkippedMs += drop / floatsPerMs;
+                        }
                     }
                 }
 
-                int fadeLen = Math.Max(1, fmt.Rate / 500); // 2 ms
+                int keep = (int)(target * floatsPerMs) & ~1;
                 for (int f = 0; f < frames; f++)
                 {
                     float l = 0, r = 0;
@@ -451,9 +420,9 @@ namespace TailRemote
                         // Ran dry: refill to the target. Glide out from the last sample
                         // instead of dropping to zero, which is what clicked.
                         _playing = false;
-                        _starved = true;
                         _fadeOut = fadeLen;
                         _gain = 0;
+                        _ffFactor = 0;
                         _diagDry++;
                     }
                     if (_playing)
@@ -462,6 +431,25 @@ namespace TailRemote
                         _read = (_read + 2) % cap;
                         _count -= 2;
                         if (_gain < 1f) { _gain = Math.Min(1f, _gain + 1f / fadeLen); l *= _gain; r *= _gain; }
+                        if (_ffFactor > 0)
+                        {
+                            // A 10 ms piece at its own pitch: fade its end, then jump over the
+                            // next one (2x) or three (4x). Jumbled, never pitch-shifted.
+                            int left = grainLen - ++_grainPos;
+                            if (left < fadeLen) { float g = (float)left / fadeLen; l *= g; r *= g; }
+                            if (_grainPos >= grainLen)
+                            {
+                                _grainPos = 0;
+                                _gain = 0;
+                                int jump = (_ffFactor - 1) * grainLen * 2;
+                                if (_count - jump > keep)
+                                {
+                                    _read = (_read + jump) % cap;
+                                    _count -= jump;
+                                    _diagFastMs += jump / floatsPerMs;
+                                }
+                            }
+                        }
                         _lastL = l; _lastR = r;
                     }
                     else if (_fadeOut > 0)
@@ -470,6 +458,12 @@ namespace TailRemote
                         l = _lastL * g; r = _lastR * g;
                         _fadeOut--;
                     }
+                    if (_playing || _fadeOut > 0)
+                    {
+                        float step = Math.Abs(l - _prevOut);
+                        if (step > _diagJump) _diagJump = step;
+                    }
+                    _prevOut = l;
                     if (Mute) { l = 0; r = 0; }
                     if (fmt.IsFloat && fmt.Bits == 32)
                     {

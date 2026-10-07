@@ -1,3 +1,19 @@
+1.7.8
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: the pitch of the sound wobbled. TailRemote sped the sound up and slowed it down a little to keep its delay steady, and you could hear it. The pitch now never changes. When the sound falls behind, TailRemote skips ahead to catch up, with a tiny fade so it does not click.
+New feature: Catch up by fast-forwarding (Alt Y, off at first). Instead of skipping, the sound plays at 2x, or 4x if it is far behind, until it has caught up. It keeps its pitch, so it sounds like a quick jumbled fast-forward rather than chipmunks.
+Changed: when the connection gets better, the sound goes back to full quality at once instead of a second later.
+Changed: switching between sound qualities now glides from one to the next with no gap, pop or extra delay.
+Bug fixed: changing the output that the host captures from could make the sound stutter for a moment.
+Bug fixed: if you pressed Control Alt Delete or locked this PC while controlling the other one, Control and Alt could stay held down on the other PC.
+Bug fixed: pressing Connect twice quickly could start two connections.
+Bug fixed: in Host mode, Alt A meant both Capture sound from and Apply settings to the service. Apply settings to the service is now Alt S.
+Bug fixed: if TailRemote closed unexpectedly, it did not always come back hosting or connected after the next start.
+Bug fixed: Port editor said its error messages twice with NVDA.
+Bug fixed: the service's log was wiped when it got big. The older half is now kept in service.log.old.
+Changed: an update is only installed when GitHub gives a checksum to check the download against.
+Changed: TailRemote no longer sends sound in the old format from version 1.4. A PC still on 1.4 gets the sound uncompressed instead.
+
 1.7.7
 Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the sound chopped over Wi-Fi even though every packet arrived. Packets never arrive evenly over Wi-Fi, and the tiny fixed buffer kept running dry and throwing sound away, about a tenth of a second every second. The buffer now sizes itself to how unevenly packets really arrive and then holds steady, so the delay stays the same while the sound stays smooth. Expect about 30 ms on a wired connection and somewhat more over Wi-Fi.

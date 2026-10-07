@@ -42,20 +42,20 @@ namespace TailRemote
         public const byte ReleaseAll = 3;
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
-        public const byte AudioQuality = 6;  // u8 0..4: bits to drop while the connection struggles (0 = lossless)
+        public const byte AudioQuality = 6;  // u8: the sample-rate step the client wants (an index into Rates; 0 = 44.1 kHz)
         // Either way
         public const byte Features = 0x40;   // u32 flags
         public const byte Clipboard = 0x41;  // UTF-8 text
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
         public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
-        public const byte CaptureBurst = 0x84; // u16 ms: the largest chunk the host's capture device hands over at once
+        // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
         public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
         public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
-        public const byte UdpPacked = 0xA3;  // u32 sequence, losslessly packed audio (Lossless.cs)
+        // 0xA3 was the first lossless coder (1.4): no longer sent, never reuse it
         public const byte UdpPacked2 = 0xA4; // u32 sequence, Lossless2 (smaller; carries its quality)
         public const byte UdpPackedRate = 0xA5; // u32 sequence, Lossless2 at a lower sample rate (carries rate and length)
 
@@ -65,7 +65,7 @@ namespace TailRemote
         // Feature flags
         public const uint FeatureClipboard = 1;
         public const uint FeatureFiles = 2;
-        public const uint FeatureLossless = 4;
+        public const uint FeatureLossless = 4; // the 1.4 coder: no longer sent or understood
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
         public const uint FeatureLossless2 = 32;
@@ -78,7 +78,7 @@ namespace TailRemote
         public static readonly int[] Rates = { 44100, 32000, 24000, 16000, 11025, 8000 };
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart | FeatureLossless2 | FeatureRate;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureLossless2 | FeatureRate;
 
         public const int MaxClipboardChars = 1_000_000;
 

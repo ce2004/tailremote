@@ -28,6 +28,8 @@ namespace TailRemote
         public string ListenPasswordEnc { get; set; } = "";
         public bool ShareClipboard { get; set; } = true;
         public bool Logging { get; set; }
+        /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
+        public bool CatchUpBySpeed { get; set; }
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();
 
         [JsonIgnore]
@@ -57,13 +59,8 @@ namespace TailRemote
         [JsonIgnore]
         public string Password
         {
-            get
-            {
-                if (PasswordEnc.Length == 0) return "";
-                try { return Encoding.UTF8.GetString(Native.Protect(Convert.FromBase64String(PasswordEnc), false)); }
-                catch { return ""; }
-            }
-            set => PasswordEnc = value.Length == 0 ? "" : Convert.ToBase64String(Native.Protect(Encoding.UTF8.GetBytes(value), true));
+            get => Unprotect(PasswordEnc);
+            set => PasswordEnc = Protect(value);
         }
 
         public static Settings Load()
