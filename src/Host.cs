@@ -13,7 +13,7 @@ namespace TailRemote
     /// </summary>
     internal sealed class Host : IDisposable
     {
-        private readonly string _password;
+        private readonly byte[] _key;
         private readonly bool _tailscaleOnly;
         private readonly Action<string> _status;
         private readonly TcpListener _listener;
@@ -37,17 +37,30 @@ namespace TailRemote
 
         public Host(int port, string password, bool tailscaleOnly, Action<string> status)
         {
-            _password = password;
+            _key = Protocol.DeriveKey(password);
             _tailscaleOnly = tailscaleOnly;
             _status = status;
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
             _listener.Server.DualMode = true;
-            _listener.Start();
-
             _udp = new UdpClient(AddressFamily.InterNetworkV6);
             _udp.Client.DualMode = true;
-            _udp.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+            // Exclusive: no other program may share the port while TailRemote holds it.
+            _listener.ExclusiveAddressUse = true;
+            _udp.Client.ExclusiveAddressUse = true;
+            try
+            {
+                _listener.Start();
+                _udp.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, port));
+            }
+            catch (SocketException e)
+            {
+                _listener.Stop();
+                _udp.Dispose();
+                throw new InvalidOperationException(e.SocketErrorCode == SocketError.AccessDenied
+                    ? "Port " + port + " is reserved by Windows on this PC. Choose another port."
+                    : "Port " + port + " is already used by another program on this PC. Choose another port.");
+            }
             IgnoreUdpResets(_udp.Client);
 
             new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote accept" }.Start();
@@ -59,7 +72,7 @@ namespace TailRemote
             _stop = true;
             try { _listener.Stop(); } catch { }
             try { _udp.Dispose(); } catch { }
-            lock (_gate) { if (_session != null) End(_session, null); }
+            lock (_gate) { if (_session != null) End(_session, null); _session = null; }
         }
 
         /// <summary>
@@ -106,12 +119,14 @@ namespace TailRemote
                 nonce.CopyTo(hello, 4);
                 stream.Write(hello);
 
-                byte[] answer = new byte[36];
+                byte[] answer = new byte[52];
                 Protocol.ReadExactly(stream, answer);
+                byte[] clientNonce = answer[4..20];
                 bool ok = answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic) &&
-                          CryptographicOperations.FixedTimeEquals(answer.AsSpan(4), Protocol.Proof(_password, nonce));
+                          CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_key, 'C', nonce, clientNonce));
                 if (!ok)
                 {
+                    Thread.Sleep(2000); // slows down anyone guessing passwords
                     stream.Write(new byte[] { 0 });
                     _status("Refused " + remote + ": wrong password.");
                     tcp.Dispose();
@@ -119,23 +134,27 @@ namespace TailRemote
                 }
 
                 byte[] token = RandomNumberGenerator.GetBytes(8);
-                byte[] accept = new byte[9];
+                byte[] accept = new byte[41];
                 accept[0] = 1;
                 token.CopyTo(accept, 1);
+                Protocol.Proof(_key, 'H', clientNonce, nonce).CopyTo(accept, 9);
                 stream.Write(accept);
-                stream.ReadTimeout = Timeout.Infinite;
+                // The client pings every 2 seconds; 10 silent seconds means it is gone,
+                // and ending the session lets go of any keys it was holding.
+                stream.ReadTimeout = 10_000;
 
                 s = new Session { Tcp = tcp, Stream = stream, Token = token, Address = remote };
-                lock (_gate)
-                {
-                    if (_session != null) End(_session, "Replaced by a new connection.");
-                    _session = s;
-                }
-                _status("Connected: " + remote + ".");
                 var session = s;
                 s.Capture = new LoopbackCapture(
                     (seq, pcm) => SendAudio(session, seq, pcm),
                     msg => { _status(msg); try { Protocol.SendMessage(session.Stream, session.WriteLock, msg); } catch { } });
+                lock (_gate)
+                {
+                    if (_stop) { End(s, null); return; }
+                    if (_session != null) End(_session, "Replaced by a new connection.");
+                    _session = s;
+                }
+                _status("Connected: " + remote + ".");
 
                 ReadLoop(s);
             }
@@ -171,8 +190,13 @@ namespace TailRemote
                         ushort vk = BitConverter.ToUInt16(key, 0);
                         ushort scan = BitConverter.ToUInt16(key, 2);
                         bool up = (key[4] & 1) != 0, ext = (key[4] & 2) != 0;
-                        lock (s.Held) { if (up) s.Held.Remove((vk, ext)); else s.Held.Add((vk, ext)); }
-                        Native.SendKey(vk, scan, up, ext);
+                        lock (_gate)
+                        {
+                            // A replaced or closed session must not press anything after its keys were released.
+                            if (_session != s) return;
+                            lock (s.Held) { if (up) s.Held.Remove((vk, ext)); else s.Held.Add((vk, ext)); }
+                            Native.SendKey(vk, scan, up, ext);
+                        }
                         break;
                     case Protocol.Ping:
                         Protocol.ReadExactly(s.Stream, stamp);

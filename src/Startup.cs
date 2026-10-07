@@ -22,7 +22,9 @@ namespace TailRemote
         public static bool FirewallRuleExists() => Run("netsh", "advfirewall firewall show rule name=\"" + RuleName + "\"") == 0;
 
         /// <summary>Asks for administrator rights and makes the change. False if refused or failed.</summary>
-        public static bool Set(bool on)
+        public static System.Threading.Tasks.Task<bool> SetAsync(bool on) => System.Threading.Tasks.Task.Run(() => Set(on));
+
+        private static bool Set(bool on)
         {
             try
             {

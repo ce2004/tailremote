@@ -11,7 +11,7 @@ namespace TailRemote
 
         private readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private readonly TextBox _address = new();
-        private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535 };
+        private readonly TextBox _port = new();
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private readonly CheckBox _tailscaleOnly = new() { Text = "Only accept &Tailscale connections", AutoSize = true };
@@ -19,7 +19,8 @@ namespace TailRemote
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
         private readonly Button _update = new() { Text = "Check for &updates", AutoSize = true };
-        private readonly Button _audioSetup = new() { Text = "Set up &audio device", AutoSize = true };
+        private readonly Button _audioSetup = new() { Text = "Set up au&dio device", AutoSize = true };
+        private readonly Button _audioRemove = new() { Text = "Remove audio de&vice", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
         private readonly Label _addressLabel, _deviceLabel;
@@ -30,6 +31,7 @@ namespace TailRemote
         private KeyCapture? _keys;
         private IntPtr _handle;
         private bool _connecting, _reconnecting;
+        private int _attempt; // bumped to abandon a connection attempt still under way
         private readonly Timer _titleTimer = new() { Interval = 1000 };
         private readonly Timer _retryTimer = new() { Interval = 2000 };
 
@@ -61,6 +63,7 @@ namespace TailRemote
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
             buttons.Controls.Add(_audioSetup);
+            buttons.Controls.Add(_audioRemove);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
             AddRow(table, "Status &log", _log);
@@ -70,7 +73,7 @@ namespace TailRemote
 
             _mode.SelectedIndex = _settings.HostMode ? 1 : 0;
             _address.Text = _settings.Address;
-            _port.Value = Math.Clamp(_settings.Port, 1, 65535);
+            _port.Text = _settings.Port.ToString();
             _password.Text = _settings.Password;
             _tailscaleOnly.Checked = _settings.TailscaleOnly;
             _startup.Checked = Startup.IsEnabled();
@@ -86,6 +89,7 @@ namespace TailRemote
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
             _audioSetup.Click += (_, _) => SetUpAudio();
+            _audioRemove.Click += (_, _) => RemoveAudio();
             _startup.CheckedChanged += (_, _) => StartupChanged();
             _titleTimer.Tick += (_, _) => UpdateTitle();
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
@@ -110,7 +114,6 @@ namespace TailRemote
             _addressLabel.Visible = _address.Visible = !host;
             _deviceLabel.Visible = _device.Visible = !host;
             _toggle.Visible = !host;
-            _audioSetup.Visible = host;
             _tailscaleOnly.Visible = _startup.Visible = host;
             UpdateButtons();
         }
@@ -173,7 +176,7 @@ namespace TailRemote
         {
             _settings.HostMode = HostMode;
             _settings.Address = _address.Text.Trim();
-            _settings.Port = (int)_port.Value;
+            if (int.TryParse(_port.Text.Trim(), out int port)) _settings.Port = port;
             _settings.Password = _password.Text;
             _settings.OutputDevice = _devices[Math.Max(0, _device.SelectedIndex)].Id;
             _settings.TailscaleOnly = _tailscaleOnly.Checked;
@@ -192,11 +195,12 @@ namespace TailRemote
         private void StartHost()
         {
             if (_password.Text.Length == 0) { Say("Set a password first."); _password.Focus(); return; }
+            if (!CheckPort(out int port)) return;
             if (!Startup.FirewallRuleExists()) Log("Tip: if Windows asks about the firewall, allow TailRemote. Turning on Start hosting when Windows starts also adds the rule.");
             try
             {
-                _host = new Host((int)_port.Value, _password.Text, _tailscaleOnly.Checked, msg => BeginInvoke(() => Log(msg)));
-                Say("Hosting on port " + _port.Value + ". Waiting for a connection.");
+                _host = new Host(port, _password.Text, _tailscaleOnly.Checked, msg => Later(() => Log(msg)));
+                Say("Hosting on port " + port + ". Waiting for a connection.");
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
                 else if (Wasapi.OutputDevices().Count == 0)
                 {
@@ -209,6 +213,17 @@ namespace TailRemote
             catch (Exception e) { Say("Could not start hosting: " + e.Message); }
             UpdateButtons();
             UpdateTitle();
+        }
+
+        /// <summary>Refuses a port that is not a number, or that would clash with something else.</summary>
+        private bool CheckPort(out int port)
+        {
+            string? problem = Protocol.PortProblem(_port.Text.Trim(), out port);
+            if (problem == null) return true;
+            Say(problem);
+            _port.Focus();
+            _port.SelectAll();
+            return false;
         }
 
         private void StopHost()
@@ -225,16 +240,24 @@ namespace TailRemote
         {
             string address = _address.Text.Trim();
             if (address.Length == 0) { Say("Type the address first."); _address.Focus(); return; }
+            if (!CheckPort(out int port)) return;
             _connecting = true;
+            int attempt = ++_attempt;
+            bool hadFocus = _go.Focused;
             if (!quiet) { _go.Enabled = false; Say("Connecting to " + address + "."); }
             string pw = _password.Text;
-            int port = (int)_port.Value;
             string device = _devices[Math.Max(0, _device.SelectedIndex)].Id;
             try
             {
                 var c = await System.Threading.Tasks.Task.Run(() =>
-                    Client.Connect(address, port, pw, device, msg => BeginInvoke(() => Log(msg))));
-                c.Disconnected += why => BeginInvoke(() => Disconnect(why, byUser: false));
+                    Client.Connect(address, port, pw, device, msg => Later(() => Say(msg))));
+                if (attempt != _attempt || HostMode || _client != null)
+                {
+                    // Stopped, switched to hosting, or already connected while this was under way.
+                    c.Dispose();
+                    return;
+                }
+                c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
                 _client = c;
                 _keys?.SetClient(c);
                 bool wasReconnecting = _reconnecting;
@@ -242,16 +265,21 @@ namespace TailRemote
                 _retryTimer.Stop();
                 Say(wasReconnecting ? "Reconnected. Press Control Shift Enter to control the remote PC." : "Connected. Press Control Shift Enter to control the remote PC.");
             }
-            catch (Exception e)
+            catch (Exception e) when (attempt == _attempt)
             {
                 bool hopeless = e.Message.StartsWith("Wrong password") || e.Message.Contains("different TailRemote version");
                 if (_reconnecting && hopeless) StopReconnecting("Stopped reconnecting: " + e.Message);
                 else if (!quiet) Say("Could not connect: " + e.Message);
             }
-            _connecting = false;
-            _go.Enabled = true;
-            UpdateButtons();
-            UpdateTitle();
+            catch { } // an abandoned attempt failing: nobody is waiting for it
+            finally
+            {
+                _connecting = false;
+                _go.Enabled = true;
+                if (hadFocus) _go.Focus();
+                UpdateButtons();
+                UpdateTitle();
+            }
         }
 
         private void Disconnect(string why, bool byUser)
@@ -274,6 +302,7 @@ namespace TailRemote
 
         private void StopReconnecting(string why)
         {
+            _attempt++;
             _reconnecting = false;
             _retryTimer.Stop();
             Say(why);
@@ -318,19 +347,44 @@ namespace TailRemote
         private async void SetUpAudio()
         {
             if (AudioSetup.IsReady()) { Say("The TailRemote audio device is already set up."); return; }
-            _audioSetup.Enabled = false;
-            Say("Setting up the TailRemote audio device. Windows asks for administrator permission first.");
+            bool have = AudioSetup.FindCable() != null;
+            string plan = "Set up audio device gives this PC an output called TailRemote, so everything this PC plays can be heard on the other PC. It will:" + Environment.NewLine + Environment.NewLine +
+                (have ? "" :
+                "1. Download VB-Cable, a free virtual audio device by VB-Audio, from vb-audio.com, and check it is genuine." + Environment.NewLine +
+                "2. Open VB-Cable's installer. You press Install Driver." + Environment.NewLine) +
+                (have ? "1. " : "3. ") + "Name VB-Cable's output TailRemote and make it this PC's default output. Your speakers stop being the default." + Environment.NewLine +
+                (have ? "2. " : "4. ") + "Turn off VB-Cable's extra output, CABLE In 16 Ch." + Environment.NewLine + Environment.NewLine +
+                "Windows asks for administrator permission first. Remove audio device undoes all of it.";
+            if (MessageBox.Show(this, plan, "Set up audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+            _audioSetup.Enabled = _audioRemove.Enabled = false;
             bool ok = await AudioSetup.RunElevatedAsync();
-            Log(ok ? "The TailRemote audio device is set up." : "Audio device setup did not finish.");
-            _audioSetup.Enabled = true;
+            Say(ok ? "The TailRemote audio device is set up." : "Audio device setup did not finish.");
+            _audioSetup.Enabled = _audioRemove.Enabled = true;
         }
 
-        private void StartupChanged()
+        private async void RemoveAudio()
+        {
+            if (!AudioSetup.Installed()) { Say("There is no TailRemote audio device on this PC."); return; }
+            var other = AudioSetup.OtherOutput();
+            string plan = "Remove audio device will:" + Environment.NewLine + Environment.NewLine +
+                "1. " + (other != null ? "Make " + other.Value.Name + " the default output." : "There is no other output on this PC, so it will have no sound output afterwards.") + Environment.NewLine +
+                "2. Move programs off the TailRemote device. Any program still using it is cut off." + Environment.NewLine +
+                "3. Remove VB-Cable completely, including its driver. If you use VB-Cable for anything else, that stops working too." + Environment.NewLine + Environment.NewLine +
+                "Windows asks for administrator permission first.";
+            if (MessageBox.Show(this, plan, "Remove audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            _audioSetup.Enabled = _audioRemove.Enabled = false;
+            bool ok = await AudioSetup.RemoveElevatedAsync();
+            Say(ok ? "The TailRemote audio device is removed." : "Removing the audio device did not finish.");
+            _audioSetup.Enabled = _audioRemove.Enabled = true;
+        }
+
+        private async void StartupChanged()
         {
             bool want = _startup.Checked;
             if (want == Startup.IsEnabled()) return;
             SaveSettings();
-            if (Startup.Set(want)) Log(want ? "TailRemote will start hosting, as administrator, when you sign in. The firewall rule was added." : "TailRemote will no longer start with Windows.");
+            Say("Windows asks for administrator permission.");
+            if (await Startup.SetAsync(want)) Say(want ? "TailRemote will start hosting, as administrator, when you sign in. The firewall rule was added." : "TailRemote will no longer start with Windows.");
             else
             {
                 Say("That needs administrator permission, and it was not given.");
@@ -341,7 +395,14 @@ namespace TailRemote
         private void Log(string line)
         {
             _log.AppendText((_log.TextLength > 0 ? Environment.NewLine : "") + DateTime.Now.ToString("HH:mm:ss") + "  " + line);
-            if (_log.Lines.Length > 300) _log.Lines = _log.Lines[^200..];
+            // Trim only while nobody is reading it, so the caret never jumps.
+            if (!_log.Focused && _log.Lines.Length > 300) _log.Lines = _log.Lines[^200..];
+        }
+
+        /// <summary>Runs on the window's thread, from any thread; dropped once the window is gone.</summary>
+        private void Later(Action a)
+        {
+            try { if (IsHandleCreated && !IsDisposed) BeginInvoke(a); } catch { }
         }
 
         /// <summary>Logs a line and speaks it.</summary>

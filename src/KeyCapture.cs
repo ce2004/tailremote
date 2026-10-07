@@ -32,7 +32,7 @@ namespace TailRemote
         private volatile Client? _client;
         private volatile bool _remote;
         private readonly HashSet<(uint Vk, bool Ext)> _held = new();
-        private bool _swallowEnterUp;
+        private bool _swallowEnterUp, _enterHeld;
 
         /// <summary>Raised on the hook thread with true when remote control starts, false when it stops.</summary>
         public event Action<bool>? ModeChanged;
@@ -116,7 +116,15 @@ namespace TailRemote
             // Keys typed by software on this PC (NVDA itself, for one) stay here.
             if ((k.flags & Native.LLKHF_INJECTED) != 0) return Native.CallNextHookEx(_hook, code, wParam, lParam);
 
+            bool enterRepeat = false;
+            if (k.vkCode == VK_RETURN)
+            {
+                enterRepeat = !up && _enterHeld;
+                _enterHeld = !up;
+            }
             if (k.vkCode == VK_RETURN && up && _swallowEnterUp) { _swallowEnterUp = false; return 1; }
+            // Holding Ctrl+Shift+Enter must not flip back and forth with every repeat.
+            if (enterRepeat && _swallowEnterUp) return 1;
 
             bool ctrl, shift, alt, win;
             lock (_held)

@@ -65,7 +65,7 @@ namespace TailRemote
         public static bool IsReady()
         {
             var d = FindCable();
-            if (d == null || Wasapi.ReadString(d, PkeyDevice, 2) != DeviceName) return false;
+            if (d == null || Wasapi.ReadString(d, PkeyDevice, 2) != DeviceName || ExtraOutputs().Count > 0) return false;
             try
             {
                 Wasapi.Enumerator().GetDefaultAudioEndpoint(Wasapi.eRender, Wasapi.eConsole, out var def);
@@ -104,21 +104,28 @@ namespace TailRemote
         {
             if (FindCable() == null)
             {
-                string dir = Path.Combine(Path.GetTempPath(), "TailRemote-vbcable");
+                // Program Files: only administrators can change files there between
+                // the signature check and running the installer.
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "TailRemote-vbcable");
                 byte[] zip = await DownloadAsync(report, ct);
-
-                report("Checking the download.", 100);
-                if (Directory.Exists(dir)) Directory.Delete(dir, true);
-                using (var ms = new MemoryStream(zip)) ZipFile.ExtractToDirectory(ms, dir);
-                string setup = Path.Combine(dir, "VBCABLE_Setup_x64.exe"); // VB-Audio's installer on ARM64 too
-                if (!File.Exists(setup) || !SignedByVbAudio(setup))
-                    throw new InvalidOperationException("The VB-Cable download did not check out as genuine, so it was not run. Try again later.");
-
-                report("VB-Cable's installer is open. Press Install Driver, then wait for it to finish.", -1);
-                using (var p = Process.Start(new ProcessStartInfo(setup) { UseShellExecute = true, WorkingDirectory = dir })
-                    ?? throw new InvalidOperationException("VB-Cable's installer did not start."))
+                try
                 {
+                    report("Checking the download.", 100);
+                    if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                    using (var ms = new MemoryStream(zip)) ZipFile.ExtractToDirectory(ms, dir);
+                    string setup = Path.Combine(dir, "VBCABLE_Setup_x64.exe"); // VB-Audio's installer on ARM64 too
+                    if (!File.Exists(setup) || !SignedByVbAudio(setup))
+                        throw new InvalidOperationException("The VB-Cable download did not check out as genuine, so it was not run. Try again later.");
+
+                    report("VB-Cable's installer is open. Press Install Driver, then wait for it to finish.", -1);
+                    using var p = Process.Start(new ProcessStartInfo(setup) { UseShellExecute = true, WorkingDirectory = dir })
+                        ?? throw new InvalidOperationException("VB-Cable's installer did not start.");
                     await p.WaitForExitAsync(ct);
+                }
+                finally
+                {
+                    // The installer has copied what it needs into Windows; the download goes.
+                    try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
                 }
 
                 report("Waiting for Windows to add the device.", -1);
@@ -141,6 +148,7 @@ namespace TailRemote
             Wasapi.WriteString(dev, PkeyDevice, 2, DeviceName);
             dev.GetId(out string id);
             SetDefault(id);
+            DisableExtraOutputs();
         }
 
         private static bool DriverInstalled() =>
@@ -187,6 +195,137 @@ namespace TailRemote
                     }
                 }
             }
+        }
+
+        // ---- Removal: default elsewhere, then force VB-Cable off the PC ----
+
+        /// <summary>Whether any VB-Cable device is installed, working or not.</summary>
+        public static bool Installed() => DriverInstalled() || FindCable() != null;
+
+        /// <summary>The output that will become the default when VB-Cable goes, or null if there is none.</summary>
+        public static (string Id, string Name)? OtherOutput()
+        {
+            foreach (var d in Wasapi.OutputDevices())
+            {
+                try
+                {
+                    Wasapi.Enumerator().GetDevice(d.Id, out var dev);
+                    if (Wasapi.ReadString(dev, PkeyInterface, 2) != "VB-Audio Virtual Cable") return d;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>Starts the elevated removal window and waits for it. False if refused or it failed.</summary>
+        public static async Task<bool> RemoveElevatedAsync()
+        {
+            try
+            {
+                var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--remove-audio") { UseShellExecute = true, Verb = "runas" });
+                if (p == null) return false;
+                await p.WaitForExitAsync();
+                return p.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The whole removal. Returns the sentence to finish with.</summary>
+        public static async Task<string> RemoveAsync(Action<string, int> report, CancellationToken ct)
+        {
+            report("Making another output the default.", 10);
+            var other = OtherOutput();
+            if (other != null) SetDefault(other.Value.Id);
+
+            // Programs following the default (TailRemote's own capture among
+            // them) move off the cable within a second; the rest are cut off.
+            report("Letting programs move off it.", 25);
+            await Task.Delay(1500, ct);
+
+            report("Removing VB-Cable's devices.", 45);
+            bool reboot = false;
+            var infs = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            RemoveDevices(infs, ref reboot);
+
+            report("Removing VB-Cable's driver.", 75);
+            foreach (string inf in infs) SetupUninstallOEMInfW(inf, 1 /* SUOI_FORCEDELETE */, IntPtr.Zero);
+            RunHidden("sc.exe", "delete VBAudioVACMME");
+            string drivers = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "drivers");
+            foreach (string sys in new[] { "vbaudio_cable64_win10.sys", "vbaudio_cable64arm_win10.sys" })
+            {
+                string f = Path.Combine(drivers, sys);
+                if (!File.Exists(f)) continue;
+                try { File.Delete(f); }
+                catch { MoveFileExW(f, null, 4 /* MOVEFILE_DELAY_UNTIL_REBOOT */); reboot = true; }
+            }
+
+            report("Checking.", 95);
+            for (int i = 0; i < 10 && FindCable() != null; i++) await Task.Delay(300, ct);
+            if (FindCable() != null) reboot = true;
+            string now = other != null ? " The default output is now " + other.Value.Name + "." : " This PC has no other sound output now.";
+            return reboot
+                ? "VB-Cable is removed. Restart Windows to finish." + now
+                : "VB-Cable is removed." + now;
+        }
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwnd, uint flags);
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiEnumDeviceInfo(IntPtr set, uint index, ref SP_DEVINFO_DATA data);
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr set, ref SP_DEVINFO_DATA data, uint property, out uint regType, byte[]? buffer, uint size, out uint required);
+        [DllImport("setupapi.dll")]
+        private static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+        [DllImport("newdev.dll", SetLastError = true)]
+        private static extern bool DiUninstallDevice(IntPtr hwnd, IntPtr set, ref SP_DEVINFO_DATA data, uint flags, out bool reboot);
+        [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool SetupUninstallOEMInfW(string inf, uint flags, IntPtr reserved);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool MoveFileExW(string from, string? to, uint flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVINFO_DATA { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+
+        /// <summary>Uninstalls every VB-Cable device, present or not, noting their driver packages.</summary>
+        private static void RemoveDevices(System.Collections.Generic.HashSet<string> infs, ref bool reboot)
+        {
+            var media = new Guid("4d36e96c-e325-11ce-bfc1-08002be10318");
+            IntPtr set = SetupDiGetClassDevsW(ref media, IntPtr.Zero, IntPtr.Zero, 0); // 0: not only present ones
+            if (set == new IntPtr(-1)) return;
+            try
+            {
+                var data = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
+                for (uint i = 0; SetupDiEnumDeviceInfo(set, i, ref data); i++)
+                {
+                    if (!(Property(set, ref data, 1 /* SPDRP_HARDWAREID */) ?? "").Contains("VBAudioVACWDM", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (Property(set, ref data, 9 /* SPDRP_DRIVER */) is string key)
+                    {
+                        using var k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Class\" + key);
+                        if (k?.GetValue("InfPath") is string inf && inf.StartsWith("oem", StringComparison.OrdinalIgnoreCase)) infs.Add(inf);
+                    }
+                    if (DiUninstallDevice(IntPtr.Zero, set, ref data, 0, out bool r) && r) reboot = true;
+                }
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
+        }
+
+        private static string? Property(IntPtr set, ref SP_DEVINFO_DATA data, uint prop)
+        {
+            SetupDiGetDeviceRegistryPropertyW(set, ref data, prop, out _, null, 0, out uint need);
+            if (need == 0) return null;
+            byte[] buf = new byte[need];
+            if (!SetupDiGetDeviceRegistryPropertyW(set, ref data, prop, out _, buf, need, out _)) return null;
+            return System.Text.Encoding.Unicode.GetString(buf).Replace('\0', ' ').Trim();
+        }
+
+        private static void RunHidden(string file, string args)
+        {
+            try
+            {
+                using var p = Process.Start(new ProcessStartInfo(file, args) { CreateNoWindow = true, UseShellExecute = false });
+                p?.WaitForExit(10000);
+            }
+            catch { }
         }
 
         // ---- Is the installer really VB-Audio's? Windows' own signature check. ----
@@ -252,6 +391,38 @@ namespace TailRemote
             void GetProcessingPeriod(); void SetProcessingPeriod(); void GetShareMode(); void SetShareMode();
             void GetPropertyValue(); void SetPropertyValue();
             [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
+            [PreserveSig] int SetEndpointVisibility([MarshalAs(UnmanagedType.LPWStr)] string id, int visible);
+        }
+
+        /// <summary>
+        /// VB-Cable's driver always adds a second output, "CABLE In 16 Ch". Only
+        /// the first cable is wanted, so the extra one is disabled, the same as
+        /// Disable in the Sound settings.
+        /// </summary>
+        private static void DisableExtraOutputs()
+        {
+            var pc = (IPolicyConfig)new PolicyConfigCo();
+            foreach (string id in ExtraOutputs()) pc.SetEndpointVisibility(id, 0);
+        }
+
+        private static System.Collections.Generic.List<string> ExtraOutputs()
+        {
+            var ids = new System.Collections.Generic.List<string>();
+            try
+            {
+                Wasapi.Enumerator().EnumAudioEndpoints(Wasapi.eRender, Wasapi.DEVICE_STATE_ACTIVE, out var coll);
+                coll.GetCount(out uint n);
+                for (uint i = 0; i < n; i++)
+                {
+                    coll.Item(i, out var dev);
+                    if (Wasapi.ReadString(dev, PkeyInterface, 2) != "VB-Audio Virtual Cable") continue;
+                    if (Wasapi.ReadString(dev, PkeyDevice, 2) is "TailRemote" or "CABLE Input") continue;
+                    dev.GetId(out string id);
+                    ids.Add(id);
+                }
+            }
+            catch { }
+            return ids;
         }
 
         public static void SetDefault(string id)

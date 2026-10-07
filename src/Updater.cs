@@ -61,16 +61,26 @@ namespace TailRemote
         {
             string exe = Environment.ProcessPath!;
             string fresh = exe + ".new", old = exe + ".old";
-            using (var h = Http())
+            try
             {
-                byte[] data = await h.GetByteArrayAsync(r.Url);
-                if (r.Sha256 != null && !Convert.ToHexString(SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("The download was damaged. Nothing was changed.");
-                await File.WriteAllBytesAsync(fresh, data);
+                using (var h = Http())
+                {
+                    byte[] data = await h.GetByteArrayAsync(r.Url);
+                    if (r.Sha256 != null && !Convert.ToHexString(SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The download was damaged. Nothing was changed.");
+                    await File.WriteAllBytesAsync(fresh, data);
+                }
+                if (File.Exists(old)) File.Delete(old);
+                File.Move(exe, old);
+                File.Move(fresh, exe);
             }
-            if (File.Exists(old)) File.Delete(old);
-            File.Move(exe, old);
-            File.Move(fresh, exe);
+            catch
+            {
+                // Leave nothing half-done behind: the running exe stays where it was.
+                try { if (!File.Exists(exe) && File.Exists(old)) File.Move(old, exe); } catch { }
+                try { File.Delete(fresh); } catch { }
+                throw;
+            }
             Process.Start(new ProcessStartInfo(exe, args + " --after-update " + Environment.ProcessId) { UseShellExecute = false });
         }
 

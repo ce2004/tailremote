@@ -83,8 +83,15 @@ namespace TailRemote
                 while (!_stop)
                 {
                     ev.WaitOne(5); // loopback events are not guaranteed on every build; poll too
-                    while (cap.GetNextPacketSize(out uint next) == 0 && next > 0)
+                    while (true)
                     {
+                        int nhr = cap.GetNextPacketSize(out uint next);
+                        if (nhr < 0) throw Marshal.GetExceptionForHR(nhr)!; // device reset: reopen
+                        if (next == 0) break;
+                        // Nothing played for a while: move the packet count on by the
+                        // gap, so the player sees a fresh start, not a very late packet.
+                        long gap = Environment.TickCount64 - lastDataAt;
+                        if (gap > 20 && _fill == 0) _seq += (uint)(gap * Protocol.AudioRate / 1000 / Protocol.PacketFrames);
                         int hr = cap.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out _);
                         if (hr < 0) throw Marshal.GetExceptionForHR(hr)!;
                         if (stereo.Length < frames * 2) stereo = new float[frames * 4];

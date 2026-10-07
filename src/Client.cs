@@ -17,6 +17,7 @@ namespace TailRemote
         private readonly object _writeLock = new();
         private volatile bool _closed;
         private long _lastPong;
+        private int _closing;
 
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
@@ -67,17 +68,25 @@ namespace TailRemote
                     throw new InvalidOperationException(hello.AsSpan(0, 3).SequenceEqual("TRM"u8)
                         ? "The other PC has a different TailRemote version. Update both to the latest."
                         : "That is not a TailRemote host.");
-                byte[] answer = new byte[36];
+                byte[] key = Protocol.DeriveKey(password);
+                byte[] hostNonce = hello[4..];
+                byte[] myNonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+                byte[] answer = new byte[52];
                 Protocol.Magic.CopyTo(answer, 0);
-                Protocol.Proof(password, hello[4..]).CopyTo(answer, 4);
+                myNonce.CopyTo(answer, 4);
+                Protocol.Proof(key, 'C', hostNonce, myNonce).CopyTo(answer, 20);
                 stream.Write(answer);
 
                 byte[] result = new byte[1];
                 Protocol.ReadExactly(stream, result);
                 if (result[0] != 1) throw new InvalidOperationException("Wrong password.");
-                byte[] token = new byte[8];
+                byte[] token = new byte[8], hostProof = new byte[32];
                 Protocol.ReadExactly(stream, token);
-                stream.ReadTimeout = Timeout.Infinite;
+                Protocol.ReadExactly(stream, hostProof);
+                if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(hostProof, Protocol.Proof(key, 'H', myNonce, hostNonce)))
+                    throw new InvalidOperationException("That PC does not know the password, so nothing was sent to it. Check the address.");
+                // The host pings back every 2 seconds; 10 silent seconds means it is gone.
+                stream.ReadTimeout = 10_000;
 
                 var hostEp = (IPEndPoint)tcp.Client.RemoteEndPoint!;
                 var udp = new UdpClient(AddressFamily.InterNetworkV6);
@@ -107,7 +116,7 @@ namespace TailRemote
 
         private void Close(string? why)
         {
-            if (_closed) return;
+            if (Interlocked.Exchange(ref _closing, 1) == 1) return;
             _closed = true;
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }

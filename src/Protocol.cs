@@ -14,14 +14,20 @@ namespace TailRemote
     /// in order. UDP carries the audio: a late audio packet is worthless, so it is
     /// never waited for or resent. Tailscale already encrypts both.
     ///
-    /// Handshake: host sends "TRM2" + 16-byte nonce. Client answers "TRM2" +
-    /// HMAC-SHA256(password, nonce). Host answers 1 + 8-byte session token, or 0.
+    /// Handshake, where key = PBKDF2-SHA256(password, 200000 rounds), slow on
+    /// purpose so a recorded handshake cannot be guessed quickly:
+    ///   host:   "TRM3" + host nonce (16)
+    ///   client: "TRM3" + client nonce (16) + HMAC(key, "C" + host nonce + client nonce)
+    ///   host:   0 after a 2 s pause (wrong password), or
+    ///           1 + session token (8) + HMAC(key, "H" + client nonce + host nonce)
+    /// The client checks the host's proof too, so a PC that does not know the
+    /// password never receives a single key.
     /// After that both sides send frames of [type][payload].
     /// </summary>
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM2"u8.ToArray();
+        public static readonly byte[] Magic = "TRM3"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -40,10 +46,16 @@ namespace TailRemote
         public const int PacketFrames = 256; // 5.8 ms; 1029 bytes, under Tailscale's 1280 MTU
         public const int AudioPacketBytes = 5 + PacketFrames * 4;
 
-        public static byte[] Proof(string password, byte[] nonce)
+        public static byte[] DeriveKey(string password) =>
+            Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32);
+
+        public static byte[] Proof(byte[] key, char side, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
         {
-            using var h = new HMACSHA256(Encoding.UTF8.GetBytes(password));
-            return h.ComputeHash(nonce);
+            byte[] msg = new byte[1 + first.Length + second.Length];
+            msg[0] = (byte)side;
+            first.CopyTo(msg.AsSpan(1));
+            second.CopyTo(msg.AsSpan(1 + first.Length));
+            return HMACSHA256.HashData(key, msg);
         }
 
         public static void ReadExactly(Stream s, Span<byte> buf)
@@ -65,6 +77,32 @@ namespace TailRemote
             BitConverter.TryWriteBytes(f.AsSpan(1), (ushort)utf.Length);
             utf.CopyTo(f, 3);
             lock (writeLock) s.Write(f);
+        }
+
+        /// <summary>
+        /// Why a port cannot be used, or null if it is fine. Refuses ports that
+        /// other remote and network programs depend on, even when they happen to
+        /// be free on this PC, so TailRemote never takes over someone else's.
+        /// Whether the port is free right now is checked when hosting starts.
+        /// </summary>
+        public static string? PortProblem(string text, out int port)
+        {
+            if (!int.TryParse(text, out port) || port < 1 || port > 65535)
+                return "The port must be a number from 1024 to 65535. The usual one is " + DefaultPort + ".";
+            if (port < 1024)
+                return "Port " + port + " is reserved for Windows services. Choose one from 1024 to 65535, such as " + DefaultPort + ".";
+            string? owner = port switch
+            {
+                1900 => "Windows device discovery",
+                3389 => "Remote Desktop",
+                5353 => "Windows network name lookups",
+                5355 => "Windows network name lookups",
+                5900 => "VNC",
+                6837 => "NVDA Remote",
+                41641 => "Tailscale itself",
+                _ => null,
+            };
+            return owner == null ? null : "Port " + port + " belongs to " + owner + ". Choose another, such as " + DefaultPort + ".";
         }
 
         /// <summary>Whether this PC has a Tailscale address, i.e. Tailscale is up and signed in.</summary>

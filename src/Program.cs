@@ -17,9 +17,22 @@ namespace TailRemote
             {
                 Speech.Init();
                 ApplicationConfiguration.Initialize();
-                var setup = new SetupForm();
+                var setup = new SetupForm("Setting up the TailRemote audio device", async (report, ct) =>
+                {
+                    await AudioSetup.RunAsync(report, ct);
+                    return "Done. The TailRemote audio device is ready and is the default output.";
+                });
                 Application.Run(setup);
                 return setup.Result;
+            }
+
+            if (args.Length == 1 && args[0] == "--remove-audio")
+            {
+                Speech.Init();
+                ApplicationConfiguration.Initialize();
+                var remove = new SetupForm("Removing the TailRemote audio device", AudioSetup.RemoveAsync);
+                Application.Run(remove);
+                return remove.Result;
             }
 
             if (args.Length == 1 && args[0] == "--licence")
@@ -59,6 +72,9 @@ namespace TailRemote
                 string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TailRemote", "old");
                 if (!Directory.Exists(dir)) return;
                 foreach (string f in Directory.GetFiles(dir)) { try { File.Delete(f); } catch { } }
+                if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir);
+                string parent = Path.GetDirectoryName(dir)!;
+                if (Directory.GetFileSystemEntries(parent).Length == 0) Directory.Delete(parent);
             }
             catch { }
         }
@@ -85,6 +101,10 @@ namespace TailRemote
             var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
             string Dump() => string.Join(" | ", log);
             using var host = new Host(47999, "secret", true, log.Enqueue);
+            if (Protocol.PortProblem("3389", out _) == null || Protocol.PortProblem("abc", out _) == null || Protocol.PortProblem("47120", out _) != null)
+                return Fail("port rules");
+            try { new Host(47999, "x", true, log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
+            catch (InvalidOperationException e) when (e.Message.Contains("already used")) { }
             try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
             catch (InvalidOperationException e) when (e.Message == "Wrong password.") { }
             using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, log.Enqueue);

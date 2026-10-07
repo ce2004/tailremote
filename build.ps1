@@ -40,4 +40,12 @@ foreach ($a in $Arch) {
         "$a built, installed and restarted: $exe"
     }
     else { "$a built and installed: $exe" }
+
+    # The replaced copy has exited by now: delete it, and the folder once empty.
+    if (Test-Path $oldDir) {
+        Get-ChildItem $oldDir -File | ForEach-Object { try { Remove-Item $_.FullName -Force } catch { } }
+        if (-not (Get-ChildItem $oldDir)) { Remove-Item $oldDir -Force }
+        $parent = Split-Path $oldDir
+        if ((Test-Path $parent) -and -not (Get-ChildItem $parent)) { Remove-Item $parent -Force }
+    }
 }

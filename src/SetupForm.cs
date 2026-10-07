@@ -7,9 +7,9 @@ using System.Windows.Forms;
 namespace TailRemote
 {
     /// <summary>
-    /// The audio device setup window: a status line, a progress bar and one
-    /// button. Runs in the elevated copy started by Set up audio device, so the
-    /// one administrator prompt covers VB-Cable's installer and the renaming.
+    /// The audio device setup and removal window: a status line, a progress bar
+    /// and one button. Runs in the elevated copy started by the main window, so
+    /// one administrator prompt covers everything it does.
     /// Every step says what it is doing, and NVDA says it too.
     /// </summary>
     internal sealed class SetupForm : Form
@@ -19,12 +19,15 @@ namespace TailRemote
         private readonly Button _button = new() { Text = "Cancel", AutoSize = true };
         private readonly CancellationTokenSource _cancel = new();
         private bool _done;
+        private readonly Func<Action<string, int>, CancellationToken, Task<string>> _work;
 
         public int Result { get; private set; } = 1;
 
-        public SetupForm()
+        /// <summary>work reports (text, percent or -1) and returns the sentence to finish with.</summary>
+        public SetupForm(string title, Func<Action<string, int>, CancellationToken, Task<string>> work)
         {
-            Text = "Setting up the TailRemote audio device";
+            _work = work;
+            Text = title;
             Font = new Font("Segoe UI", 10f);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
@@ -47,13 +50,13 @@ namespace TailRemote
             _button.Focus();
             try
             {
-                await AudioSetup.RunAsync(Report, _cancel.Token);
+                string finished = await _work(Report, _cancel.Token);
                 _bar.Style = ProgressBarStyle.Blocks;
                 _bar.Value = 100;
-                Say("Done. The TailRemote audio device is ready and is the default output.");
+                Say(finished);
                 Result = 0;
             }
-            catch (OperationCanceledException) { Say("Setup was cancelled. Nothing else was changed."); }
+            catch (OperationCanceledException) { Say("Cancelled."); }
             catch (Exception ex) { Say(ex.Message); }
             _done = true;
             _button.Text = "Close";

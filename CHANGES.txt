@@ -1,3 +1,20 @@
+1.2.0
+Update both PCs: this version cannot connect to older ones.
+New feature: Remove audio device takes VB-Cable off the PC completely, after making your speakers the default again.
+New feature: both audio buttons explain what they will do before they start, and they show in both modes. Before, Set up audio device only appeared in Host mode.
+Safer: both PCs now prove they know the password, so your keys are never sent to a PC that does not know it. Wrong passwords are slowed down.
+Bug fixed: after the host was quiet for a while, the sound could come back with almost half a second of extra delay.
+Bug fixed: if the host's sound driver reset, its audio stayed silent until you reconnected.
+Bug fixed: if your PC dropped off the network, keys you were holding could stay pressed on the host.
+Bug fixed: holding Control Shift Enter flipped between the two PCs over and over.
+Bug fixed: pressing Stop reconnecting could still connect a moment later.
+Bug fixed: TailRemote could crash when closing while hosting.
+Bug fixed: messages from the host, such as audio problems, are now spoken, not only written in the log.
+Bug fixed: turning on Start hosting when Windows starts made the window stop responding while it worked.
+Changed: the port is a plain edit box. A port that is not a number, or one other programs rely on (Remote Desktop, VNC, NVDA Remote, Tailscale), is refused with the reason. If another program is already using the port, hosting says so instead of starting.
+Bug fixed: setting up the audio device also left VB-Cable's second output, CABLE In 16 Ch, switched on. It is turned off now, so only TailRemote is left. If you already set it up, press Set up audio device again to tidy it.
+Bug fixed: setting up the audio device left its download in the Temp folder. It is deleted now.
+
 1.1.0
 New feature: Set up audio device, in Host mode, gives a PC with no sound card an output called TailRemote and makes it the default, so you can hear it. A progress window downloads VB-Cable, a free virtual audio device, checks it is genuine and opens its installer: press Install Driver and the rest happens by itself.
 New feature: hosting on a PC with no sound output starts the audio device setup by itself.
