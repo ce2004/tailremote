@@ -14,7 +14,8 @@ namespace TailRemote
         public int Port { get; set; } = Protocol.DefaultPort;
         public string PasswordEnc { get; set; } = "";
         public string OutputDevice { get; set; } = "";
-        public bool TailscaleOnly { get; set; } = true;
+        /// <summary>Every port TailRemote has used here, so Port editor can still close it later.</summary>
+        public System.Collections.Generic.List<int> KnownPorts { get; set; } = new();
         /// <summary>What was running when TailRemote last closed: "host", "connect" or "". Used by --resume.</summary>
         public string ResumeState { get; set; } = "";
 

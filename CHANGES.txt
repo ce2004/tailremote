@@ -1,3 +1,12 @@
+1.3.0
+Update both PCs: this version cannot connect to older ones.
+New feature: everything TailRemote sends is encrypted, so you can connect with or without Tailscale, for example straight to a cloud PC's address.
+New feature: Port editor opens and closes TailRemote's ports in Windows Firewall. It remembers every port TailRemote has used, so you can still close an old one after changing the port.
+New feature: starting to host offers to open the port if Windows Firewall would keep other PCs out.
+Changed: passwords need at least 5 characters, both for hosting and for connecting.
+Changed: the Only accept Tailscale connections checkbox is gone. Anyone who knows the password can connect.
+Changed: Start hosting when Windows starts no longer adds its own firewall rule, and removes the one older versions added. Use Port editor instead.
+
 1.2.0
 Update both PCs: this version cannot connect to older ones.
 New feature: Remove audio device takes VB-Cable off the PC completely, after making your speakers the default again.

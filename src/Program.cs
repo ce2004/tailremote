@@ -26,6 +26,9 @@ namespace TailRemote
                 return setup.Result;
             }
 
+            if (args.Length == 3 && args[0] == "--firewall" && int.TryParse(args[2], out int fwPort))
+                return Firewall.Apply(args[1] == "open", fwPort);
+
             if (args.Length == 1 && args[0] == "--remove-audio")
             {
                 Speech.Init();
@@ -98,12 +101,28 @@ namespace TailRemote
                     return Fail($"resampler {from}->{to}: rms {rms:F4}, crossings {crossings}, frames {outL.Count}");
             }
 
+            // Audio encryption: a sealed packet opens on the other side; a changed one does not.
+            {
+                byte[] k = Protocol.DeriveKey("secret"), n1 = new byte[16], n2 = new byte[16];
+                n2[0] = 1;
+                using var hostLink = new SecureLink(k, n1, n2, isHost: true);
+                using var clientLink = new SecureLink(k, n1, n2, isHost: false);
+                byte[] pkt = new byte[Protocol.AudioPacketBytes];
+                pkt[0] = Protocol.UdpAudio; pkt[1] = 7; pkt[10] = 42;
+                hostLink.SealAudio(pkt, Protocol.PacketFrames * 4);
+                if (pkt[10] == 42 && pkt[9] == 0 && pkt[11] == 0) return Fail("audio was not encrypted");
+                byte[] bad = (byte[])pkt.Clone();
+                bad[100] ^= 1;
+                if (!clientLink.OpenAudio(pkt, pkt.Length) || pkt[10] != 42) return Fail("audio did not decrypt");
+                if (clientLink.OpenAudio(bad, bad.Length)) return Fail("a tampered audio packet was accepted");
+            }
+
             var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
             string Dump() => string.Join(" | ", log);
-            using var host = new Host(47999, "secret", true, log.Enqueue);
+            using var host = new Host(47999, "secret", log.Enqueue);
             if (Protocol.PortProblem("3389", out _) == null || Protocol.PortProblem("abc", out _) == null || Protocol.PortProblem("47120", out _) != null)
                 return Fail("port rules");
-            try { new Host(47999, "x", true, log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
+            try { new Host(47999, "x", log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
             catch (InvalidOperationException e) when (e.Message.Contains("already used")) { }
             try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
             catch (InvalidOperationException e) when (e.Message == "Wrong password.") { }

@@ -14,7 +14,6 @@ namespace TailRemote
     internal sealed class Host : IDisposable
     {
         private readonly byte[] _key;
-        private readonly bool _tailscaleOnly;
         private readonly Action<string> _status;
         private readonly TcpListener _listener;
         private readonly UdpClient _udp;
@@ -29,16 +28,15 @@ namespace TailRemote
             public required NetworkStream Stream;
             public required byte[] Token;
             public required IPAddress Address;
-            public readonly object WriteLock = new();
+            public required SecureLink Link;
             public volatile IPEndPoint? AudioTo;
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
             public LoopbackCapture? Capture;
         }
 
-        public Host(int port, string password, bool tailscaleOnly, Action<string> status)
+        public Host(int port, string password, Action<string> status)
         {
             _key = Protocol.DeriveKey(password);
-            _tailscaleOnly = tailscaleOnly;
             _status = status;
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
@@ -103,12 +101,6 @@ namespace TailRemote
             Session? s = null;
             try
             {
-                if (_tailscaleOnly && !Protocol.IsTailscale(remote))
-                {
-                    _status("Refused a connection from " + remote + ": not a Tailscale address.");
-                    tcp.Dispose();
-                    return;
-                }
                 tcp.NoDelay = true;
                 var stream = tcp.GetStream();
                 stream.ReadTimeout = 10_000;
@@ -143,11 +135,11 @@ namespace TailRemote
                 // and ending the session lets go of any keys it was holding.
                 stream.ReadTimeout = 10_000;
 
-                s = new Session { Tcp = tcp, Stream = stream, Token = token, Address = remote };
+                s = new Session { Tcp = tcp, Stream = stream, Token = token, Address = remote, Link = new SecureLink(_key, nonce, clientNonce, isHost: true) };
                 var session = s;
                 s.Capture = new LoopbackCapture(
                     (seq, pcm) => SendAudio(session, seq, pcm),
-                    msg => { _status(msg); try { Protocol.SendMessage(session.Stream, session.WriteLock, msg); } catch { } });
+                    msg => { _status(msg); try { Protocol.SendMessage(session.Link, session.Stream, msg); } catch { } });
                 lock (_gate)
                 {
                     if (_stop) { End(s, null); return; }
@@ -177,19 +169,16 @@ namespace TailRemote
 
         private void ReadLoop(Session s)
         {
-            byte[] head = new byte[1];
-            byte[] key = new byte[5];
-            byte[] stamp = new byte[8];
             while (!_stop)
             {
-                Protocol.ReadExactly(s.Stream, head);
-                switch (head[0])
+                byte[] m = s.Link.Receive(s.Stream);
+                if (m.Length == 0) throw new InvalidOperationException("Empty message.");
+                switch (m[0])
                 {
-                    case Protocol.Key:
-                        Protocol.ReadExactly(s.Stream, key);
-                        ushort vk = BitConverter.ToUInt16(key, 0);
-                        ushort scan = BitConverter.ToUInt16(key, 2);
-                        bool up = (key[4] & 1) != 0, ext = (key[4] & 2) != 0;
+                    case Protocol.Key when m.Length == 6:
+                        ushort vk = BitConverter.ToUInt16(m, 1);
+                        ushort scan = BitConverter.ToUInt16(m, 3);
+                        bool up = (m[5] & 1) != 0, ext = (m[5] & 2) != 0;
                         lock (_gate)
                         {
                             // A replaced or closed session must not press anything after its keys were released.
@@ -198,18 +187,15 @@ namespace TailRemote
                             Native.SendKey(vk, scan, up, ext);
                         }
                         break;
-                    case Protocol.Ping:
-                        Protocol.ReadExactly(s.Stream, stamp);
-                        byte[] pong = new byte[9];
-                        pong[0] = Protocol.Pong;
-                        stamp.CopyTo(pong, 1);
-                        lock (s.WriteLock) s.Stream.Write(pong);
+                    case Protocol.Ping when m.Length == 9:
+                        m[0] = Protocol.Pong;
+                        s.Link.Send(s.Stream, m);
                         break;
                     case Protocol.ReleaseAll:
                         ReleaseHeld(s);
                         break;
                     default:
-                        throw new InvalidOperationException("Unknown message " + head[0]);
+                        throw new InvalidOperationException("Unknown message " + m[0]);
                 }
             }
         }
@@ -225,10 +211,11 @@ namespace TailRemote
 
         private static void End(Session s, string? why)
         {
-            if (why != null) { try { Protocol.SendMessage(s.Stream, s.WriteLock, why); } catch { } }
+            if (why != null) { try { Protocol.SendMessage(s.Link, s.Stream, why); } catch { } }
             ReleaseHeld(s);
             s.Capture?.Dispose();
             try { s.Tcp.Dispose(); } catch { }
+            s.Link.Dispose();
         }
 
         private readonly byte[] _audio = new byte[Protocol.AudioPacketBytes];
@@ -239,8 +226,14 @@ namespace TailRemote
             if (to == null) return;
             _audio[0] = pcm == null ? Protocol.UdpSilence : Protocol.UdpAudio;
             BitConverter.TryWriteBytes(_audio.AsSpan(1), seq);
-            if (pcm != null) Buffer.BlockCopy(pcm, 0, _audio, 5, pcm.Length * 2);
-            try { _udp.Send(_audio, pcm == null ? 5 : _audio.Length, to); } catch { }
+            int payload = pcm == null ? 0 : pcm.Length * 2;
+            if (pcm != null) Buffer.BlockCopy(pcm, 0, _audio, 5, payload);
+            try
+            {
+                s.Link.SealAudio(_audio, payload);
+                _udp.Send(_audio, 5 + payload + SecureLink.TagSize, to);
+            }
+            catch { }
         }
 
         private void UdpLoop()

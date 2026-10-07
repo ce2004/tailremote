@@ -1,25 +1,25 @@
 TailRemote
 
-Control another Windows PC over Tailscale with your keyboard, and hear everything it plays. Built for NVDA.
+Control another Windows PC with your keyboard, and hear everything it plays. Built for NVDA. Works over Tailscale or straight over the internet; everything is encrypted either way.
 
 Files
 - bin\arm64\TailRemote.exe for ARM64 PCs, bin\x64\TailRemote.exe for x64 PCs. Each is one self-contained file; no .NET install needed.
 
 On the PC you want to control (the host)
-1. Install Tailscale and sign in to the same tailnet.
+1. Either install Tailscale on both PCs and sign in to the same tailnet, or use the host's internet address.
 2. Run TailRemote, choose Mode: Host, type a password, press Start hosting.
-3. A cloud PC usually has no sound card. TailRemote notices and sets up an audio device called TailRemote: approve the administrator prompt, then press Install Driver in VB-Cable's window. A progress bar shows the rest. You can also press Set up audio device (Alt A) at any time.
-4. Check Start hosting when Windows starts. It asks for administrator once, then starts hosting at every sign-in as administrator, so keys also reach administrator windows. It also adds the firewall rule.
+3. A cloud PC usually has no sound card. TailRemote notices and sets up an audio device called TailRemote: approve the administrator prompt, then press Install Driver in VB-Cable's window. A progress bar shows the rest. You can also press Set up audio device (Alt D) at any time, and Remove audio device (Alt V) takes it off again.
+4. If Windows Firewall would keep other PCs out, TailRemote offers to open the port. Port editor (Alt E) lists every port TailRemote has used and opens or closes them.
+5. Check Start hosting when Windows starts. It asks for administrator once, then starts hosting at every sign-in as administrator, so keys also reach administrator windows and the port is opened by itself.
 
 On your PC
 1. Run TailRemote, choose Mode: Control another PC.
-2. Type the host's Tailscale name or 100 address, the same port and password, and press Connect.
+2. Type the host's Tailscale name, 100 address or internet address, the same port and password, and press Connect.
 3. In the TailRemote window, press Control Shift Enter to control the remote PC. Every key goes there: Windows, Alt Tab, your NVDA key, everything.
 4. Press Control Shift Enter again to come back to this PC.
 
 Settings in the main window
 - Output device: where the remote PC's sound plays here.
-- Only accept Tailscale connections: refuse anything not from a Tailscale address.
 
 How it keeps delay down
 - Audio is raw 16-bit 44.1 kHz stereo PCM, about 1.4 megabits per second while sound plays, nothing when it is silent. No codec, so no encoding delay.
@@ -35,6 +35,11 @@ Updates
 - Check for updates (Alt U) gets the newest version from github.com/ce2004/tailremote, checks the download, swaps it in and restarts. A host restarts hosting; a connected PC reconnects.
 - To update the cloud PC, control it, switch to its TailRemote window and press Check for updates there. Your side reconnects by itself when it comes back.
 - If the connection drops for any reason, TailRemote keeps trying every 2 seconds until it is back or you press Stop reconnecting.
+
+Security
+- Both PCs prove they know the password before anything is sent, and wrong passwords are slowed down.
+- After that, keys, audio and messages are encrypted with keys that are new for every connection, and anything changed on the way is thrown away.
+- Use a long password if the port is open to the internet.
 
 Limits
 - Control Alt Delete and Windows L are kept by Windows and never reach the remote PC.

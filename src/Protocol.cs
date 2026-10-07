@@ -12,7 +12,7 @@ namespace TailRemote
     ///
     /// TCP (no Nagle) carries the handshake and the keys: every key must arrive,
     /// in order. UDP carries the audio: a late audio packet is worthless, so it is
-    /// never waited for or resent. Tailscale already encrypts both.
+    /// never waited for or resent.
     ///
     /// Handshake, where key = PBKDF2-SHA256(password, 200000 rounds), slow on
     /// purpose so a recorded handshake cannot be guessed quickly:
@@ -21,13 +21,14 @@ namespace TailRemote
     ///   host:   0 after a 2 s pause (wrong password), or
     ///           1 + session token (8) + HMAC(key, "H" + client nonce + host nonce)
     /// The client checks the host's proof too, so a PC that does not know the
-    /// password never receives a single key.
+    /// password never receives a single key. After that, everything is
+    /// encrypted by SecureLink, so the connection is private without Tailscale.
     /// After that both sides send frames of [type][payload].
     /// </summary>
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM3"u8.ToArray();
+        public static readonly byte[] Magic = "TRM4"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -35,7 +36,7 @@ namespace TailRemote
         public const byte ReleaseAll = 3;
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
-        public const byte Message = 0x82; // u16 length, UTF-8 text
+        public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
@@ -44,7 +45,8 @@ namespace TailRemote
 
         public const int AudioRate = 44100;
         public const int PacketFrames = 256; // 5.8 ms; 1029 bytes, under Tailscale's 1280 MTU
-        public const int AudioPacketBytes = 5 + PacketFrames * 4;
+        public const int AudioPacketBytes = 5 + PacketFrames * 4 + SecureLink.TagSize; // 1045, under Tailscale's 1280
+        public const int SilencePacketBytes = 5 + SecureLink.TagSize;
 
         public static byte[] DeriveKey(string password) =>
             Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32);
@@ -69,14 +71,13 @@ namespace TailRemote
             }
         }
 
-        public static void SendMessage(Stream s, object writeLock, string text)
+        public static void SendMessage(SecureLink link, Stream s, string text)
         {
             byte[] utf = Encoding.UTF8.GetBytes(text);
-            byte[] f = new byte[3 + utf.Length];
+            byte[] f = new byte[1 + Math.Min(utf.Length, 4000)];
             f[0] = Message;
-            BitConverter.TryWriteBytes(f.AsSpan(1), (ushort)utf.Length);
-            utf.CopyTo(f, 3);
-            lock (writeLock) s.Write(f);
+            utf.AsSpan(0, f.Length - 1).CopyTo(f.AsSpan(1));
+            link.Send(s, f);
         }
 
         /// <summary>

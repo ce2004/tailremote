@@ -13,13 +13,13 @@ namespace TailRemote
     internal static class Startup
     {
         private const string TaskName = "TailRemote Host";
+        // The catch-all rule older versions made. Removed here; Port editor manages ports now.
         private const string RuleName = "TailRemote";
 
         public static bool IsElevated() => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
         public static bool IsEnabled() => Run("schtasks", "/Query /TN \"" + TaskName + "\"") == 0;
 
-        public static bool FirewallRuleExists() => Run("netsh", "advfirewall firewall show rule name=\"" + RuleName + "\"") == 0;
 
         /// <summary>Asks for administrator rights and makes the change. False if refused or failed.</summary>
         public static System.Threading.Tasks.Task<bool> SetAsync(bool on) => System.Threading.Tasks.Task.Run(() => Set(on));
@@ -49,7 +49,6 @@ namespace TailRemote
                 Run("schtasks", "/Delete /TN \"" + TaskName + "\" /F");
                 return 0;
             }
-            Run("netsh", "advfirewall firewall add rule name=\"" + RuleName + "\" dir=in action=allow enable=yes profile=any program=\"" + exe + "\"");
             // Not schtasks /Create: its tasks stop after 3 days and refuse to start on battery.
             string ps = "$u = [Security.Principal.WindowsIdentity]::GetCurrent().Name; " +
                 "$a = New-ScheduledTaskAction -Execute '" + exe.Replace("'", "''") + "' -Argument '--host'; " +

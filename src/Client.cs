@@ -14,7 +14,7 @@ namespace TailRemote
         private readonly UdpClient _udp;
         private readonly byte[] _token;
         private readonly Player _player;
-        private readonly object _writeLock = new();
+        private readonly SecureLink _link;
         private volatile bool _closed;
         private long _lastPong;
         private int _closing;
@@ -25,9 +25,9 @@ namespace TailRemote
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
 
-        private Client(TcpClient tcp, NetworkStream stream, UdpClient udp, byte[] token, Player player)
+        private Client(TcpClient tcp, NetworkStream stream, UdpClient udp, byte[] token, Player player, SecureLink link)
         {
-            _tcp = tcp; _stream = stream; _udp = udp; _token = token; _player = player;
+            _tcp = tcp; _stream = stream; _udp = udp; _token = token; _player = player; _link = link;
         }
 
         /// <summary>Connects and checks the password; throws with a readable message on failure.</summary>
@@ -42,8 +42,8 @@ namespace TailRemote
                 catch (SocketException) { addrs = Array.Empty<IPAddress>(); }
                 if (addrs.Length == 0)
                     throw new InvalidOperationException(Protocol.LocalTailscaleUp()
-                        ? "Could not find " + address + ". Check the name in the Tailscale app, or use its 100 address."
-                        : "Tailscale is not connected on this PC. Open Tailscale and sign in.");
+                        ? "Could not find " + address + ". Check the name or address."
+                        : "Could not find " + address + ". If it is a Tailscale name, open Tailscale on this PC and sign in.");
                 bool done;
                 try { done = tcp.ConnectAsync(addrs, port).Wait(8000); }
                 catch (AggregateException e) when (e.InnerException is SocketException se && se.SocketErrorCode == SocketError.ConnectionRefused)
@@ -51,9 +51,7 @@ namespace TailRemote
                     throw new InvalidOperationException(address + " is on, but TailRemote is not hosting there. Start hosting on that PC.");
                 }
                 if (!done)
-                    throw new TimeoutException(!Protocol.LocalTailscaleUp()
-                        ? "Tailscale is not connected on this PC. Open Tailscale and sign in."
-                        : "No answer from " + address + ". It may be off, or its Tailscale is not connected.");
+                    throw new TimeoutException("No answer from " + address + ". It may be off or not hosting, or its port is not open: use Port editor on that PC.");
             }
             catch (AggregateException e) { tcp.Dispose(); throw new InvalidOperationException(e.InnerException?.Message ?? e.Message); }
             catch { tcp.Dispose(); throw; }
@@ -96,7 +94,7 @@ namespace TailRemote
                 udp.Connect(hostEp.Address, port);
 
                 var player = new Player(deviceId, status);
-                var c = new Client(tcp, stream, udp, token, player);
+                var c = new Client(tcp, stream, udp, token, player, new SecureLink(key, hostNonce, myNonce, isHost: false));
                 c.Status += status;
                 c.Start();
                 return c;
@@ -122,6 +120,7 @@ namespace TailRemote
             try { _udp.Dispose(); } catch { }
             _player.Dispose();
             if (why != null) Disconnected?.Invoke(why);
+            // The link is left for the garbage collector: a hook-thread SendKey may still be using it.
         }
 
         /// <summary>Sends one key. Called from the keyboard hook; never blocks for long.</summary>
@@ -140,31 +139,26 @@ namespace TailRemote
 
         private void Write(ReadOnlySpan<byte> f)
         {
-            try { lock (_writeLock) _stream.Write(f); }
+            try { _link.Send(_stream, f); }
             catch { }
         }
 
         private void TcpLoop()
         {
-            byte[] head = new byte[1], stamp = new byte[8], len = new byte[2];
             try
             {
                 while (!_closed)
                 {
-                    Protocol.ReadExactly(_stream, head);
-                    if (head[0] == Protocol.Pong)
+                    byte[] m = _link.Receive(_stream);
+                    if (m.Length == 9 && m[0] == Protocol.Pong)
                     {
-                        Protocol.ReadExactly(_stream, stamp);
-                        long sent = BitConverter.ToInt64(stamp);
+                        long sent = BitConverter.ToInt64(m, 1);
                         LastPingMs = (int)((Stopwatch.GetTimestamp() - sent) * 1000 / Stopwatch.Frequency);
                         _lastPong = Environment.TickCount64;
                     }
-                    else if (head[0] == Protocol.Message)
+                    else if (m.Length >= 1 && m[0] == Protocol.Message)
                     {
-                        Protocol.ReadExactly(_stream, len);
-                        byte[] text = new byte[BitConverter.ToUInt16(len)];
-                        Protocol.ReadExactly(_stream, text);
-                        Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(text));
+                        Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     }
                     else throw new InvalidOperationException("Unknown message from host.");
                 }
@@ -183,9 +177,10 @@ namespace TailRemote
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_closed) return; continue; }
-                if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio)
-                    _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5));
-                else if (d.Length == 5 && d[0] == Protocol.UdpSilence)
+                // Forged or damaged packets fail to open and are dropped.
+                if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio && _link.OpenAudio(d, d.Length))
+                    _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
+                else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence && _link.OpenAudio(d, d.Length))
                     _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
             }
         }

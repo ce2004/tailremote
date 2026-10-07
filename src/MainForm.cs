@@ -14,13 +14,13 @@ namespace TailRemote
         private readonly TextBox _port = new();
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-        private readonly CheckBox _tailscaleOnly = new() { Text = "Only accept &Tailscale connections", AutoSize = true };
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
         private readonly Button _update = new() { Text = "Check for &updates", AutoSize = true };
         private readonly Button _audioSetup = new() { Text = "Set up au&dio device", AutoSize = true };
         private readonly Button _audioRemove = new() { Text = "Remove audio de&vice", AutoSize = true };
+        private readonly Button _portEditor = new() { Text = "Port &editor", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
         private readonly Label _addressLabel, _deviceLabel;
@@ -56,7 +56,6 @@ namespace TailRemote
             AddRow(table, "&Port", _port);
             AddRow(table, "Pass&word", _password);
             _deviceLabel = AddRow(table, "&Output device", _device);
-            table.Controls.Add(_tailscaleOnly); table.SetColumnSpan(_tailscaleOnly, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
 
             var buttons = new FlowLayoutPanel { AutoSize = true };
@@ -64,6 +63,7 @@ namespace TailRemote
             buttons.Controls.Add(_toggle);
             buttons.Controls.Add(_audioSetup);
             buttons.Controls.Add(_audioRemove);
+            buttons.Controls.Add(_portEditor);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
             AddRow(table, "Status &log", _log);
@@ -75,7 +75,6 @@ namespace TailRemote
             _address.Text = _settings.Address;
             _port.Text = _settings.Port.ToString();
             _password.Text = _settings.Password;
-            _tailscaleOnly.Checked = _settings.TailscaleOnly;
             _startup.Checked = Startup.IsEnabled();
 
             _device.Items.Add("Windows default");
@@ -90,6 +89,7 @@ namespace TailRemote
             _update.Click += (_, _) => CheckForUpdates();
             _audioSetup.Click += (_, _) => SetUpAudio();
             _audioRemove.Click += (_, _) => RemoveAudio();
+            _portEditor.Click += (_, _) => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); };
             _startup.CheckedChanged += (_, _) => StartupChanged();
             _titleTimer.Tick += (_, _) => UpdateTitle();
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
@@ -114,7 +114,7 @@ namespace TailRemote
             _addressLabel.Visible = _address.Visible = !host;
             _deviceLabel.Visible = _device.Visible = !host;
             _toggle.Visible = !host;
-            _tailscaleOnly.Visible = _startup.Visible = host;
+            _startup.Visible = host;
             UpdateButtons();
         }
 
@@ -179,7 +179,6 @@ namespace TailRemote
             if (int.TryParse(_port.Text.Trim(), out int port)) _settings.Port = port;
             _settings.Password = _password.Text;
             _settings.OutputDevice = _devices[Math.Max(0, _device.SelectedIndex)].Id;
-            _settings.TailscaleOnly = _tailscaleOnly.Checked;
             _settings.Save();
         }
 
@@ -192,14 +191,14 @@ namespace TailRemote
             else Disconnect("Disconnected.", byUser: true);
         }
 
-        private void StartHost()
+        private async void StartHost()
         {
-            if (_password.Text.Length == 0) { Say("Set a password first."); _password.Focus(); return; }
+            if (!CheckPassword()) return;
             if (!CheckPort(out int port)) return;
-            if (!Startup.FirewallRuleExists()) Log("Tip: if Windows asks about the firewall, allow TailRemote. Turning on Start hosting when Windows starts also adds the rule.");
+            PortEditorForm.Remember(_settings, port);
             try
             {
-                _host = new Host(port, _password.Text, _tailscaleOnly.Checked, msg => Later(() => Log(msg)));
+                _host = new Host(port, _password.Text, msg => Later(() => Log(msg)));
                 Say("Hosting on port " + port + ". Waiting for a connection.");
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
                 else if (Wasapi.OutputDevices().Count == 0)
@@ -213,6 +212,36 @@ namespace TailRemote
             catch (Exception e) { Say("Could not start hosting: " + e.Message); }
             UpdateButtons();
             UpdateTitle();
+            if (_host != null) await OfferToOpenPort(port);
+        }
+
+        /// <summary>If Windows Firewall would keep other PCs out, open the port (asking first unless already administrator).</summary>
+        private async System.Threading.Tasks.Task OfferToOpenPort(int port)
+        {
+            if (await System.Threading.Tasks.Task.Run(() => Firewall.IsOpen(port))) return;
+            if (Startup.IsElevated())
+            {
+                if (await System.Threading.Tasks.Task.Run(() => Firewall.Apply(true, port)) == 0) Log("Opened port " + port + " in Windows Firewall.");
+                return;
+            }
+            var answer = MessageBox.Show(this, "Port " + port + " is not open in Windows Firewall, so other PCs may not be able to connect. Open it now? Windows asks for administrator permission. You can close it later in Port editor.",
+                "Open port " + port, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) return;
+            Say(await Firewall.SetAsync(port, true) ? "Port " + port + " is open." : "Port " + port + " was not opened: administrator permission was not given.");
+        }
+
+        public const int MinPasswordLength = 5;
+
+        /// <summary>Refuses a password shorter than 5 characters.</summary>
+        private bool CheckPassword()
+        {
+            int n = _password.Text.Length;
+            if (n >= MinPasswordLength) return true;
+            Say(n == 0 ? "Type a password first. It needs at least " + MinPasswordLength + " characters."
+                       : "The password needs at least " + MinPasswordLength + " characters. It has " + n + ".");
+            _password.Focus();
+            _password.SelectAll();
+            return false;
         }
 
         /// <summary>Refuses a port that is not a number, or that would clash with something else.</summary>
@@ -240,6 +269,7 @@ namespace TailRemote
         {
             string address = _address.Text.Trim();
             if (address.Length == 0) { Say("Type the address first."); _address.Focus(); return; }
+            if (!CheckPassword()) return;
             if (!CheckPort(out int port)) return;
             _connecting = true;
             int attempt = ++_attempt;
@@ -384,7 +414,7 @@ namespace TailRemote
             if (want == Startup.IsEnabled()) return;
             SaveSettings();
             Say("Windows asks for administrator permission.");
-            if (await Startup.SetAsync(want)) Say(want ? "TailRemote will start hosting, as administrator, when you sign in. The firewall rule was added." : "TailRemote will no longer start with Windows.");
+            if (await Startup.SetAsync(want)) Say(want ? "TailRemote will start hosting, as administrator, when you sign in." : "TailRemote will no longer start with Windows.");
             else
             {
                 Say("That needs administrator permission, and it was not given.");
