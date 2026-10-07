@@ -83,6 +83,7 @@ namespace TailRemote
                 foreach (var a in args) if (a.StartsWith("stall") && int.TryParse(a[5..], out int stall)) Client.TestStallMs = stall;
                 foreach (var a in args) if (a.StartsWith("bw") && int.TryParse(a[2..], out int kbps)) Client.TestKbps = kbps;
                 foreach (var a in args) if (a.StartsWith("lock") && int.TryParse(a[4..], out int lk)) Client.TestLockStep = lk;
+                foreach (var a in args) if (a.StartsWith("until") && int.TryParse(a[5..], out int un)) Client.TestKbpsUntil = un;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 

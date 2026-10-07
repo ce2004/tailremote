@@ -300,6 +300,8 @@ namespace TailRemote
         public static int TestDropPercent;
         /// <summary>Test only (--audiotest ... bwN): from 3 seconds in, audio over N kbit/s is thrown away, like Clumsy's bandwidth limit.</summary>
         public static int TestKbps;
+        /// <summary>Test only (--audiotest ... untilN): the bandwidth limit ends N seconds in, to check the climb back.</summary>
+        public static int TestKbpsUntil;
         /// <summary>Test only: the length (in 5 ms ticks) of the first audio packet, and how many packets came at another length.</summary>
         public static int TestFirstTicks, TestOtherTicks;
         public static int TestLockStep = -1;
@@ -338,7 +340,7 @@ namespace TailRemote
                 Interlocked.Increment(ref _rxPackets);
                 Interlocked.Add(ref _rxBytes, d.Length);
                 if (TestDropPercent > 0 && Random.Shared.Next(100) < TestDropPercent) continue;
-                if (TestKbps > 0 && _jitterClock.ElapsedMilliseconds > 3000)
+                if (TestKbps > 0 && _jitterClock.ElapsedMilliseconds > 3000 && (TestKbpsUntil == 0 || _jitterClock.ElapsedMilliseconds < TestKbpsUntil * 1000))
                 {
                     long t = _jitterClock.ElapsedMilliseconds;
                     _bucket = Math.Min(TestKbps * 1000 / 8 * 0.05, _bucket + (t - _bucketAt) * TestKbps / 8.0); // bytes; 50 ms of burst
@@ -454,7 +456,7 @@ namespace TailRemote
         private const int StepEveryMs = 750; // never faster than this: 128 to 32 kbit/s takes 3 seconds
         private readonly int[] _bad = new int[5], _sent = new int[5], _winBytes = new int[5], _winPackets = new int[5]; // the last second, by 0.2 s tick
         private int _badAt, _cleanTicks, _target, _ceiling, _failures;
-        private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt;
+        private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt, _lastUpAt;
         private double _lossBefore, _noHelpLoss;
         private int _qPackets, _qBytes;
 
@@ -511,9 +513,10 @@ namespace TailRemote
         /// a starved connection.
         ///
         /// Clean for 0.6 s: the target goes back to the best and it climbs, step by
-        /// step. Trouble on the way up sets a ceiling at the last step that worked,
-        /// held 5 seconds the first time, then 10, 20, up to a minute, so it does not
-        /// keep breaking up trying to go higher.
+        /// step. Trouble within 3 seconds of climbing a step sets a ceiling at the
+        /// step before, held 5 seconds the first time, then 10, 20, up to a minute, so
+        /// it does not keep breaking up trying to go higher. A bad patch that is not
+        /// caused by climbing never holds it down.
         /// </summary>
         private void AdaptQuality()
         {
@@ -561,11 +564,18 @@ namespace TailRemote
                 int fit = lowest;
                 for (int i = q + 1; i <= lowest; i++) if (Protocol.WireKbps(i) <= wire * 0.85) { fit = i; break; }
                 _target = Math.Max(_target, fit);
-                // Trouble: the step before this one is the most to try for a while.
-                _ceiling = Math.Min(lowest, q + 1);
-                _ceilingUntil = now + Math.Min(60_000, 5000 << Math.Min(_failures, 4));
-                _failures++;
-                _lastFailAt = now;
+                // Trouble right after climbing a step: that step does not fit, so the one
+                // before it is the most to try for a while (5 s, then 10, 20, up to a minute).
+                // Trouble at any other time is just a bad patch: it climbs back as soon as
+                // the connection is clean. (Counting every bad second here kept it down for a
+                // minute after the network had recovered.)
+                if (now - _lastUpAt < 3000)
+                {
+                    _ceiling = Math.Min(lowest, q + 1);
+                    _ceilingUntil = now + Math.Min(60_000, 5000 << Math.Min(_failures, 4));
+                    _failures++;
+                    _lastFailAt = now;
+                }
                 _lastTargetAt = now;
                 _cleanTicks = 0;
                 Array.Clear(_bad); Array.Clear(_sent); Array.Clear(_winBytes); Array.Clear(_winPackets); // judge from here on
@@ -577,6 +587,7 @@ namespace TailRemote
             if (_target != q && now - _lastMoveAt >= StepEveryMs)
             {
                 _lastMoveAt = now;
+                if (_target < q) _lastUpAt = now;
                 lock (_stepGate) if (_lockedStep < 0) SetStep(q + Math.Sign(_target - q));
             }
         }

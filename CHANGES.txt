@@ -1,3 +1,6 @@
+1.8.2
+Bug fixed: after a bad stretch of network, the sound could stay at a low bitrate for up to a minute even though the connection was fine again. Now it starts climbing back as soon as the connection is clean, one step every three quarters of a second, and is back to full quality within about 10 seconds even from the very bottom.
+
 1.8.1
 Bug fixed: with Sound quality locked, the first half second after connecting played at the highest bitrate. Now you only ever hear the bitrate you locked, from the very first sound, and changing the lock takes effect at once.
 
