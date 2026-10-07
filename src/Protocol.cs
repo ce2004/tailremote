@@ -41,6 +41,7 @@ namespace TailRemote
         public const byte Ping = 2;     // stamp i64
         public const byte ReleaseAll = 3;
         public const byte RestartPc = 4;     // controller asks the host PC to restart
+        public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
         // Either way
         public const byte Features = 0x40;   // u32 flags
         public const byte Clipboard = 0x41;  // UTF-8 text
@@ -62,17 +63,18 @@ namespace TailRemote
         public const uint FeatureFiles = 2;
         public const uint FeatureLossless = 4;
         public const uint FeatureRestart = 8;
+        public const uint FeatureSecureAttention = 16; // only a host running as the service
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
         public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart;
 
         public const int MaxClipboardChars = 1_000_000;
 
-        public static byte[] FeaturesMessage()
+        public static byte[] FeaturesMessage(uint extra = 0)
         {
             byte[] m = new byte[5];
             m[0] = Features;
-            BitConverter.TryWriteBytes(m.AsSpan(1), OurFeatures);
+            BitConverter.TryWriteBytes(m.AsSpan(1), OurFeatures | extra);
             return m;
         }
 

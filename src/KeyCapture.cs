@@ -32,7 +32,8 @@ namespace TailRemote
         private volatile Client? _client;
         private volatile bool _remote;
         private readonly HashSet<(uint Vk, bool Ext)> _held = new();
-        private bool _swallowEnterUp, _enterHeld;
+        private bool _swallowEnterUp, _enterHeld, _swallowEndUp;
+        private const int VK_END = 0x23;
 
         /// <summary>Raised on the hook thread with true when remote control starts, false when it stops.</summary>
         public event Action<bool>? ModeChanged;
@@ -151,6 +152,15 @@ namespace TailRemote
             {
                 _swallowEnterUp = true;
                 Leave(announce: true);
+                return 1;
+            }
+
+            // Ctrl+Alt+End stands for Ctrl+Alt+Del, which never reaches a hook (as in Remote Desktop).
+            if (k.vkCode == VK_END && up && _swallowEndUp) { _swallowEndUp = false; return 1; }
+            if (k.vkCode == VK_END && !up && ctrl && alt && !shift && !win && _client is Client sas)
+            {
+                _swallowEndUp = true;
+                if (!_held.Contains((VK_END, true))) sas.SendSecureAttention();
                 return 1;
             }
 

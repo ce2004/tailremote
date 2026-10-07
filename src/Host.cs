@@ -33,6 +33,9 @@ namespace TailRemote
         /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
         public event Action<string>? FileMessage;
 
+        /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
+        public Func<bool>? SecureAttention { get; init; }
+
         private readonly object _gate = new();
         private Session? _controller;
         private readonly List<Session> _listeners = new();
@@ -241,7 +244,7 @@ namespace TailRemote
                     Key = key, HostNonce = nonce, ClientNonce = clientNonce,
                     Link = new SecureLink(key, nonce, clientNonce, isHost: true),
                 };
-                s.Link.Send(s.Stream, Protocol.FeaturesMessage());
+                s.Link.Send(s.Stream, Protocol.FeaturesMessage(SecureAttention != null ? Protocol.FeatureSecureAttention : 0));
                 lock (_gate)
                 {
                     if (_stop) { End(s, null); return; }
@@ -314,6 +317,10 @@ namespace TailRemote
                         break;
                     case Protocol.ReleaseAll:
                         ReleaseHeld(s);
+                        break;
+                    case Protocol.SecureAttention when _controller == s:
+                        if (SecureAttention == null) Protocol.SendMessage(s.Link, s.Stream, "Control Alt Delete needs the TailRemote service on the remote PC.");
+                        else if (!SecureAttention()) Protocol.SendMessage(s.Link, s.Stream, "The remote PC could not send Control Alt Delete.");
                         break;
                     case Protocol.RestartPc when _controller == s:
                         _status("Restarting this PC, as the controlling PC asked.");

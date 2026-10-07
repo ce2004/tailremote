@@ -21,6 +21,8 @@ namespace TailRemote
         private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
         private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
+        private readonly CheckBox _service = new() { Text = "Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts, and Control Alt End sends Control Alt Delete", AutoSize = true, MaximumSize = new Size(560, 0) };
+        private bool _settingService; // set while the checkbox is changed by code, not by the user
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
         private readonly Button _update = new() { Text = "Check for &updates", AutoSize = true };
@@ -73,6 +75,7 @@ namespace TailRemote
             _deviceLabel = AddRow(table, "&Output device", _device);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
+            table.Controls.Add(_service); table.SetColumnSpan(_service, 2);
 
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_go);
@@ -96,6 +99,9 @@ namespace TailRemote
             _listenPassword.Text = _settings.ListenPassword;
             _shareClipboard.Checked = _settings.ShareClipboard;
             _startup.Checked = Startup.IsEnabled();
+            _settingService = true;
+            _service.Checked = ServiceHost.IsInstalled();
+            _settingService = false;
             FillSaved();
 
             _device.Items.Add("Windows default");
@@ -118,6 +124,7 @@ namespace TailRemote
             _audioRemove.Click += (_, _) => RemoveAudio();
             _portEditor.Click += (_, _) => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); };
             _startup.CheckedChanged += (_, _) => StartupChanged();
+            _service.CheckedChanged += (_, _) => { if (!_settingService) ServiceChanged(); };
             _titleTimer.Tick += (_, _) => UpdateTitle();
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
             UpdateMode();
@@ -145,6 +152,8 @@ namespace TailRemote
             _toggle.Visible = !host;
             _restart.Visible = !host;
             _startup.Visible = host;
+            _service.Visible = host;
+            _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
             UpdateButtons();
         }
 
@@ -152,7 +161,7 @@ namespace TailRemote
         {
             bool busy = _client != null || _host != null || _reconnecting;
             _mode.Enabled = !busy;
-            if (HostMode) _go.Text = _host == null ? "&Start hosting" : "&Stop hosting";
+            if (HostMode) _go.Text = _service.Checked ? "&Apply settings to the service" : _host == null ? "&Start hosting" : "&Stop hosting";
             else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
             _restart.Enabled = _client != null && !_client.ListenOnly;
@@ -292,7 +301,9 @@ namespace TailRemote
             _keys.NotConnected += () => BeginInvoke(() => Say("Not connected."));
             _titleTimer.Start();
             if (_updated) Say("Updated to version " + Updater.Current + ".");
-            if (_autoHost)
+            OfferServiceUpdate();
+            if (_autoHost && _service.Checked) Log("The TailRemote service is hosting this PC, so this window does not.");
+            else if (_autoHost)
             {
                 _mode.SelectedIndex = 1;
                 Go();
@@ -338,7 +349,8 @@ namespace TailRemote
         private void Go()
         {
             SaveSettings();
-            if (HostMode) { if (_host == null) StartHost(); else StopHost(); }
+            if (HostMode && _service.Checked) ApplyService();
+            else if (HostMode) { if (_host == null) StartHost(); else StopHost(); }
             else if (_reconnecting) StopReconnecting("Stopped reconnecting.");
             else if (_client == null) Connect(quiet: false);
             else Disconnect("Disconnected.", byUser: true);
@@ -346,6 +358,7 @@ namespace TailRemote
 
         private async void StartHost()
         {
+            if (ServiceHost.IsInstalled()) { Say("The TailRemote service is hosting this PC. Use Apply settings to the service instead."); return; }
             if (!CheckPassword()) return;
             string listen = _listenPassword.Text;
             if (listen.Length > 0 && (listen.Length < MinPasswordLength || listen == _password.Text))
@@ -584,6 +597,65 @@ namespace TailRemote
             bool ok = await AudioSetup.RemoveElevatedAsync();
             Say(ok ? "The TailRemote audio device is removed." : "Removing the audio device did not finish.");
             _audioSetup.Enabled = _audioRemove.Enabled = true;
+        }
+
+        // ---- The Windows service ----
+
+        private async void ServiceChanged()
+        {
+            bool want = _service.Checked;
+            if (want == ServiceHost.IsInstalled()) return;
+            string plan = want
+                ? "Run TailRemote as a Windows service?" + Environment.NewLine + Environment.NewLine +
+                  "The service starts with Windows, before anyone signs in, and has full system access. Whoever knows the TailRemote password can then use the lock screen, sign in, and approve administrator prompts on this PC, and Control Alt End sends Control Alt Delete." + Environment.NewLine + Environment.NewLine +
+                  "It uses this window's port and passwords, opens the port in Windows Firewall, and replaces Start hosting when Windows starts. Windows asks for administrator permission."
+                : "Remove the TailRemote service? This PC stops hosting until you start hosting here again. Windows asks for administrator permission.";
+            if (MessageBox.Show(this, plan, want ? "Run as a Windows service" : "Remove the service", MessageBoxButtons.OKCancel,
+                    want ? MessageBoxIcon.Warning : MessageBoxIcon.Question) != DialogResult.OK
+                || (want && (!CheckPassword() || !CheckPort(out _))))
+            {
+                SetServiceBox(!want);
+                return;
+            }
+            if (want && _host != null) StopHost(); // the service takes the port
+            SaveSettings();
+            Say("Windows asks for administrator permission.");
+            bool ok = await ServiceHost.SetAsync(want);
+            bool now = ServiceHost.IsInstalled();
+            SetServiceBox(now);
+            _startup.Checked = Startup.IsEnabled();
+            if (ok && now == want)
+                Say(want ? "The TailRemote service is running and hosting this PC on port " + _settings.Port + "." : "The TailRemote service is removed.");
+            else
+                Say((want ? "The service was not set up: " : "The service was not removed: ") + ServiceHost.LastError());
+            UpdateMode();
+        }
+
+        private async void ApplyService()
+        {
+            if (!CheckPassword() || !CheckPort(out _)) return;
+            SaveSettings();
+            Say("Giving the service these settings. Windows asks for administrator permission.");
+            Say(await ServiceHost.SetAsync(true)
+                ? "The service is hosting with these settings on port " + _settings.Port + "."
+                : "The service was not changed: " + ServiceHost.LastError());
+        }
+
+        private void SetServiceBox(bool on)
+        {
+            _settingService = true;
+            _service.Checked = on;
+            _settingService = false;
+        }
+
+        /// <summary>After this copy updated, the service may still run the old one: offer to bring it up to date.</summary>
+        private async void OfferServiceUpdate()
+        {
+            var v = ServiceHost.InstalledVersion();
+            if (v == null || !_service.Checked || v >= Updater.Current) return;
+            if (MessageBox.Show(this, "The TailRemote service runs version " + v + ", and this copy is " + Updater.Current + ". Update the service too? Windows asks for administrator permission.",
+                    "Update the service", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            Say(await ServiceHost.SetAsync(true) ? "The service is updated to version " + Updater.Current + "." : "The service was not updated: " + ServiceHost.LastError());
         }
 
         private async void StartupChanged()

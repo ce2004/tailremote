@@ -18,11 +18,28 @@ On your PC
 3. In the TailRemote window, press Control Shift Enter to control the remote PC. Every key goes there: Windows, Alt Tab, your NVDA key, everything.
 4. Press Control Shift Enter again to come back to this PC.
 
+Features
+- Control Shift Enter in the TailRemote window switches between the remote PC and this one.
+- Control Alt End sends Control Alt Delete to the remote PC, when it runs TailRemote as a service.
+- Send files (Alt I) sends files either way. They arrive in Downloads, TailRemote, on the other PC.
+- Copied text is shared between the PCs while Share clipboard text (Alt B) is checked.
+- Restart remote PC and reconnect (Alt N) restarts the remote PC and reconnects when it is back.
+- Saved PCs (Alt S): Save this PC (Alt H) remembers the address, port and password; Forget saved PC (Alt F) removes one.
+- Listen-only password, in Host mode: anyone who connects with it hears the PC but cannot control it. Up to four at once.
+
+Running the host as a Windows service
+- In Host mode, check Run as a Windows service (Alt C). It asks for administrator permission once.
+- The service starts with Windows, before anyone signs in, and has full system access. You can use the lock screen, sign in, answer administrator prompts and send Control Alt Delete with Control Alt End.
+- Anyone who knows the TailRemote password gets that access too, so use a long password.
+- While the service runs, the hosting button becomes Apply settings to the service. Press it after changing the port or passwords.
+- The service runs its own copy from Program Files. After updating TailRemote, it offers to update the service as well.
+- Uncheck Run as a Windows service to remove it completely.
+
 Settings in the main window
 - Output device: where the remote PC's sound plays here.
 
 How it keeps delay down
-- Audio is raw 16-bit 44.1 kHz stereo PCM, about 1.4 megabits per second while sound plays, nothing when it is silent. No codec, so no encoding delay.
+- Audio is 16-bit 44.1 kHz stereo, packed losslessly like FLAC: about half of the 1.4 megabits per second raw sound would take, nothing when it is silent, and well under a millisecond of delay.
 - Audio goes over UDP in 5.8 millisecond packets and is never waited for or resent.
 - The buffer sets itself. TailRemote measures how late packets arrive and holds just enough audio to cover the worst of the last 15 seconds. When the network gets rough it grows at once; when it calms down it shrinks again.
 - The buffer is steered by playing up to half a percent faster or slower, which you cannot hear, so the audio is never cut to catch up. Only a pile-up after a long network stall is cut.
@@ -42,9 +59,8 @@ Security
 - Use a long password if the port is open to the internet.
 
 Limits
-- Control Alt Delete and Windows L are kept by Windows and never reach the remote PC.
-- UAC prompts on the remote PC appear on the secure desktop, which no remote app can type into unless the remote PC turns off the secure desktop for UAC.
-- If the host signs out or locks, keys stop working until it is signed in again.
+- Control Alt Delete and Windows L on your keyboard are kept by your own PC. Use Control Alt End for the remote PC.
+- Without the service, the remote PC's lock screen and administrator prompts cannot be used from TailRemote.
 
 Releasing
 - Add a section to CHANGES.txt: the version number on its own line, then one change per line.

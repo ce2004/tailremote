@@ -1,3 +1,14 @@
+1.4.0
+Update both PCs: this version cannot connect to older ones.
+New feature: Run as a Windows service, in Host mode. The remote PC can then be used at the lock screen, the sign-in screen and administrator prompts, even right after a restart, and Control Alt End sends Control Alt Delete.
+New feature: Restart remote PC and reconnect. TailRemote reconnects by itself when the remote PC is back, and tells you.
+New feature: Send files, both ways. Files arrive in Downloads, TailRemote, on the other PC, checked so nothing arrives damaged, and never overwrite anything.
+New feature: the clipboard is shared. Copy text on one PC and paste it on the other. Turn it off with Share clipboard text.
+New feature: a listen-only password. Up to four people can listen to the remote PC with it, without being able to control it.
+New feature: Saved PCs. Save an address, port and password, and pick it from the list next time.
+New feature: sound uses about half the data, with no change at all to how it sounds.
+Changed: newer versions can add features without breaking older ones from now on.
+
 1.3.0
 Update both PCs: this version cannot connect to older ones.
 New feature: everything TailRemote sends is encrypted, so you can connect with or without Tailscale, for example straight to a cloud PC's address.

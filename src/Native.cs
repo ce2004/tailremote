@@ -59,8 +59,31 @@ namespace TailRemote
 
         private const uint KEYEVENTF_EXTENDEDKEY = 1, KEYEVENTF_KEYUP = 2;
 
+        /// <summary>Set by the service's agent: send keys to whichever desktop is showing, secure desktop included.</summary>
+        public static bool FollowInputDesktop;
+
+        [ThreadStatic] private static IntPtr _desktop;
+        [ThreadStatic] private static string? _desktopName;
+
+        /// <summary>Moves this thread to the desktop that has the keyboard (Default, Winlogon for the lock screen and UAC).</summary>
+        private static void FollowDesktop()
+        {
+            IntPtr d = NativeService.OpenInputDesktop(0, false, 0x02000000 /* MAXIMUM_ALLOWED */);
+            if (d == IntPtr.Zero) return;
+            string name = NativeService.DesktopName(d);
+            if (_desktop != IntPtr.Zero && name == _desktopName) { NativeService.CloseDesktop(d); return; }
+            if (NativeService.SetThreadDesktop(d))
+            {
+                if (_desktop != IntPtr.Zero) NativeService.CloseDesktop(_desktop);
+                _desktop = d;
+                _desktopName = name;
+            }
+            else NativeService.CloseDesktop(d);
+        }
+
         public static bool SendKey(ushort vk, ushort scan, bool up, bool extended)
         {
+            if (FollowInputDesktop) FollowDesktop();
             var input = new INPUT { type = 1 };
             input.u.ki.wVk = vk;
             input.u.ki.wScan = scan;
@@ -79,15 +102,17 @@ namespace TailRemote
         private static extern bool CryptUnprotectData(ref DATA_BLOB input, IntPtr desc, IntPtr entropy, IntPtr reserved, IntPtr prompt, int flags, out DATA_BLOB output);
         [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr p);
 
-        public static byte[] Protect(byte[] data, bool protect)
+        /// <summary>DPAPI. machine: any process on this PC can open it (the service's settings, kept in an admin-only folder).</summary>
+        public static byte[] Protect(byte[] data, bool protect, bool machine = false)
         {
+            int flags = 1 | (machine ? 4 : 0); // UI forbidden, local machine
             var h = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
                 var inBlob = new DATA_BLOB { cbData = data.Length, pbData = h.AddrOfPinnedObject() };
                 bool ok = protect
-                    ? CryptProtectData(ref inBlob, null, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, out var outBlob)
-                    : CryptUnprotectData(ref inBlob, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 1, out outBlob);
+                    ? CryptProtectData(ref inBlob, null, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, flags, out var outBlob)
+                    : CryptUnprotectData(ref inBlob, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, flags, out outBlob);
                 if (!ok) throw new InvalidOperationException("DPAPI failed: " + Marshal.GetLastWin32Error());
                 byte[] result = new byte[outBlob.cbData];
                 Marshal.Copy(outBlob.pbData, result, 0, result.Length);

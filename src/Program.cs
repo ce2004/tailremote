@@ -29,6 +29,11 @@ namespace TailRemote
             if (args.Length == 3 && args[0] == "--firewall" && int.TryParse(args[2], out int fwPort))
                 return Firewall.Apply(args[1] == "open", fwPort);
 
+            if (args.Length == 2 && args[0] == "--service")
+                return args[1] == "install" ? ServiceHost.Install() : ServiceHost.Remove();
+            if (args.Length == 1 && args[0] == "--service") return ServiceHost.RunService();
+            if (args.Length == 1 && args[0] == "--agent") return Agent.Run();
+
             if (args.Length == 1 && args[0] == "--remove-audio")
             {
                 Speech.Init();

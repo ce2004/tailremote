@@ -182,6 +182,11 @@ namespace TailRemote
 
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
+        public bool CanSecureAttention => !ListenOnly && (_peerFeatures & Protocol.FeatureSecureAttention) != 0;
+
+        /// <summary>Asks the host to send Ctrl+Alt+Del (only a host running as the service can).</summary>
+        public void SendSecureAttention() => Write(stackalloc byte[] { Protocol.SecureAttention });
+
         /// <summary>Asks the host PC to restart.</summary>
         public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
 
