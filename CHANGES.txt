@@ -1,10 +1,17 @@
+1.4.1
+Works with 1.4.0, so the two PCs can update one at a time.
+New feature: while hosting, closing the window hides TailRemote in the notification area, where it keeps hosting. Press Windows B to find it; its menu has Stop hosting and exit.
+New feature: up to 100 people can listen at once.
+Bug fixed: connecting or disconnecting cut all sound on the PC for about a second.
+Bug fixed: the sound crackled, most of all from a busy cloud PC. Audio that arrived late was treated as silence; now only real silence is. When sound does run short, it fades instead of clicking.
+
 1.4.0
 Update both PCs: this version cannot connect to older ones.
 New feature: Run as a Windows service, in Host mode. The remote PC can then be used at the lock screen, the sign-in screen and administrator prompts, even right after a restart, and Control Alt End sends Control Alt Delete.
 New feature: Restart remote PC and reconnect. TailRemote reconnects by itself when the remote PC is back, and tells you.
 New feature: Send files, both ways. Files arrive in Downloads, TailRemote, on the other PC, checked so nothing arrives damaged, and never overwrite anything.
 New feature: the clipboard is shared. Copy text on one PC and paste it on the other. Turn it off with Share clipboard text.
-New feature: a listen-only password. Up to four people can listen to the remote PC with it, without being able to control it.
+New feature: a listen-only password. Up to 100 people can listen to the remote PC with it, without being able to control it.
 New feature: Saved PCs. Save an address, port and password, and pick it from the list next time.
 New feature: sound uses about half the data, with no change at all to how it sounds.
 Changed: newer versions can add features without breaking older ones from now on.

@@ -38,7 +38,11 @@ namespace TailRemote
         private readonly FlowLayoutPanel _savedButtons = new() { AutoSize = true };
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
+        private readonly NotifyIcon _tray = new() { Text = "TailRemote, hosting", Icon = SystemIcons.Application };
+        private bool _reallyExit; // Stop hosting and exit, from the tray: close for real
         private Client? _client;
+        private Player? _player;       // kept between connections: no device opens or closes on connect
+        private string? _playerDevice;
         private Host? _host;
         private KeyCapture? _keys;
         private IntPtr _handle;
@@ -126,6 +130,11 @@ namespace TailRemote
             _startup.CheckedChanged += (_, _) => StartupChanged();
             _service.CheckedChanged += (_, _) => { if (!_settingService) ServiceChanged(); };
             _titleTimer.Tick += (_, _) => UpdateTitle();
+            var trayMenu = new ContextMenuStrip();
+            trayMenu.Items.Add("&Open TailRemote", null, (_, _) => RestoreFromTray());
+            trayMenu.Items.Add("&Stop hosting and exit", null, (_, _) => { _reallyExit = true; RestoreFromTray(); Close(); });
+            _tray.ContextMenuStrip = trayMenu;
+            _tray.Click += (_, e) => { if (e is not MouseEventArgs m || m.Button == MouseButtons.Left) RestoreFromTray(); };
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
             UpdateMode();
         }
@@ -307,7 +316,7 @@ namespace TailRemote
             {
                 _mode.SelectedIndex = 1;
                 Go();
-                WindowState = FormWindowState.Minimized;
+                BeginInvoke(() => HideToTray(announce: false)); // started with Windows: out of the way
             }
             else if (_autoConnect && !HostMode && _address.Text.Trim().Length > 0) Go();
         }
@@ -457,8 +466,15 @@ namespace TailRemote
             string device = _devices[Math.Max(0, _device.SelectedIndex)].Id;
             try
             {
+                if (_player == null || _playerDevice != device)
+                {
+                    _player?.Dispose();
+                    _player = new Player(device, msg => Later(() => Say(msg)));
+                    _playerDevice = device;
+                }
+                var player = _player;
                 var c = await System.Threading.Tasks.Task.Run(() =>
-                    Client.Connect(address, port, pw, device, msg => Later(() => Say(msg))));
+                    Client.Connect(address, port, pw, player, msg => Later(() => Say(msg))));
                 if (attempt != _attempt || HostMode || _client != null)
                 {
                     // Stopped, switched to hosting, or already connected while this was under way.
@@ -692,13 +708,37 @@ namespace TailRemote
             Speech.Speak(line);
         }
 
+        /// <summary>While hosting, closing the window only hides it: hosting carries on from the notification area.</summary>
+        private void HideToTray(bool announce)
+        {
+            _tray.Visible = true;
+            Hide();
+            if (announce) Speech.Speak("TailRemote is still hosting, in the notification area. Press Windows B to find it. Use its menu to stop hosting and exit.");
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Activate();
+            _tray.Visible = false;
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (e.CloseReason == CloseReason.UserClosing && _host != null && !_reallyExit)
+            {
+                e.Cancel = true;
+                HideToTray(announce: true);
+                return;
+            }
+            _tray.Visible = false;
             _settings.ResumeState = _host != null ? "host" : _client != null || _reconnecting ? "connect" : "";
             SaveSettings();
             _retryTimer.Stop();
             _keys?.SetClient(null);
             _client?.Dispose();
+            _player?.Dispose();
             _host?.Dispose();
             _keys?.Dispose();
             base.OnFormClosing(e);

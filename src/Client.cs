@@ -41,7 +41,8 @@ namespace TailRemote
         }
 
         /// <summary>Connects and checks the password; throws with a readable message on failure.</summary>
-        public static Client Connect(string address, int port, string password, string? deviceId, Action<string> status)
+        /// <summary>The player is the caller's and outlives the connection, so connecting never opens or closes an audio device.</summary>
+        public static Client Connect(string address, int port, string password, Player player, Action<string> status)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
             tcp.Client.DualMode = true;
@@ -104,7 +105,7 @@ namespace TailRemote
                 Host.IgnoreUdpResets(udp.Client);
                 udp.Connect(hostEp.Address, port);
 
-                var player = new Player(deviceId, status);
+                player.Reset();
                 var c = new Client(tcp, stream, udp, token, player, new SecureLink(key, hostNonce, myNonce, isHost: false))
                 {
                     ListenOnly = role[0] == Protocol.RoleListen,
@@ -161,7 +162,6 @@ namespace TailRemote
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
             _files?.Dispose();
-            _player.Dispose();
             if (why != null) Disconnected?.Invoke(why);
             // The link is left for the garbage collector: a hook-thread SendKey may still be using it.
         }

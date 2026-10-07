@@ -25,7 +25,7 @@ Features
 - Copied text is shared between the PCs while Share clipboard text (Alt B) is checked.
 - Restart remote PC and reconnect (Alt N) restarts the remote PC and reconnects when it is back.
 - Saved PCs (Alt S): Save this PC (Alt H) remembers the address, port and password; Forget saved PC (Alt F) removes one.
-- Listen-only password, in Host mode: anyone who connects with it hears the PC but cannot control it. Up to four at once.
+- Listen-only password, in Host mode: anyone who connects with it hears the PC but cannot control it. Up to 100 at once. Each listener uses about 0.7 megabits per second of the host's upload while sound plays.
 
 Running the host as a Windows service
 - In Host mode, check Run as a Windows service (Alt C). It asks for administrator permission once.

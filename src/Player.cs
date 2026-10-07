@@ -42,6 +42,8 @@ namespace TailRemote
         private readonly float[] _ring = new float[192000 * 2 * 2]; // 2 s of stereo at up to 192 kHz
         private int _read, _count; // in floats
         private bool _playing, _starved;
+        private float _gain, _lastL, _lastR;
+        private int _fadeOut;
         private double _avgMs;
 
         private volatile int _deviceRate;
@@ -71,6 +73,20 @@ namespace TailRemote
             if (deviceId == NoDevice) _stop = true;
             _thread = new Thread(Run) { IsBackground = true, Name = "TailRemote playback", Priority = ThreadPriority.Highest };
             _thread.Start();
+        }
+
+        /// <summary>
+        /// Forgets the last connection's audio, ready for the next. The output
+        /// stream stays open, so connecting never opens or closes a device.
+        /// Call only while no connection is feeding it.
+        /// </summary>
+        public void Reset()
+        {
+            lock (_gate)
+            {
+                _read = 0; _count = 0; _playing = false; _starved = false; _fadeOut = 0; _gain = 0;
+            }
+            _haveSeq = false;
         }
 
         public void Dispose()
@@ -218,21 +234,13 @@ namespace TailRemote
             var client = Wasapi.Activate(dev);
             client.GetMixFormat(out IntPtr fmtPtr);
             var fmt = Wasapi.ReadFormat(fmtPtr);
-            double periodMs;
-            try
-            {
-                // The smallest engine period the driver offers (often 2.7 ms or less).
-                client.GetSharedModeEnginePeriod(fmtPtr, out _, out _, out uint minFrames, out _);
-                client.InitializeSharedAudioStream(Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, minFrames, fmtPtr, IntPtr.Zero);
-                periodMs = minFrames * 1000.0 / fmt.Rate;
-            }
-            catch
-            {
-                client = Wasapi.Activate(dev);
-                client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, fmtPtr, IntPtr.Zero);
-                client.GetDevicePeriod(out long def, out _);
-                periodMs = def / 10000.0;
-            }
+            // The normal engine period, on purpose. Asking for the smallest one
+            // makes Windows reconfigure the device for every program, which cut
+            // all sound on the PC for about a second on connect and disconnect,
+            // and a period of 3 ms or less underruns (crackles) on a busy PC.
+            client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, fmtPtr, IntPtr.Zero);
+            client.GetDevicePeriod(out long def, out _);
+            double periodMs = def / 10000.0;
             Marshal.FreeCoTaskMem(fmtPtr);
 
             using var ev = new AutoResetEvent(false);
@@ -309,21 +317,36 @@ namespace TailRemote
                         _read = (_read + drop) % cap;
                         _count -= drop;
                         _avgMs = target;
+                        _gain = 0; // fade in after the jump rather than click
                     }
                 }
 
+                int fadeLen = Math.Max(1, fmt.Rate / 500); // 2 ms
                 for (int f = 0; f < frames; f++)
                 {
                     float l = 0, r = 0;
+                    if (_playing && _count < 2)
+                    {
+                        // Ran dry: refill to the target. Glide out from the last sample
+                        // instead of dropping to zero, which is what clicked.
+                        _playing = false;
+                        _starved = true;
+                        _fadeOut = fadeLen;
+                        _gain = 0;
+                    }
                     if (_playing)
                     {
-                        if (_count >= 2)
-                        {
-                            l = _ring[_read]; r = _ring[(_read + 1) % cap];
-                            _read = (_read + 2) % cap;
-                            _count -= 2;
-                        }
-                        else { _playing = false; _starved = true; } // ran dry: refill to the target
+                        l = _ring[_read]; r = _ring[(_read + 1) % cap];
+                        _read = (_read + 2) % cap;
+                        _count -= 2;
+                        if (_gain < 1f) { _gain = Math.Min(1f, _gain + 1f / fadeLen); l *= _gain; r *= _gain; }
+                        _lastL = l; _lastR = r;
+                    }
+                    else if (_fadeOut > 0)
+                    {
+                        float g = (float)_fadeOut / fadeLen;
+                        l = _lastL * g; r = _lastR * g;
+                        _fadeOut--;
                     }
                     if (fmt.IsFloat && fmt.Bits == 32)
                     {

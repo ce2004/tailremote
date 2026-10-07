@@ -161,9 +161,11 @@ namespace TailRemote
                 return Fail("port rules");
             try { new Host(47999, "x", null, log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
             catch (InvalidOperationException e) when (e.Message.Contains("already used")) { }
-            try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
+            using var silent = new Player(Player.NoDevice, log.Enqueue);
+            using var silent2 = new Player(Player.NoDevice, log.Enqueue);
+            try { Client.Connect("127.0.0.1", 47999, "nope", silent, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
             catch (InvalidOperationException e) when (e.Message == "Wrong password.") { }
-            using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, log.Enqueue);
+            using var c = Client.Connect("127.0.0.1", 47999, "secret", silent, log.Enqueue);
             for (int i = 0; i < 40 && c.LastPingMs < 0; i++) System.Threading.Thread.Sleep(100);
             if (c.LastPingMs < 0) return Fail("no ping reply. " + Dump());
             if (c.ListenOnly) return Fail("the main password gave a listener");
@@ -173,7 +175,7 @@ namespace TailRemote
             c.ClipboardReceived += t => toClient = t;
             c.SendClipboard("from client ✓");
             host.SendClipboard("from host ✓");
-            using var listener = Client.Connect("127.0.0.1", 47999, "listen", Player.NoDevice, log.Enqueue);
+            using var listener = Client.Connect("127.0.0.1", 47999, "listen", silent2, log.Enqueue);
             if (!listener.ListenOnly) return Fail("the listen password gave control");
             listener.SendClipboard("from listener");
             for (int i = 0; i < 40 && (toHost == null || toClient == null); i++) System.Threading.Thread.Sleep(50);

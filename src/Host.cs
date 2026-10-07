@@ -11,12 +11,12 @@ namespace TailRemote
     /// <summary>
     /// The PC being controlled. One controller at a time (a new controller
     /// replaces the old one, so reconnecting after a dropped network just works),
-    /// plus up to four listeners who hear everything but cannot type. Which one a
+    /// plus up to 100 listeners who hear everything but cannot type. Which one a
     /// client becomes depends on which password it proved.
     /// </summary>
     internal sealed class Host : IDisposable
     {
-        public const int MaxListeners = 4;
+        public const int MaxListeners = 100;
 
         private readonly byte[] _key;
         private readonly byte[]? _listenKey;
@@ -85,6 +85,7 @@ namespace TailRemote
             }
             IgnoreUdpResets(_udp.Client);
 
+            lock (_gate) UpdateCapture();
             new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote accept" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote host udp" }.Start();
         }
@@ -141,7 +142,9 @@ namespace TailRemote
         /// <summary>One capture serves everyone; it runs only while someone is connected. Call under _gate.</summary>
         private void UpdateCapture()
         {
-            bool anyone = !_stop && (_controller != null || _listeners.Count > 0);
+            // Runs for as long as this PC hosts, so connecting and disconnecting never
+            // start or stop audio capture. With nobody connected it sends nothing.
+            bool anyone = !_stop;
             if (anyone && _capture == null)
                 _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); });
             else if (!anyone && _capture != null)

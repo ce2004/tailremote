@@ -78,6 +78,8 @@ namespace TailRemote
             float[] stereo = new float[4096];
             client.Start();
             long lastDataAt = Environment.TickCount64, lastDeviceCheck = lastDataAt;
+            long expectedQpc = -1; // when the next audio should have been played, in 100 ns units
+            float[] silence = new float[2 * 4096];
             try
             {
                 while (!_stop)
@@ -88,12 +90,30 @@ namespace TailRemote
                         int nhr = cap.GetNextPacketSize(out uint next);
                         if (nhr < 0) throw Marshal.GetExceptionForHR(nhr)!; // device reset: reopen
                         if (next == 0) break;
-                        // Nothing played for a while: move the packet count on by the
-                        // gap, so the player sees a fresh start, not a very late packet.
-                        long gap = Environment.TickCount64 - lastDataAt;
-                        if (gap > 20 && _fill == 0) _seq += (uint)(gap * Protocol.AudioRate / 1000 / Protocol.PacketFrames);
-                        int hr = cap.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out _);
+                        int hr = cap.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out ulong qpc);
                         if (hr < 0) throw Marshal.GetExceptionForHR(hr)!;
+
+                        // Gaps are measured by when Windows says the audio was played,
+                        // never by when it reached us. On a busy PC audio often arrives
+                        // late in a burst; treating that as silence is what crackled.
+                        if (expectedQpc >= 0)
+                        {
+                            long gap100ns = (long)qpc - expectedQpc;
+                            double gapFrames = gap100ns * (double)Protocol.AudioRate / 10_000_000;
+                            if (gapFrames > Protocol.PacketFrames * 8)
+                            {
+                                // A real pause: finish the part-filled packet and move the
+                                // count on, so the player starts fresh.
+                                while (_fill > 0) Emit(0, 0);
+                                _seq += (uint)(gapFrames / Protocol.PacketFrames);
+                            }
+                            else if (gap100ns > 20_000) // over 2 ms of real silence: keep the timing exact
+                            {
+                                int n = Math.Min((int)(gap100ns * fmt.Rate / 10_000_000), silence.Length / 2);
+                                rs.Process(silence.AsSpan(0, n * 2), Emit);
+                            }
+                        }
+                        expectedQpc = (long)qpc + (long)frames * 10_000_000 / fmt.Rate;
                         if (stereo.Length < frames * 2) stereo = new float[frames * 4];
                         ToStereo(data, (int)frames, fmt, (flags & Wasapi.AUDCLNT_BUFFERFLAGS_SILENT) != 0, stereo);
                         cap.ReleaseBuffer(frames);
@@ -102,8 +122,9 @@ namespace TailRemote
                     }
 
                     long now = Environment.TickCount64;
-                    // The tail of a sound: send the part-filled packet rather than hold it.
-                    if (_fill > 0 && now - lastDataAt > 15)
+                    // The tail of a sound: after a real stop, send the part-filled packet
+                    // rather than hold it. Not sooner: late audio is not the end of a sound.
+                    if (_fill > 0 && now - lastDataAt > 100)
                     {
                         while (_fill > 0) Emit(0, 0);
                     }
