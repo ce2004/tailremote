@@ -92,6 +92,7 @@ namespace TailRemote
             IgnoreUdpResets(_udp.Client);
 
             lock (_gate) UpdateCapture();
+            _wifi = new WlanStreaming("host"); // steady Wi-Fi while hosting
             new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote accept" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote host udp" }.Start();
         }
@@ -99,6 +100,7 @@ namespace TailRemote
         public void Dispose()
         {
             _stop = true;
+            _wifi?.Dispose();
             try { _listener.Stop(); } catch { }
             try { _udp.Dispose(); } catch { }
             lock (_gate)
@@ -243,6 +245,7 @@ namespace TailRemote
         }
 
         private volatile int _burstMs;
+        private readonly WlanStreaming _wifi;
         private int _txPackets, _txBytes;
 
         /// <summary>Once a second while logging is on: what the host is capturing and sending.</summary>

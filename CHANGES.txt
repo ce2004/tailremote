@@ -1,3 +1,8 @@
+1.7.6
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: hosting from some virtual audio devices, such as Virtual Audio Cable, made the sound choppy. TailRemote mistook uneven timing information from the device for gaps and added about a third more sound than there was, which the other PC then had to cut away. Only real gaps count now.
+New feature: while connected or hosting, TailRemote keeps Wi-Fi steady. It turns on Windows media streaming mode and pauses background network scans, which made the sound chop whenever the Wi-Fi card was busy. Windows puts both back when TailRemote disconnects or closes.
+
 1.7.5
 Works with 1.7 and older, so the two PCs can update one at a time.
 New feature: Enable logging (Alt G). While it is on, TailRemote writes TailRemote-log.txt next to itself: every connection, every sound problem, and a line every second with how the sound is doing on that PC. What you type is never written down, only how many keys were pressed. For the service, press Apply settings to the service after turning it on.

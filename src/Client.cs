@@ -29,6 +29,7 @@ namespace TailRemote
         /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
         public event Action<string>? FileMessage;
         private FileChannel? _files;
+        private WlanStreaming? _wifi;
         private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
 
         /// <summary>0 = full quality; above that, a lower sample rate (or, with a 1.5.0 host, fewer bits) while the connection struggles.</summary>
@@ -155,6 +156,7 @@ namespace TailRemote
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote udp", Priority = ThreadPriority.Highest }.Start();
             new Thread(Heartbeat) { IsBackground = true, Name = "TailRemote heartbeat" }.Start();
             new Thread(QualityLoop) { IsBackground = true, Name = "TailRemote quality" }.Start();
+            _wifi = new WlanStreaming("client"); // steady Wi-Fi while connected
         }
 
         public void Dispose() => Close(null);
@@ -167,6 +169,7 @@ namespace TailRemote
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
             _files?.Dispose();
+            _wifi?.Dispose();
             if (why != null) Disconnected?.Invoke(why);
             // The link is left for the garbage collector: a hook-thread SendKey may still be using it.
         }
