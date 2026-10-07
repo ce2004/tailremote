@@ -706,8 +706,8 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// The service updates itself from GitHub. After this copy updated, nudge
-        /// it to check now rather than at its next 10-minute check. No questions.
+        /// The service never updates on its own. After this copy was updated with
+        /// Check for updates, nudge it to follow, to the same version. No questions.
         /// </summary>
         private void OfferServiceUpdate()
         {

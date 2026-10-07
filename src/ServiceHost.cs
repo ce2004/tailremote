@@ -385,20 +385,18 @@ namespace TailRemote
         private static volatile bool Restarting;
 
         /// <summary>
-        /// 30 seconds after starting, then every 10 minutes (or at once when
-        /// nudged): if GitHub has a newer TailRemote, download this PC's copy,
-        /// check it against GitHub's fingerprint, put it in place of the running
-        /// one and restart into it. No questions, no administrator prompt: the
-        /// service already runs as SYSTEM.
+        /// Never on its own: Conner chooses when to update. When TailRemote on
+        /// this PC has been updated (Check for updates), it nudges the service,
+        /// which then downloads the same version for itself, checks it against
+        /// GitHub's fingerprint, puts it in place of the running one and restarts
+        /// into it. No questions, no administrator prompt: it runs as SYSTEM.
         /// </summary>
         private static void UpdateLoop()
         {
-            WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }, 30_000);
-            while (!Stop.WaitOne(0))
+            while (WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }) == 1)
             {
-                try { TryUpdate(); } catch (Exception e) { Log("Update check failed: " + e.Message); }
+                try { TryUpdate(); } catch (Exception e) { Log("Update failed: " + e.Message); }
                 if (Restarting) { Wake.Set(); return; }
-                WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }, 10 * 60_000);
             }
         }
 
@@ -406,6 +404,12 @@ namespace TailRemote
         {
             var r = Updater.CheckAsync().GetAwaiter().GetResult();
             if (r == null) return;
+            var chosen = WindowVersion();
+            if (chosen != null && r.Version > chosen)
+            {
+                Log("GitHub has " + r.Version + ", but TailRemote on this PC is " + chosen + "; staying in step with it.");
+                return;
+            }
             Log("Updating the service to version " + r.Version + ".");
             byte[] data;
             using (var h = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(10) })
@@ -439,6 +443,8 @@ namespace TailRemote
                     pipe.WaitForConnection();
                     if (pipe.ReadByte() == 1 && Environment.TickCount64 - last >= 60_000)
                     {
+                        int a = pipe.ReadByte(), b = pipe.ReadByte(), c = pipe.ReadByte();
+                        _windowVersion = a >= 0 && b >= 0 && c >= 0 ? new Version(a, b, c) : null;
                         last = Environment.TickCount64;
                         CheckNow.Set();
                     }
@@ -447,6 +453,11 @@ namespace TailRemote
             }
         }
 
+        private static Version? _windowVersion;
+
+        /// <summary>The version the TailRemote window that nudged us runs, sent with the nudge.</summary>
+        private static Version? WindowVersion() => _windowVersion;
+
         /// <summary>From the TailRemote window, after it updated: ask the service to check for its update now.</summary>
         public static bool NudgeUpdate()
         {
@@ -454,7 +465,8 @@ namespace TailRemote
             {
                 using var pipe = new NamedPipeClientStream(".", UpdatePipeName, PipeDirection.Out);
                 pipe.Connect(2000);
-                pipe.WriteByte(1);
+                var v = Updater.Current;
+                pipe.Write(new byte[] { 1, (byte)v.Major, (byte)v.Minor, (byte)Math.Max(0, v.Build) });
                 return true;
             }
             catch { return false; }
