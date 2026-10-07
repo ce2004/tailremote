@@ -145,6 +145,26 @@ namespace TailRemote
             for (int i = 0; i < 40 && (toHost == null || toClient == null); i++) System.Threading.Thread.Sleep(50);
             System.Threading.Thread.Sleep(100);
             if (toHost != "from client ✓" || toClient != "from host ✓") return Fail("clipboard: host got " + toHost + ", client got " + toClient);
+
+            // Files both ways, into a temporary folder, checked byte for byte.
+            string dir = Path.Combine(Path.GetTempPath(), "tailremote-selftest-files");
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            FileChannel.FolderOverride = Path.Combine(dir, "in");
+            Directory.CreateDirectory(dir);
+            byte[] content = new byte[700_000];
+            new Random(5).NextBytes(content);
+            string src = Path.Combine(dir, "test file.bin");
+            File.WriteAllBytes(src, content);
+            var got = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            host.FileMessage += got.Enqueue;
+            c.FileMessage += got.Enqueue;
+            for (int i = 0; i < 40; i++) { try { c.SendFiles(new[] { src }, (_, _) => { }, default); break; } catch when (i < 39) { System.Threading.Thread.Sleep(50); } }
+            host.SendFiles(new[] { src }, (_, _) => { }, default);
+            for (int i = 0; i < 100 && got.Count < 2; i++) System.Threading.Thread.Sleep(50);
+            string a1 = Path.Combine(FileChannel.Folder, "test file.bin"), a2 = Path.Combine(FileChannel.Folder, "test file (2).bin");
+            if (got.Count < 2 || !File.Exists(a2) || !File.ReadAllBytes(a1).AsSpan().SequenceEqual(content) || !File.ReadAllBytes(a2).AsSpan().SequenceEqual(content))
+                return Fail("files: " + string.Join(" / ", got));
+            Directory.Delete(dir, true);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + CableReport());
             return 0;
 

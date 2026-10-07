@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -25,6 +26,9 @@ namespace TailRemote
         public event Action<string>? ClipboardReceived;
         /// <summary>True when the host let us in with its listen-only password: audio only, no keys.</summary>
         public bool ListenOnly { get; private set; }
+        /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
+        public event Action<string>? FileMessage;
+        private FileChannel? _files;
         private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
@@ -105,6 +109,7 @@ namespace TailRemote
                     ListenOnly = role[0] == Protocol.RoleListen,
                 };
                 c._link.Send(stream, Protocol.FeaturesMessage());
+                if (!c.ListenOnly) c._files = OpenFiles(hostEp, token, key, hostNonce, myNonce, msg => c.FileMessage?.Invoke(msg));
                 c.Status += status;
                 c.Start();
                 return c;
@@ -112,6 +117,32 @@ namespace TailRemote
             catch (System.IO.IOException) { tcp.Dispose(); throw new InvalidOperationException("The host closed the connection."); }
             catch { tcp.Dispose(); throw; }
         }
+
+        /// <summary>The second connection, for files. Without it everything else still works.</summary>
+        private static FileChannel? OpenFiles(IPEndPoint host, byte[] token, byte[] key, byte[] hostNonce, byte[] myNonce, Action<string> announce)
+        {
+            var tcp = new TcpClient(AddressFamily.InterNetworkV6);
+            tcp.Client.DualMode = true;
+            try
+            {
+                if (!tcp.ConnectAsync(host.Address, host.Port).Wait(5000)) throw new TimeoutException();
+                var s = tcp.GetStream();
+                s.ReadTimeout = 5000;
+                byte[] hello = new byte[20];
+                Protocol.ReadExactly(s, hello);
+                byte[] answer = new byte[52];
+                Protocol.FileMagic.CopyTo(answer, 0);
+                token.CopyTo(answer, 4);
+                s.Write(answer);
+                return new FileChannel(tcp, new SecureLink(key, hostNonce, myNonce, isHost: false, "files "), announce);
+            }
+            catch { tcp.Dispose(); return null; }
+        }
+
+        /// <summary>Sends files to the host. Blocking; throws with a readable message.</summary>
+        public string SendFiles(IReadOnlyList<string> paths, Action<string, int> report, CancellationToken ct) =>
+            (_files ?? throw new InvalidOperationException(ListenOnly ? "Listeners cannot send files." : "File sending is not available on this connection. Reconnect and try again."))
+                .Send(paths, report, ct);
 
         private void Start()
         {
@@ -128,6 +159,7 @@ namespace TailRemote
             _closed = true;
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
+            _files?.Dispose();
             _player.Dispose();
             if (why != null) Disconnected?.Invoke(why);
             // The link is left for the garbage collector: a hook-thread SendKey may still be using it.

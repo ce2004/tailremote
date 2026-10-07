@@ -25,12 +25,13 @@ namespace TailRemote
         private ulong _sendCounter, _recvCounter;
         private readonly byte[] _recvHead = new byte[4];
 
-        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost)
+        /// <summary>purpose keeps a second connection (files) on keys of its own.</summary>
+        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "")
         {
             byte[] salt = new byte[32];
             hostNonce.CopyTo(salt, 0);
             clientNonce.CopyTo(salt, 16);
-            byte[] Derive(string info) => HKDF.DeriveKey(HashAlgorithmName.SHA256, key, 32, salt, System.Text.Encoding.ASCII.GetBytes(info));
+            byte[] Derive(string info) => HKDF.DeriveKey(HashAlgorithmName.SHA256, key, 32, salt, System.Text.Encoding.ASCII.GetBytes(purpose + info));
             byte[] toHost = Derive("TailRemote tcp to host"), toClient = Derive("TailRemote tcp to client");
             _send = new AesGcm(isHost ? toClient : toHost, TagSize);
             _recv = new AesGcm(isHost ? toHost : toClient, TagSize);

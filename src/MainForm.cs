@@ -27,6 +27,7 @@ namespace TailRemote
         private readonly Button _audioSetup = new() { Text = "Set up au&dio device", AutoSize = true };
         private readonly Button _audioRemove = new() { Text = "Remove audio de&vice", AutoSize = true };
         private readonly Button _portEditor = new() { Text = "Port &editor", AutoSize = true };
+        private readonly Button _sendFiles = new() { Text = "Send f&iles", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
         private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel;
@@ -74,6 +75,7 @@ namespace TailRemote
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
+            buttons.Controls.Add(_sendFiles);
             buttons.Controls.Add(_audioSetup);
             buttons.Controls.Add(_audioRemove);
             buttons.Controls.Add(_portEditor);
@@ -107,6 +109,7 @@ namespace TailRemote
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
+            _sendFiles.Click += (_, _) => SendFiles();
             _audioSetup.Click += (_, _) => SetUpAudio();
             _audioRemove.Click += (_, _) => RemoveAudio();
             _portEditor.Click += (_, _) => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); };
@@ -189,6 +192,22 @@ namespace TailRemote
                 try { Clipboard.SetText(text); return; }
                 catch { System.Threading.Thread.Sleep(20); }
             }
+        }
+
+        // ---- Files ----
+
+        private void SendFiles()
+        {
+            if (_client == null && _host == null) { Say("Connect or start hosting first."); return; }
+            if (_client?.ListenOnly == true) { Say("Listeners cannot send files."); return; }
+            using var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
+            if (pick.ShowDialog(this) != DialogResult.OK) return;
+            string[] paths = pick.FileNames;
+            var client = _client;
+            var host = _host;
+            using var progress = new SetupForm("Sending files", (report, ct) => System.Threading.Tasks.Task.Run(() =>
+                client != null ? client.SendFiles(paths, report, ct) : host!.SendFiles(paths, report, ct), ct));
+            progress.ShowDialog(this);
         }
 
         // ---- Saved PCs ----
@@ -321,6 +340,7 @@ namespace TailRemote
             {
                 _host = new Host(port, _password.Text, listen, msg => Later(() => Log(msg)));
                 _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
+                _host.FileMessage += msg => Later(() => Say(msg));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
                 else if (Wasapi.OutputDevices().Count == 0)
@@ -411,6 +431,7 @@ namespace TailRemote
                 }
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
+                c.FileMessage += msg => Later(() => Say(msg));
                 _client = c;
                 if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys
                 bool wasReconnecting = _reconnecting;

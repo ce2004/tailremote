@@ -33,6 +33,8 @@ namespace TailRemote
     {
         public const int DefaultPort = 47120;
         public static readonly byte[] Magic = "TRM5"u8.ToArray();
+        /// <summary>A client's second connection, for files: "TRF5" + session token (8), padded to 52 bytes.</summary>
+        public static readonly byte[] FileMagic = "TRF5"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -55,9 +57,10 @@ namespace TailRemote
 
         // Feature flags
         public const uint FeatureClipboard = 1;
+        public const uint FeatureFiles = 2;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles;
 
         public const int MaxClipboardChars = 1_000_000;
 

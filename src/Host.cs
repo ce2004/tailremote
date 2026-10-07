@@ -30,6 +30,8 @@ namespace TailRemote
 
         /// <summary>Clipboard text from the controller. Raised on a network thread.</summary>
         public event Action<string>? ClipboardReceived;
+        /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
+        public event Action<string>? FileMessage;
 
         private readonly object _gate = new();
         private Session? _controller;
@@ -44,6 +46,8 @@ namespace TailRemote
             public required IPAddress Address;
             public required SecureLink Link;
             public required byte Role;
+            public required byte[] Key, HostNonce, ClientNonce;
+            public FileChannel? Files;
             public uint PeerFeatures;
             public volatile IPEndPoint? AudioTo;
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
@@ -115,6 +119,15 @@ namespace TailRemote
             try { c.Link.Send(c.Stream, Protocol.TextMessage(Protocol.Clipboard, text)); } catch { }
         }
 
+        /// <summary>Sends files to the controller. Blocking; throws with a readable message.</summary>
+        public string SendFiles(IReadOnlyList<string> paths, Action<string, int> report, CancellationToken ct)
+        {
+            Session? c;
+            lock (_gate) c = _controller;
+            var files = c?.Files ?? throw new InvalidOperationException("No one is controlling this PC, so there is no one to send files to.");
+            return files.Send(paths, report, ct);
+        }
+
         private List<Session> AllSessions()
         {
             var all = new List<Session>(_listeners);
@@ -160,6 +173,7 @@ namespace TailRemote
             var remote = ((IPEndPoint)tcp.Client.RemoteEndPoint!).Address;
             if (remote.IsIPv4MappedToIPv6) remote = remote.MapToIPv4();
             Session? s = null;
+            bool handedOff = false;
             try
             {
                 tcp.NoDelay = true;
@@ -174,6 +188,23 @@ namespace TailRemote
 
                 byte[] answer = new byte[52];
                 Protocol.ReadExactly(stream, answer);
+                if (answer.AsSpan(0, 4).SequenceEqual(Protocol.FileMagic))
+                {
+                    // The controller's second connection, for files.
+                    // It can arrive a moment before the main connection is registered.
+                    Session? owner = null;
+                    for (int i = 0; i < 40 && owner == null; i++)
+                    {
+                        lock (_gate) owner = _controller != null && _controller.Token.AsSpan().SequenceEqual(answer.AsSpan(4, 8)) && _controller.Address.Equals(remote) ? _controller : null;
+                        if (owner == null) Thread.Sleep(50);
+                    }
+                    if (owner == null) { tcp.Dispose(); return; }
+                    owner.Files?.Dispose();
+                    owner.Files = new FileChannel(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, "files "),
+                        msg => FileMessage?.Invoke(msg));
+                    handedOff = true;
+                    return;
+                }
                 byte[] clientNonce = answer[4..20];
                 byte role = 0;
                 byte[]? key = null;
@@ -207,6 +238,7 @@ namespace TailRemote
                 s = new Session
                 {
                     Tcp = tcp, Stream = stream, Token = token, Address = remote, Role = role,
+                    Key = key, HostNonce = nonce, ClientNonce = clientNonce,
                     Link = new SecureLink(key, nonce, clientNonce, isHost: true),
                 };
                 s.Link.Send(s.Stream, Protocol.FeaturesMessage());
@@ -251,7 +283,7 @@ namespace TailRemote
                     }
                     if (was) _status((s.Role == Protocol.RoleControl ? "Disconnected: " : "Stopped listening: ") + remote + ".");
                 }
-                else tcp.Dispose();
+                else if (!handedOff) tcp.Dispose();
             }
         }
 
@@ -308,6 +340,7 @@ namespace TailRemote
             if (why != null) { try { Protocol.SendMessage(s.Link, s.Stream, why); } catch { } }
             ReleaseHeld(s);
             try { s.Tcp.Dispose(); } catch { }
+            s.Files?.Dispose();
         }
 
         /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
