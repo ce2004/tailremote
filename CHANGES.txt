@@ -1,3 +1,8 @@
+1.8.3
+Changed: joining on a terrible connection, even dial-up, finds a bitrate that fits within a few seconds instead of trying over and over for 20. It now notices when the sound is arriving slower than real time, which is how a modem or a full connection behaves (it queues the sound rather than losing it), and goes straight for the bitrate the connection can really carry.
+Changed: any change of bitrate takes about 3 seconds however far it goes, so a big drop no longer crawls one step at a time, and a small one is still gentle.
+Changed: after a slow spell, it holds at the speed the connection was measured to carry for 5 seconds before climbing back, so it no longer climbs straight back into trouble on a modem. On a connection that has really recovered it is back at full quality a few seconds later.
+
 1.8.2
 Bug fixed: after a bad stretch of network, the sound could stay at a low bitrate for up to a minute even though the connection was fine again. Now it starts climbing back as soon as the connection is clean, one step every three quarters of a second, and is back to full quality within about 10 seconds even from the very bottom.
 

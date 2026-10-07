@@ -302,6 +302,9 @@ namespace TailRemote
         public static int TestKbps;
         /// <summary>Test only (--audiotest ... untilN): the bandwidth limit ends N seconds in, to check the climb back.</summary>
         public static int TestKbpsUntil;
+        /// <summary>Test only (--audiotest ... dialupN): from the start, an N kbit/s link that queues like a modem (2 s of buffer) instead of dropping.</summary>
+        public static int TestDialupKbps;
+        private double _modemFreeAt;
         /// <summary>Test only: the length (in 5 ms ticks) of the first audio packet, and how many packets came at another length.</summary>
         public static int TestFirstTicks, TestOtherTicks;
         public static int TestLockStep = -1;
@@ -330,7 +333,7 @@ namespace TailRemote
 
         private void UdpLoop()
         {
-            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
+            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
@@ -347,6 +350,15 @@ namespace TailRemote
                     _bucketAt = t;
                     if (_bucket < d.Length) continue;
                     _bucket -= d.Length;
+                }
+                if (TestDialupKbps > 0)
+                {
+                    double t = _jitterClock.Elapsed.TotalMilliseconds;
+                    double start = Math.Max(t, _modemFreeAt);
+                    if (start - t > 2000) continue; // the modem's buffer is full: dropped
+                    _modemFreeAt = start + (d.Length + Protocol.PacketOverheadBytes - 22) * 8.0 / TestDialupKbps;
+                    lock (_jitterQueue) _jitterQueue.Add(((long)_modemFreeAt, _jitterN++), d);
+                    continue;
                 }
                 if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0)
                 {
@@ -390,6 +402,7 @@ namespace TailRemote
             if (!_link.OpenAudio(d, d.Length)) { Interlocked.Increment(ref _rxDamaged); return; } // changed on the way (or not for us): counts as lost
             Interlocked.Increment(ref _qPackets);
             Interlocked.Add(ref _qBytes, d.Length);
+            if (d[5] is >= 1 and <= 24) Interlocked.Add(ref _qTicks, d[5]);
             int ticks = d[5];
             if (ticks < 1 || ticks > 24) return;
             if (TestFirstTicks == 0) TestFirstTicks = ticks; else if (ticks != TestFirstTicks) TestOtherTicks++;
@@ -453,12 +466,14 @@ namespace TailRemote
         // ---- Bitrate steps ----
 
         private const int QualityTickMs = 200;
-        private const int StepEveryMs = 750; // never faster than this: 128 to 32 kbit/s takes 3 seconds
+        private const int StepEveryMs = 750, StepAllInMs = 3000; // a change takes about 3 s however far: one step at most every 0.75 s, faster for long ways
         private readonly int[] _bad = new int[5], _sent = new int[5], _winBytes = new int[5], _winPackets = new int[5]; // the last second, by 0.2 s tick
         private int _badAt, _cleanTicks, _target, _ceiling, _failures;
         private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt, _lastUpAt;
         private double _lossBefore, _noHelpLoss;
-        private int _qPackets, _qBytes;
+        private int _qPackets, _qBytes, _qTicks, _winFilled;
+        private long _fitsSince;
+        private readonly int[] _winTicks = new int[5];
 
         /// <summary>The bitrate step to hold no matter what, or -1 to follow the connection (Variable). Takes effect at once.</summary>
         public int LockedStep
@@ -501,8 +516,12 @@ namespace TailRemote
         /// Five times a second, looking at the last second.
         ///
         /// Locked: the chosen step, always. Variable: a target step, and the bitrate
-        /// moves toward it one step at a time, never faster than one step every
-        /// 0.75 s, so it changes over seconds rather than all at once.
+        /// moves toward it one step at a time, the whole way in about 3 seconds (never
+        /// faster than one step every 0.75 s for a short way), so it changes over
+        /// seconds rather than all at once, yet a dial-up line is found in seconds too.
+        ///
+        /// Sound arriving slower than real time (under 80 percent) is a starved
+        /// connection even with nothing lost: modems and full links queue, not drop.
         ///
         /// More than 10 percent of the sound never arriving (a capped or slow
         /// connection) sets the target to the best step that fits in what is really
@@ -521,7 +540,7 @@ namespace TailRemote
         private void AdaptQuality()
         {
             var (packets, lost, late) = _player.TakeStats();
-            int bytes = Interlocked.Exchange(ref _qBytes, 0), arrived = Interlocked.Exchange(ref _qPackets, 0);
+            int bytes = Interlocked.Exchange(ref _qBytes, 0), arrived = Interlocked.Exchange(ref _qPackets, 0), ticksIn = Interlocked.Exchange(ref _qTicks, 0);
             if (TestHoldQuality) return;
             int locked = _lockedStep;
             if (locked >= 0) { lock (_stepGate) SetStep(locked); return; }
@@ -534,19 +553,26 @@ namespace TailRemote
             _sent[_badAt] = packets + bad;
             _winBytes[_badAt] = bytes;
             _winPackets[_badAt] = arrived;
-            int badSecond = 0, sentSecond = 0, bytesSecond = 0, packetsSecond = 0;
-            for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; bytesSecond += _winBytes[i]; packetsSecond += _winPackets[i]; }
+            _winTicks[_badAt] = ticksIn;
+            if (_winFilled < _bad.Length) _winFilled++;
+            int badSecond = 0, sentSecond = 0, bytesSecond = 0, packetsSecond = 0, ticksSecond = 0;
+            for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; bytesSecond += _winBytes[i]; packetsSecond += _winPackets[i]; ticksSecond += _winTicks[i]; }
             double loss = sentSecond == 0 ? 0 : (double)badSecond / sentSecond;
             bool heavy = bad >= 4 && bad * 4 >= packets + bad;
-            bool struggling = heavy || loss > 0.10;
-            bool clean = loss < 0.07;
+            // Starved: the sound is not even arriving in real time (under 80 percent of it
+            // over at least 0.4 s). A modem or a full link queues rather than drops, so
+            // nothing looks lost, it just comes too slowly. That is never random loss.
+            int expectedTicks = _winFilled * QualityTickMs / (int)Protocol.TickMs;
+            bool starved = _winFilled >= 2 && ticksSecond < expectedTicks * 0.8;
+            bool struggling = heavy || loss > 0.10 || starved;
+            bool clean = loss < 0.07 && !starved;
             long now = Environment.TickCount64;
             int q = AudioQuality, lowest = Protocol.OpusSteps.Length - 1;
 
-            if (struggling && now < _noHelpUntil && loss < _noHelpLoss * 1.5 && loss < 0.4) struggling = false; // lowering did not help last time
+            if (struggling && !starved && now < _noHelpUntil && loss < _noHelpLoss * 1.5 && loss < 0.4) struggling = false; // lowering did not help last time
             if (now - _lastFailAt > 30_000) _failures = 0;
 
-            bool noHelp = _target > 0 && q > 0 && _lossBefore > 0.05 && loss < 0.4 && now - _lastTargetAt >= 2000 && loss >= _lossBefore * 0.9;
+            bool noHelp = !starved && _target > 0 && q > 0 && _lossBefore > 0.05 && loss < 0.4 && now - _lastTargetAt >= 2000 && loss >= _lossBefore * 0.9;
             if (noHelp)
             {
                 // Lower did not help: random loss, not a full connection.
@@ -556,35 +582,45 @@ namespace TailRemote
                 _ceilingUntil = 0;
                 _cleanTicks = 0;
             }
-            else if (struggling && now - _lastTargetAt >= 1000 && q < lowest)
+            else if (struggling && now - _lastTargetAt >= 600 && q < lowest)
             {
                 if (_target == 0) _lossBefore = loss;
-                // The best step that fits in what really arrives (headers included), with room to spare.
-                double wire = (bytesSecond + packetsSecond * (Protocol.PacketOverheadBytes - 22)) * 8 / 1000.0;
+                // The best step that fits in what really arrives (headers included), with room to
+                // spare; per second, however much of the window has filled so far.
+                double wire = (bytesSecond + packetsSecond * (Protocol.PacketOverheadBytes - 22)) * 8 / 1000.0 * _bad.Length / Math.Max(1, _winFilled);
                 int fit = lowest;
-                for (int i = q + 1; i <= lowest; i++) if (Protocol.WireKbps(i) <= wire * 0.85) { fit = i; break; }
-                _target = Math.Max(_target, fit);
-                // Trouble right after climbing a step: that step does not fit, so the one
-                // before it is the most to try for a while (5 s, then 10, 20, up to a minute).
-                // Trouble at any other time is just a bad patch: it climbs back as soon as
-                // the connection is clean. (Counting every bad second here kept it down for a
-                // minute after the network had recovered.)
-                if (now - _lastUpAt < 3000)
+                for (int i = 0; i <= lowest; i++) if (Protocol.WireKbps(i) <= wire * 0.85) { fit = i; break; }
+                if (fit > q) { _target = Math.Max(_target, fit); _fitsSince = 0; }
+                else
                 {
-                    _ceiling = Math.Min(lowest, q + 1);
-                    _ceilingUntil = now + Math.Min(60_000, 5000 << Math.Min(_failures, 4));
-                    _failures++;
-                    _lastFailAt = now;
+                    // What it is sending already fits: a modem is still handing over what it
+                    // queued before. Give that 3 seconds to drain before going lower still
+                    // (stepping down on it went far too low, then bounced back up).
+                    if (_fitsSince == 0) _fitsSince = now;
+                    else if (now - _fitsSince > 3000) { _target = Math.Max(_target, Math.Min(lowest, q + 1)); _fitsSince = 0; }
                 }
+                // What the connection was measured to carry is the most to climb back to for
+                // a while: 5 seconds after an ordinary bad patch, so it recovers quickly; when
+                // climbing itself caused the trouble, 5 s, then 10, 20, up to a minute. (A modem
+                // hides an overload for a few seconds while it queues, so without this it
+                // climbed straight back into trouble. Counting every bad second as a failure
+                // kept it down for a minute after the network had recovered.)
+                bool climbing = now - _lastUpAt < 3000;
+                _ceiling = Math.Max(fit, climbing ? Math.Min(lowest, q + 1) : 0);
+                _ceilingUntil = now + (climbing ? Math.Min(60_000, 5000 << Math.Min(_failures, 4)) : 5000);
+                if (climbing) { _failures++; _lastFailAt = now; }
                 _lastTargetAt = now;
                 _cleanTicks = 0;
-                Array.Clear(_bad); Array.Clear(_sent); Array.Clear(_winBytes); Array.Clear(_winPackets); // judge from here on
+                Array.Clear(_bad); Array.Clear(_sent); Array.Clear(_winBytes); Array.Clear(_winPackets); Array.Clear(_winTicks); // judge from here on
+                _winFilled = 0;
             }
             else if (!clean) _cleanTicks = 0;
-            else if (++_cleanTicks >= 3) _target = now < _ceilingUntil ? Math.Max(_ceiling, 0) : 0;
+            else if (++_cleanTicks >= 3) { _target = now < _ceilingUntil ? Math.Max(_ceiling, 0) : 0; _fitsSince = 0; }
 
-            // One step at a time toward the target, never faster than every 0.75 s.
-            if (_target != q && now - _lastMoveAt >= StepEveryMs)
+            // One step at a time toward the target, the whole way in about 3 seconds: 0.75 s a
+            // step for a short way (128 to 32 kbit/s), quicker steps for a long one (510 to 16).
+            int every = Math.Clamp(StepAllInMs / Math.Max(1, Math.Abs(_target - q)), QualityTickMs, StepEveryMs);
+            if (_target != q && now - _lastMoveAt >= every - QualityTickMs / 2) // checks come every 0.2 s: do not round up to the next
             {
                 _lastMoveAt = now;
                 if (_target < q) _lastUpAt = now;
