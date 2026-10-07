@@ -1,3 +1,13 @@
+1.8.0
+Changed: the sound now uses Opus, the codec behind Discord and most voice apps, at up to 510 kilobits per second. At the top it sounds the same as the PC itself, uses far less data than before, and adds only about 2 ms of delay.
+New feature: Sound quality (Alt Q, on the controlling PC). Variable follows the connection: on a slow or busy connection it lowers the bitrate until the sound fits, all the way down to 6 kilobits per second, which even works over dial-up, and comes back up when it can. It moves one step at a time, never faster than one step every three quarters of a second, so the sound changes over a few seconds rather than suddenly. Or lock it to any bitrate from 510 down to 6, and it stays there no matter what.
+Changed: above 16 kilobits per second the sound is tuned for music; from 16 down it is tuned for speech and can rebuild a lost packet from the next one.
+New feature: a Streaming line you reach with Tab. It says what bitrate the sound is coming in at and the audio delay, and updates every second.
+Changed: a lost packet is now filled in by Opus itself, which sounds much smoother than before.
+Changed: the host stops sending sound to a PC the moment that PC goes quiet, instead of streaming to nobody for up to 10 seconds.
+Changed: the Status log box is gone. NVDA already says everything that was in it, and the log file keeps it when logging is on.
+Bug fixed: an unexpected error could close TailRemote. Now it is written to TailRemote-crash.txt next to TailRemote, and the app carries on.
+
 1.7.10
 Changed: the sound always heads back to live. Nothing ever builds up a delay: if the connection stalls, what piles up behind it is skipped (or fast-forwarded, if you turned that on) the moment it arrives, and a network that simply gets slower no longer adds its delay to the sound for good. Nothing old is ever played: sound that arrives behind is thrown away as if it never existed, and the buffer never goes above 40 ms.
 New feature: on a slow or capped connection, the sound steps down in quality until it fits, all the way to 8 kHz mono, and stays at the quality that works instead of bouncing back up and breaking up again. It tries full quality again every 10 seconds.

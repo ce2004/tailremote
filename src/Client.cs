@@ -1,4 +1,5 @@
 using System;
+using Concentus;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -23,7 +24,6 @@ namespace TailRemote
         private FileChannel? _files;
         private WlanStreaming? _wifi;
         private uint _peerFeatures;
-        private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
 
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
@@ -228,7 +228,7 @@ namespace TailRemote
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
         /// <summary>How the sound is reduced right now, for the title; null at full quality.</summary>
-        public string? ReducedSound => AudioQuality == 0 ? null : (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz" + (AudioQuality == Protocol.MonoLevel ? " mono" : "");
+        public string? ReducedSound => AudioQuality == 0 ? null : Protocol.OpusSteps[AudioQuality].Kbps + " kbit/s";
 
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
@@ -325,7 +325,6 @@ namespace TailRemote
                 catch { if (_closed) return; continue; }
                 Interlocked.Increment(ref _rxPackets);
                 Interlocked.Add(ref _rxBytes, d.Length);
-                if (d.Length > 0 && d[0] >= 0xA0 && d[0] <= 0xA5) Interlocked.Increment(ref _rxTypes[d[0] - 0xA0]);
                 if (TestDropPercent > 0 && Random.Shared.Next(100) < TestDropPercent) continue;
                 if (TestKbps > 0 && _jitterClock.ElapsedMilliseconds > 3000)
                 {
@@ -354,68 +353,110 @@ namespace TailRemote
             catch (Exception e) { DiagLog.Write("client: audio packet failed: " + e.Message); }
         }
 
-        // ---- Putting swapped packets back in order ----
-        // Networks (and Windows' own loopback) sometimes deliver two neighbouring
-        // packets swapped. Played as they come, that is a lost packet (a fade-out
-        // gap) and a late one (thrown away). So a packet that arrives one ahead is
-        // held until the next arrival: if that is the missing one, both play in
-        // order; if not, the missing one really was lost. The held packet is always
-        // played: throwing it away when the next arrival took over 30 ms (1.7.8) made
-        // a gap many times a second on Wi-Fi, which sounded fuzzy.
+        // ---- Opus, in order ----
+        // Packets can arrive out of order (Wi-Fi, Windows' own loopback, Clumsy). They
+        // wait in a small queue and are decoded strictly in order. When one is missing,
+        // the queue waits for it as long as the buffer's jitter allowance (never more
+        // than 40 ms): that time is already in the buffer, so waiting adds no delay.
+        // Only if it still has not come is the gap filled in by Opus: rebuilt from the
+        // next packet where Opus sent recovery data for it (the speech steps),
+        // otherwise its own concealment, which continues the sound smoothly. A packet
+        // that comes after its gap was filled is too late and is dropped.
 
-        private byte[]? _held;
-        private uint _lastSeq;
-        private bool _haveLastSeq;
+        private readonly IOpusDecoder _decoder = OpusCodecFactory.CreateDecoder(Protocol.AudioRate, 2);
+        private readonly short[] _pcm = new short[5760 * 2];
+        private readonly SortedList<uint, (byte[] Data, double At)> _queue = new();
+        private double _gapSince;
+        private uint _next;
+        private bool _haveNext;
 
         private void HandlePacket(byte[] d)
         {
-            if (d.Length < Protocol.SilencePacketBytes || d[0] < Protocol.UdpAudio || d[0] > Protocol.UdpPackedRate) return;
+            if (d.Length < Protocol.MinAudioPacketBytes || d[0] != Protocol.UdpOpus) return;
             if (!_link.OpenAudio(d, d.Length)) { Interlocked.Increment(ref _rxDamaged); return; } // changed on the way (or not for us): counts as lost
+            Interlocked.Increment(ref _qPackets);
+            Interlocked.Add(ref _qBytes, d.Length);
+            int ticks = d[5];
+            if (ticks < 1 || ticks > 24) return;
             uint seq = BitConverter.ToUInt32(d, 1);
-            int ahead = _haveLastSeq ? (int)(seq - _lastSeq) : 1;
-            if (_held != null)
+            double now = Player.Now;
+            if (_haveNext && (int)(seq - _next) < 0) { _player.CountLate(ticks); return; } // its moment has passed
+            if (_haveNext && (int)(seq - _next) > 400) { _queue.Clear(); _haveNext = false; } // after a pause: start again from here
+            _queue.TryAdd(seq, (d, now));
+            while (_queue.Count > 0)
             {
-                var held = _held;
-                _held = null;
-                if (ahead == 1) { Deliver(d); Deliver(held); return; } // it turned up: both in order
-                Deliver(held); // the one before it really was lost
+                uint first = _queue.Keys[0];
+                var (data, at) = _queue.Values[0];
+                if (_haveNext && first != _next)
+                {
+                    // A gap before the first one waiting: wait for it, a little.
+                    if (_gapSince == 0) _gapSince = at;
+                    if (now - _gapSince < _player.ReorderWaitMs && _queue.Count < 32) break;
+                }
+                _queue.RemoveAt(0);
+                _gapSince = 0;
+                Deliver(data, at);
             }
-            else if (ahead == 2) { _held = d; return; } // one missing: give it one arrival to turn up
-            Deliver(d);
         }
 
-        /// <summary>Plays one packet that has already been opened (decrypted).</summary>
-        private void Deliver(byte[] d)
+        /// <summary>Decodes and plays one packet that has already been opened (decrypted).</summary>
+        private void Deliver(byte[] d, double arrivedAt)
         {
             uint seq = BitConverter.ToUInt32(d, 1);
-            if (!_haveLastSeq || (int)(seq - _lastSeq) > 0) { _lastSeq = seq; _haveLastSeq = true; }
-            int body = d.Length - Protocol.SilencePacketBytes;
-            if (d[0] == Protocol.UdpAudio && d.Length == Protocol.AudioPacketBytes)
-                _player.Push(seq, d.AsSpan(5, Protocol.PacketFrames * 4));
-            else if (d[0] == Protocol.UdpSilence && body == 0)
-                _player.Push(seq, ReadOnlySpan<byte>.Empty);
-            else if (d[0] == Protocol.UdpPackedRate && body > 0 && Lossless2.DecodeRate(d.AsSpan(5, body), _unpacked, out int level, out int frames))
-                _player.Push(seq, _unpacked.AsSpan(0, frames * 4), frames, Protocol.Rates[level]);
-            else if (d[0] == Protocol.UdpPacked2 && body > 0 && Lossless2.Decode(d.AsSpan(5, body), _unpacked))
-                _player.Push(seq, _unpacked);
+            int ticks = d[5];
+            var opus = d.AsSpan(6, d.Length - 6 - SecureLink.TagSize);
+            if (_haveNext)
+            {
+                int gap = (int)(seq - _next);
+                if (gap < 0) { _player.CountLate(ticks); return; } // its moment has passed
+                if (gap > 0 && gap <= 24)
+                {
+                    if (gap == ticks && ticks >= 8)
+                    {
+                        // Only the packet before this one is missing: Opus's recovery data in this one rebuilds it.
+                        int n = _decoder.Decode(opus, _pcm, gap * Protocol.TickFrames, true);
+                        if (n > 0) _player.Push(_next, _pcm.AsSpan(0, n * 2), gap, concealed: true);
+                    }
+                    else
+                    {
+                        for (int left = gap; left > 0;)
+                        {
+                            int t = Math.Min(left, 12);
+                            int n = _decoder.Decode(ReadOnlySpan<byte>.Empty, _pcm, t * Protocol.TickFrames, false);
+                            if (n > 0) _player.Push(seq - (uint)left, _pcm.AsSpan(0, n * 2), t, concealed: true);
+                            left -= t;
+                        }
+                    }
+                }
+            }
+            int frames = _decoder.Decode(opus, _pcm, _pcm.Length / 2, false);
+            _next = seq + (uint)ticks;
+            _haveNext = true;
+            if (frames > 0) _player.Push(seq, _pcm.AsSpan(0, frames * 2), ticks, arrivedAt: arrivedAt);
         }
 
-        // ---- Quality steps ----
+        // ---- Bitrate steps ----
 
         private const int QualityTickMs = 200;
-        private int _cleanTicks, _upFrom, _ceiling;
-        private long _ceilingUntil;
-        private readonly int[] _bad = new int[5], _sent = new int[5]; // the last second, by 0.2 s tick
-        private int _badAt;
-        private long _downAt, _noHelpUntil, _lastStepAt;
+        private const int StepEveryMs = 750; // never faster than this: 128 to 32 kbit/s takes 3 seconds
+        private readonly int[] _bad = new int[5], _sent = new int[5], _winBytes = new int[5], _winPackets = new int[5]; // the last second, by 0.2 s tick
+        private int _badAt, _cleanTicks, _target, _ceiling, _failures;
+        private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt;
         private double _lossBefore, _noHelpLoss;
-        private long _lastUpAt;
+        private int _qPackets, _qBytes;
+
+        /// <summary>The bitrate step to hold no matter what, or -1 to follow the connection (Variable).</summary>
+        public volatile int LockedStep = -1;
 
         /// <summary>Test only (--audiotest ... steps): hold the quality where the test puts it.</summary>
         public static bool TestHoldQuality;
 
-        public void TestSetQuality(int q)
+        public void TestSetQuality(int q) => SetStep(q);
+
+        private void SetStep(int q)
         {
+            if (q == AudioQuality) return;
+            DiagLog.Write("client: bitrate step " + AudioQuality + " to " + q + " (" + Protocol.OpusSteps[q].Kbps + " kbit/s)");
             AudioQuality = q;
             Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
@@ -432,106 +473,101 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// Five times a second, looking at the last second of packets.
+        /// Five times a second, looking at the last second.
         ///
-        /// More than 10 percent never arriving (or a quarter of one 0.2 s tick) steps
-        /// the sample rate down, one step a second (two when heavy), down to 8 kHz
-        /// mono, until the sound fits. That is what a slow or capped connection needs.
+        /// Locked: the chosen step, always. Variable: a target step, and the bitrate
+        /// moves toward it one step at a time, never faster than one step every
+        /// 0.75 s, so it changes over seconds rather than all at once.
         ///
-        /// A lower rate that does not help (two steps down and the loss has not fallen,
-        /// or at the lowest step it has not halved) means random loss, which no rate
-        /// fixes: straight back to full quality, and that loss cannot step it down again
-        /// for 30 seconds.
+        /// More than 10 percent of the sound never arriving (a capped or slow
+        /// connection) sets the target to the best step that fits in what is really
+        /// arriving, headers included. While it is that bad, it is judged again every
+        /// second. A lower step that does not help (2 seconds on, the loss has not
+        /// fallen) means random loss, which no bitrate fixes: back to the best, and
+        /// that loss cannot lower it again for 30 seconds. Over 40 percent is always
+        /// a starved connection.
         ///
-        /// Below 7 percent for 0.6 s it goes back up, straight to full quality. If full
-        /// quality overloads the connection again within 2 seconds, it goes straight
-        /// back to the rate that worked and stays there for 10 seconds before trying again.
+        /// Clean for 0.6 s: the target goes back to the best and it climbs, step by
+        /// step. Trouble on the way up sets a ceiling at the last step that worked,
+        /// held 5 seconds the first time, then 10, 20, up to a minute, so it does not
+        /// keep breaking up trying to go higher.
         /// </summary>
         private void AdaptQuality()
         {
             var (packets, lost, late) = _player.TakeStats();
-            if (TestHoldQuality || (_peerFeatures & Protocol.FeatureRate) == 0 || packets == 0) return; // silence: nothing to judge
-            // Only packets that never came: one that arrived late was counted lost first,
-            // then late, and lateness is not a bandwidth problem a lower rate could fix.
+            int bytes = Interlocked.Exchange(ref _qBytes, 0), arrived = Interlocked.Exchange(ref _qPackets, 0);
+            if (TestHoldQuality) return;
+            int locked = LockedStep;
+            if (locked >= 0) { SetStep(Math.Min(locked, Protocol.OpusSteps.Length - 1)); return; }
+            if (packets == 0) return; // silence: nothing to judge
+            // Only sound that never came: what arrived late was counted lost first, then
+            // late, and lateness is not a bandwidth problem a lower bitrate could fix.
             int bad = Math.Max(0, lost - late);
             _badAt = (_badAt + 1) % _bad.Length;
             _bad[_badAt] = bad;
             _sent[_badAt] = packets + bad;
-            int badSecond = 0, sentSecond = 0;
-            for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; }
+            _winBytes[_badAt] = bytes;
+            _winPackets[_badAt] = arrived;
+            int badSecond = 0, sentSecond = 0, bytesSecond = 0, packetsSecond = 0;
+            for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; bytesSecond += _winBytes[i]; packetsSecond += _winPackets[i]; }
             double loss = sentSecond == 0 ? 0 : (double)badSecond / sentSecond;
             bool heavy = bad >= 4 && bad * 4 >= packets + bad;
             bool struggling = heavy || loss > 0.10;
             bool clean = loss < 0.07;
             long now = Environment.TickCount64;
-            int q = AudioQuality, lowest = Protocol.Rates.Length - 1;
+            int q = AudioQuality, lowest = Protocol.OpusSteps.Length - 1;
 
             if (struggling && now < _noHelpUntil && loss < _noHelpLoss * 1.5 && loss < 0.4) struggling = false; // lowering did not help last time
-            if (struggling && now - _lastStepAt < 1000) struggling = false; // each rate gets a full second
+            if (now - _lastFailAt > 30_000) _failures = 0;
 
-            // Did stepping down help? Less data only helps a full connection, and then the
-            // loss falls with every step. Two steps down with no fall at all, or the lowest
-            // step without even halving it, is random loss: the lower rates only cost sound.
-            // Losing more than 40 percent is a starved connection, never random loss: keep the lowest rate.
-            bool noHelp = q > 0 && _lossBefore > 0.05 && loss < 0.4 && now >= _ceilingUntil && now - _lastStepAt >= 1000 &&
-                ((q >= 2 && loss >= _lossBefore * 0.9) || (q == lowest && now - _lastStepAt >= 2000 && loss >= _lossBefore * 0.5));
+            bool noHelp = _target > 0 && q > 0 && _lossBefore > 0.05 && loss < 0.4 && now - _lastTargetAt >= 2000 && loss >= _lossBefore * 0.9;
             if (noHelp)
             {
+                // Lower did not help: random loss, not a full connection.
                 _noHelpUntil = now + 30_000;
                 _noHelpLoss = _lossBefore;
-                q = 0;
+                _target = 0;
+                _ceilingUntil = 0;
                 _cleanTicks = 0;
             }
-            else if (struggling && (q < lowest || (q == 0 && _upFrom > 0)))
+            else if (struggling && now - _lastTargetAt >= 1000 && q < lowest)
             {
-                if (q == 0 && now - _lastUpAt < 2000 && _upFrom > 0)
-                {
-                    // Full quality did not fit: straight back to the rate that did.
-                    q = _upFrom;
-                    _ceiling = q;
-                    _ceilingUntil = now + 10_000;
-                }
-                else
-                {
-                    if (q == 0) _lossBefore = loss;
-                    q = Math.Min(lowest, q + (heavy ? 2 : 1));
-                }
-                _lastStepAt = now;
+                if (_target == 0) _lossBefore = loss;
+                // The best step that fits in what really arrives (headers included), with room to spare.
+                double wire = (bytesSecond + packetsSecond * (Protocol.PacketOverheadBytes - 22)) * 8 / 1000.0;
+                int fit = lowest;
+                for (int i = q + 1; i <= lowest; i++) if (Protocol.WireKbps(i) <= wire * 0.85) { fit = i; break; }
+                _target = Math.Max(_target, fit);
+                // Trouble: the step before this one is the most to try for a while.
+                _ceiling = Math.Min(lowest, q + 1);
+                _ceilingUntil = now + Math.Min(60_000, 5000 << Math.Min(_failures, 4));
+                _failures++;
+                _lastFailAt = now;
+                _lastTargetAt = now;
                 _cleanTicks = 0;
-                Array.Clear(_bad); // judge the new rate on its own packets
-                Array.Clear(_sent);
+                Array.Clear(_bad); Array.Clear(_sent); Array.Clear(_winBytes); Array.Clear(_winPackets); // judge from here on
             }
             else if (!clean) _cleanTicks = 0;
-            else if (++_cleanTicks >= 3 && q > 0)
+            else if (++_cleanTicks >= 3) _target = now < _ceilingUntil ? Math.Max(_ceiling, 0) : 0;
+
+            // One step at a time toward the target, never faster than every 0.75 s.
+            if (_target != q && now - _lastMoveAt >= StepEveryMs)
             {
-                int target = now < _ceilingUntil ? _ceiling : 0;
-                if (target < q)
-                {
-                    _upFrom = q;
-                    q = target; // straight back up, not step by step
-                    _lastUpAt = now;
-                    _cleanTicks = 0;
-                }
+                _lastMoveAt = now;
+                SetStep(q + Math.Sign(_target - q));
             }
-            if (q == AudioQuality) return;
-            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (last second: " + badSecond + " of " + sentSecond + " packets never came)");
-            AudioQuality = q;
-            Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
 
         // ---- The once-a-second log line (only while logging is on) ----
         private int _rxPackets, _rxBytes, _keysSent, _rxDamaged;
-        private readonly int[] _rxTypes = new int[6]; // A0 to A5
 
         private void LogSecond()
         {
             int packets = Interlocked.Exchange(ref _rxPackets, 0), bytes = Interlocked.Exchange(ref _rxBytes, 0), keys = Interlocked.Exchange(ref _keysSent, 0);
             int damaged = Interlocked.Exchange(ref _rxDamaged, 0);
-            var t = new int[6];
-            for (int i = 0; i < 6; i++) t[i] = Interlocked.Exchange(ref _rxTypes[i], 0);
-            DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, quality step " + AudioQuality +
-                (ReducedSound is string r ? " (" + r + ")" : "") +
-                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", full rate " + t[4] + ", lower rate " + t[5] + ", damaged " + damaged + ")" +
+            DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, bitrate step " + AudioQuality +
+                " (" + Protocol.OpusSteps[AudioQuality].Kbps + " kbit/s" + (LockedStep >= 0 ? ", locked" : "") + ")" +
+                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s, damaged " + damaged +
                 ", keys sent " + keys + ", playing on " + _player.DeviceInfo);
         }
 

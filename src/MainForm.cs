@@ -14,6 +14,8 @@ namespace TailRemote
         private readonly TextBox _port = new();
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private readonly ComboBox _quality = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private readonly TextBox _streaming = new() { ReadOnly = true, TabStop = true, Text = "Not connected" };
         private readonly ComboBox _captureFrom = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private bool _fillingCapture;
         private readonly ComboBox _saved = new() { DropDownStyle = ComboBoxStyle.DropDownList };
@@ -36,9 +38,8 @@ namespace TailRemote
         private readonly Button _sendFiles = new() { Text = "Send f&iles", AutoSize = true };
         private readonly Button _restart = new() { Text = "Restart remote PC and reco&nnect", AutoSize = true };
         private bool _expectRestart; // the remote PC was asked to restart: say when it is back
-        private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
-        private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel, _captureLabel;
+        private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel, _captureLabel, _qualityLabel, _streamingLabel;
         private readonly FlowLayoutPanel _savedButtons = new() { AutoSize = true };
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
@@ -83,6 +84,8 @@ namespace TailRemote
             AddRow(table, "Pass&word", _password);
             _listenLabel = AddRow(table, "Listen-&only password (optional: lets someone hear, not control)", _listenPassword);
             _deviceLabel = AddRow(table, "&Output device", _device);
+            _qualityLabel = AddRow(table, "Sound &quality", _quality);
+            _streamingLabel = AddRow(table, "Streaming", _streaming);
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
@@ -100,8 +103,6 @@ namespace TailRemote
             buttons.Controls.Add(_portEditor);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
-            AddRow(table, "Status &log", _log);
-            _log.Dock = DockStyle.Fill;
             Controls.Add(table);
             AcceptButton = _go;
 
@@ -113,6 +114,14 @@ namespace TailRemote
             _shareClipboard.Checked = _settings.ShareClipboard;
             _logging.Checked = _settings.Logging;
             _speedUp.Checked = _settings.CatchUpBySpeed;
+            _quality.Items.Add("Variable: follows the connection");
+            foreach (var (kbps, _) in Protocol.OpusSteps) _quality.Items.Add("Locked at " + kbps + " kbit/s");
+            _quality.SelectedIndex = Math.Clamp(_settings.SoundQuality + 1, 0, _quality.Items.Count - 1);
+            _quality.SelectedIndexChanged += (_, _) =>
+            {
+                SaveSettings();
+                if (_client != null) _client.LockedStep = _quality.SelectedIndex - 1;
+            };
             _speedUp.CheckedChanged += (_, _) => { SaveSettings(); if (_player != null) _player.SpeedUp = _speedUp.Checked; };
             DiagLog.Enabled = _settings.Logging;
             _startup.Checked = Startup.IsEnabled();
@@ -186,6 +195,8 @@ namespace TailRemote
             _listenLabel.Visible = _listenPassword.Visible = host;
             _captureLabel.Visible = _captureFrom.Visible = host;
             _speedUp.Visible = !host; // it is about how this PC plays the sound
+            _qualityLabel.Visible = _quality.Visible = !host; // the host always sends the best unless asked for less
+            _streamingLabel.Visible = _streaming.Visible = !host;
             _toggle.Visible = !host;
             _restart.Visible = !host;
             _startup.Visible = host;
@@ -231,7 +242,11 @@ namespace TailRemote
         protected override void WndProc(ref Message m)
         {
             const int WM_CLIPBOARDUPDATE = 0x031D;
-            if (m.Msg == WM_CLIPBOARDUPDATE) ClipboardChanged();
+            if (m.Msg == WM_CLIPBOARDUPDATE)
+            {
+                // Sharing the clipboard must never be able to take the app down.
+                try { ClipboardChanged(); } catch (Exception e) { DiagLog.Write("clipboard: " + e); }
+            }
             base.WndProc(ref m);
         }
 
@@ -396,11 +411,17 @@ namespace TailRemote
                 if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
                 int audio = _client.AudioDelayMs;
                 if (audio >= 0) t += ", audio " + (audio + Math.Max(0, _client.LastPingMs) / 2) + " ms";
-                if (_client.ReducedSound is string reduced) t += ", sound at " + reduced + " for a slow connection";
+                if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
             }
             else if (_reconnecting) t = "TailRemote - reconnecting";
             else t = _host != null ? "TailRemote - hosting" : "TailRemote";
             if (Text != t) Text = t;
+            // The Streaming line, read with Tab: what is coming in right now.
+            string st = _client == null ? (_reconnecting ? "Not connected: trying again every 3 seconds" : "Not connected")
+                : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
+                  (_client.LockedStep >= 0 ? ", locked" : ", variable") +
+                  (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + Math.Max(0, _client.LastPingMs) / 2) + " ms" : "");
+            if (_streaming.Text != st) _streaming.Text = st;
         }
 
         private void SaveSettings()
@@ -415,6 +436,7 @@ namespace TailRemote
             _settings.ShareClipboard = _shareClipboard.Checked;
             _settings.Logging = _logging.Checked;
             _settings.CatchUpBySpeed = _speedUp.Checked;
+            _settings.SoundQuality = _quality.SelectedIndex - 1;
             _settings.Save();
         }
 
@@ -547,6 +569,7 @@ namespace TailRemote
                     c.Dispose();
                     return;
                 }
+                c.LockedStep = _quality.SelectedIndex - 1;
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 c.FileMessage += msg => Later(() => Say(msg));
@@ -777,10 +800,7 @@ namespace TailRemote
 
         private void Log(string line)
         {
-            DiagLog.Write("window: " + line);
-            _log.AppendText((_log.TextLength > 0 ? Environment.NewLine : "") + DateTime.Now.ToString("HH:mm:ss") + "  " + line);
-            // Trim only while nobody is reading it, so the caret never jumps.
-            if (!_log.Focused && _log.Lines.Length > 300) _log.Lines = _log.Lines[^200..];
+            DiagLog.Write("window: " + line); // NVDA speaks it (Say); the log file keeps it when logging is on
         }
 
         /// <summary>Runs on the window's thread, from any thread; dropped once the window is gone.</summary>

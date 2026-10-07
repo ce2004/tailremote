@@ -32,9 +32,9 @@ namespace TailRemote
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM5"u8.ToArray();
-        /// <summary>A client's second connection, for files: "TRF5" + session token (8), padded to 52 bytes.</summary>
-        public static readonly byte[] FileMagic = "TRF5"u8.ToArray();
+        public static readonly byte[] Magic = "TRM6"u8.ToArray(); // 6: Opus audio (1.8)
+        /// <summary>A client's second connection, for files: "TRF6" + session token (8), padded to 52 bytes.</summary>
+        public static readonly byte[] FileMagic = "TRF6"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -42,7 +42,7 @@ namespace TailRemote
         public const byte ReleaseAll = 3;
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
-        public const byte AudioQuality = 6;  // u8: the sample-rate step the client wants (an index into Rates; 0 = 44.1 kHz)
+        public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)
         // Either way
         public const byte Features = 0x40;   // u32 flags
         public const byte Clipboard = 0x41;  // UTF-8 text
@@ -53,11 +53,8 @@ namespace TailRemote
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
-        public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
-        public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
-        // 0xA3 was the first lossless coder (1.4): no longer sent, never reuse it
-        public const byte UdpPacked2 = 0xA4; // u32 sequence, Lossless2 (smaller; carries its quality)
-        public const byte UdpPackedRate = 0xA5; // u32 sequence, Lossless2 at a lower sample rate (carries rate and length)
+        // 0xA1 to 0xA5 were the lossless formats (up to 1.7): never reuse them
+        public const byte UdpOpus = 0xA6; // u32 sequence (5 ms ticks), then sealed: u8 ticks, Opus packet
 
         // Roles
         public const byte RoleControl = 1, RoleListen = 2;
@@ -65,23 +62,31 @@ namespace TailRemote
         // Feature flags
         public const uint FeatureClipboard = 1;
         public const uint FeatureFiles = 2;
-        public const uint FeatureLossless = 4; // the 1.4 coder: no longer sent or understood
+        // 4, 32 and 64 were the lossless formats (up to 1.7)
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
-        public const uint FeatureLossless2 = 32;
-        public const uint FeatureRate = 64; // understands the lower sample rates below
 
         /// <summary>
-        /// The steps down for a struggling connection: every one is lossless at
-        /// its own rate, and each packet still covers the same 5.8 ms.
+        /// The bitrate steps, best first. 5 ms packets down to 128 kbit/s (Opus's
+        /// low-delay mode, 2.5 ms of look-ahead); below that, longer packets, because
+        /// each one carries about 110 bytes of headers on Tailscale (176 kbit/s at
+        /// 5 ms), which a slow connection cannot afford. Tuned for music above
+        /// 16 kbit/s, for speech from there down.
         /// </summary>
-        public static readonly int[] Rates = { 44100, 32000, 24000, 16000, 11025, 8000, 8000 };
+        public static readonly (int Kbps, int Ms)[] OpusSteps =
+        {
+            (510, 5), (384, 5), (256, 5), (192, 5), (128, 5), (96, 10), (64, 10),
+            (48, 20), (32, 20), (24, 20), (16, 40), (12, 40), (8, 60), (6, 60),
+        };
 
-        /// <summary>The last step: 8 kHz in mono, about half of 8 kHz stereo. Older PCs never ask for it.</summary>
-        public const int MonoLevel = 6;
+        /// <summary>Headers on every audio packet over Tailscale: IP, UDP, WireGuard, inner IP and UDP, ours.</summary>
+        public const int PacketOverheadBytes = 110;
+
+        /// <summary>What a step really costs on the wire, headers included.</summary>
+        public static int WireKbps(int step) => OpusSteps[step].Kbps + 1000 / OpusSteps[step].Ms * PacketOverheadBytes * 8 / 1000;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureLossless2 | FeatureRate;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart;
 
         public const int MaxClipboardChars = 1_000_000;
 
@@ -102,10 +107,11 @@ namespace TailRemote
             return m;
         }
 
-        public const int AudioRate = 44100;
-        public const int PacketFrames = 256; // 5.8 ms; 1029 bytes, under Tailscale's 1280 MTU
-        public const int AudioPacketBytes = 5 + PacketFrames * 4 + SecureLink.TagSize; // 1045, under Tailscale's 1280
-        public const int SilencePacketBytes = 5 + SecureLink.TagSize;
+        public const int AudioRate = 48000;  // Opus's own rate, and most sound devices'
+        public const int TickFrames = 240;   // 5 ms: the unit packets are counted in
+        public const double TickMs = 5;
+        public const int MaxOpusBytes = 1275; // Opus's largest packet; at 510 kbit/s and 5 ms it is 319, under Tailscale's 1280
+        public const int MinAudioPacketBytes = 5 + 1 + SecureLink.TagSize;
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Keys = new();
 

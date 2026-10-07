@@ -51,10 +51,13 @@ namespace TailRemote
             public required byte[] Key, HostNonce, ClientNonce;
             public FileChannel? Files;
             public uint PeerFeatures;
-            public volatile int Quality; // 0 = lossless; the client asks for more while its connection struggles
+            public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
             public volatile IPEndPoint? AudioTo;
+            public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
-            public readonly byte[] Audio = new byte[Protocol.AudioPacketBytes];
+            public readonly byte[] Audio = new byte[5 + 1 + Protocol.MaxOpusBytes + SecureLink.TagSize];
+            public uint SentUntil; // the tick after the last audio sent
+            public bool SentAny;
         }
 
         private string? _captureDevice;
@@ -463,8 +466,7 @@ namespace TailRemote
                         catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
-                        // Sample-rate steps, for PCs that understand them. Older ones always get full quality.
-                        s.Quality = (s.PeerFeatures & Protocol.FeatureRate) != 0 ? Math.Min((int)m[1], Protocol.Rates.Length - 1) : 0;
+                        s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);
                         DiagLog.Write("host: " + s.Address + " asked for quality step " + s.Quality);
                         break;
                     case Protocol.Features when m.Length >= 5:
@@ -504,106 +506,40 @@ namespace TailRemote
             });
         }
 
-        private readonly byte[] _packed = new byte[Protocol.PacketFrames * 4];
-
-        // Lower sample rates: one streaming downsampler per rate, so there is no seam between packets.
-        private readonly Resampler?[] _down = new Resampler?[Protocol.Rates.Length];
-        private readonly uint[] _downNext = new uint[Protocol.Rates.Length];
-        private readonly short[][] _downPcm = Array.ConvertAll(Protocol.Rates, _ => new short[Protocol.PacketFrames * 2 + 16]);
-        private readonly int[] _downFrames = new int[Protocol.Rates.Length];
-        private readonly byte[][] _rated = Array.ConvertAll(Protocol.Rates, _ => new byte[Protocol.PacketFrames * 4]);
-        private readonly int[] _ratedLength = new int[Protocol.Rates.Length];
-        private readonly float[] _downIn = new float[Protocol.PacketFrames * 2];
-        private int _downLevel;
-        private Action<float, float>? _downEmit;
-
-        private void DownEmit(float l, float r)
-        {
-            int f = _downFrames[_downLevel];
-            if (f >= Protocol.PacketFrames) return;
-            short[] d = _downPcm[_downLevel];
-            d[f * 2] = (short)Math.Clamp(MathF.Round(l * 32767f), -32768f, 32767f);
-            d[f * 2 + 1] = (short)Math.Clamp(MathF.Round(r * 32767f), -32768f, 32767f);
-            _downFrames[_downLevel] = f + 1;
-        }
+        private readonly OpusBank _opus = new();
+        private readonly bool[] _wanted = new bool[Protocol.OpusSteps.Length];
 
         /// <summary>
-        /// Every lower rate is converted for every packet while anyone could use it,
-        /// so a converter is always warm: switching rate never starts one from
-        /// silence, which dipped and popped.
+        /// Called on the capture thread with every 5 ms tick (null: silence). Each
+        /// step someone uses is encoded once; every session gets its own step's
+        /// packets, sealed with its own keys.
         /// </summary>
-        private void DownsampleAll(uint seq, short[] pcm)
-        {
-            for (int i = 0; i < _downIn.Length; i++) _downIn[i] = pcm[i] / 32768f;
-            for (int level = 1; level < Protocol.Rates.Length; level++)
-            {
-                if (level == Protocol.MonoLevel)
-                {
-                    // 8 kHz mono: the 8 kHz stereo packet with both sides the same, which the
-                    // coder packs into little more than one channel.
-                    int n = _downFrames[level - 1];
-                    short[] from = _downPcm[level - 1], to = _downPcm[level];
-                    for (int i = 0; i < n; i++) to[i * 2] = to[i * 2 + 1] = (short)((from[i * 2] + from[i * 2 + 1]) >> 1);
-                    _downFrames[level] = n;
-                    continue;
-                }
-                var rs = _down[level] ??= new Resampler(Protocol.AudioRate, Protocol.Rates[level]);
-                if (_downNext[level] != seq) rs.Reset(); // after a pause: start clean
-                _downNext[level] = seq + 1;
-                _downLevel = level;
-                _downFrames[level] = 0;
-                rs.Process(_downIn, _downEmit ??= DownEmit);
-            }
-        }
-
-        /// <summary>This packet at a lower rate, packed once for everyone on that rate. -1 if it would not pack.</summary>
-        private int Rated(int level)
-        {
-            if (_ratedLength[level] != -2) return _ratedLength[level];
-            int n = _downFrames[level];
-            _ratedLength[level] = Lossless2.EncodeRate(_downPcm[level].AsSpan(0, n * 2), n, level, _rated[level]);
-            return _ratedLength[level];
-        }
-
-        /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
         private void SendAudio(uint seq, short[]? pcm)
         {
             var all = AllSessions();
             if (all.Length == 0) return;
-            int packedLength = -2; // -2: not packed yet; each form is packed once, for everyone who wants it
-            Array.Fill(_ratedLength, -2);
-            if (pcm != null && Array.Exists(all, x => (x.PeerFeatures & Protocol.FeatureRate) != 0)) DownsampleAll(seq, pcm);
+            // Only to PCs that are really there: one that has gone quiet (no hello for 3
+            // seconds) gets nothing, rather than a stream nobody hears until it times out.
+            long now = Environment.TickCount64;
+            Array.Clear(_wanted);
+            foreach (var s in all) if (s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) _wanted[s.Quality] = true;
+            _opus.Feed(seq, pcm, _wanted);
             foreach (var s in all)
             {
                 var to = s.AudioTo;
-                if (to == null) continue;
-                byte[] a = s.Audio; // each session seals its own copy with its own keys
-                BitConverter.TryWriteBytes(a.AsSpan(1), seq);
-                int payload;
-                bool byRate = (s.PeerFeatures & Protocol.FeatureRate) != 0;
-                int q = s.Quality;
-                if (pcm != null && (s.PeerFeatures & Protocol.FeatureLossless2) != 0 && packedLength == -2)
-                    packedLength = Lossless2.Encode(pcm, 0, _packed); // losslessly, about half the data
-                int ratedLength = pcm != null && byRate && q > 0 ? Rated(q) : -1;
-                if (pcm == null) { a[0] = Protocol.UdpSilence; payload = 0; }
-                else if (ratedLength > 0)
-                {
-                    a[0] = Protocol.UdpPackedRate;
-                    payload = ratedLength;
-                    _rated[q].AsSpan(0, payload).CopyTo(a.AsSpan(5));
-                }
-                else if ((s.PeerFeatures & Protocol.FeatureLossless2) != 0 && packedLength > 0)
-                {
-                    a[0] = Protocol.UdpPacked2;
-                    payload = packedLength;
-                    _packed.AsSpan(0, payload).CopyTo(a.AsSpan(5));
-                }
-                else
-                {
-                    a[0] = Protocol.UdpAudio;
-                    payload = pcm.Length * 2;
-                    Buffer.BlockCopy(pcm, 0, a, 5, payload);
-                }
+                if (to == null || now - Volatile.Read(ref s.HeardAt) >= 3000 || !_opus.Ready(s.Quality, out uint first, out int ticks, out var packet)) continue;
+                // The packet number is also the audio nonce: never send one at or before what
+                // this session already has (after a change of step, the new step's packet can
+                // start earlier). The player fills the gap.
+                if (s.SentAny && (int)(first - s.SentUntil) < 0) continue;
+                s.SentUntil = first + (uint)ticks;
+                s.SentAny = true;
+                byte[] a = s.Audio;
+                a[0] = Protocol.UdpOpus;
+                BitConverter.TryWriteBytes(a.AsSpan(1), first);
+                a[5] = (byte)ticks;
+                packet.CopyTo(a.AsSpan(6));
+                int payload = 1 + packet.Length;
                 try
                 {
                     s.Link.SealAudio(a, payload);
@@ -630,6 +566,7 @@ namespace TailRemote
                 var from = any.Address.IsIPv4MappedToIPv6 ? any.Address.MapToIPv4() : any.Address;
                 if (!from.Equals(s.Address)) continue;
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);
+                Volatile.Write(ref s.HeardAt, Environment.TickCount64);
             }
         }
     }

@@ -24,15 +24,16 @@ namespace TailRemote
     /// aim, where the waveform lines up best, so there is no click, gap or
     /// warble: the way podcast players speed up speech.
     ///
-    /// A lost packet fades out instead of clicking, and a change of sample rate
-    /// glides: the old rate plays out and the new one starts from its last value.
+    /// The sound arrives already decoded from Opus at 48 kHz (Client.cs), whole and
+    /// in order: packets that never came were filled in by Opus. Everything is
+    /// counted in 5 ms ticks, because packets are 5 to 60 ms long.
     /// </summary>
     internal sealed class Player : IDisposable
     {
         /// <summary>Device id that plays nothing (the self-test uses it).</summary>
         public const string NoDevice = "-";
 
-        private const double PacketMs = Protocol.PacketFrames * 1000.0 / Protocol.AudioRate;
+        private volatile float _packetMs = (float)Protocol.TickMs; // how long the packets are now
         private const double MarginMs = 2;
 
         private readonly string? _deviceId;
@@ -58,22 +59,22 @@ namespace TailRemote
 
         // Network-thread state.
         private Resampler? _rs;
-        private int _rsRate, _rsIn, _lastFrames;
+        private int _rsRate;
         private uint _expect, _spurtSeq;
         private bool _haveSeq, _fadeIn;
-        private double _ref, _silenceCarry;
+        private double _ref;
         private float[] _scratch = new float[8192];
         private int _scratchLen;
         private Action<float, float>? _collect; // made once, not per packet
-        private readonly float[] _in = new float[Protocol.PacketFrames * 2];
-        private readonly float[] _last = new float[Protocol.PacketFrames * 2];
+        private readonly float[] _in = new float[5760 * 2]; // Opus's longest packet (120 ms) at 48 kHz
 
-        // Lateness of the last 516 packets (3 seconds), and the buffer worked out from it.
-        private readonly float[] _late = new float[516];
-        private readonly float[] _lateSorted = new float[516];
+        // Lateness over the last 3 seconds, and the buffer worked out from it.
+        private readonly float[] _late = new float[1024];
+        private readonly double[] _lateWhen = new double[1024];
+        private readonly float[] _lateSorted = new float[1024];
         private const float MaxCoverMs = 40; // live at all costs: past this, a rare gap rather than more delay
-        private int _stallRun; // packets in a row that came after a stall
-        private int _lateAt, _lateCount, _sinceTarget;
+        private int _lateAt, _lateCount;
+        private double _stallSince, _targetAt, _measureFrom;
         private float _coverMs;
         private bool _measured;
 
@@ -119,7 +120,8 @@ namespace TailRemote
                 _read = 0; _count = 0; _playing = false; _fadeOut = 0; _gain = 0; _ff = 0; _xfLeft = 0;
             }
             _haveSeq = false;
-            _lateCount = 0; _lateAt = 0; _coverMs = 0; _measured = false; // the old connection's lateness must not size the new buffer
+            _lateCount = 0; _lateAt = 0; _coverMs = 0; _measured = false; _stallSince = 0; // the old connection's lateness must not size the new buffer
+            _packetMs = (float)Protocol.TickMs;
         }
 
         /// <summary>Packets, lost and late since the last call: how the connection is coping.</summary>
@@ -149,111 +151,70 @@ namespace TailRemote
             }
         }
 
+        /// <summary>How long a missing packet may be waited for: part of the jitter the buffer already allows for, so waiting adds no delay and leaves room for loss.</summary>
+        public double ReorderWaitMs => Math.Clamp(_coverMs * 0.6, 3, 30);
+
+        /// <summary>The time Push and the reorder queue measure in, in ms.</summary>
+        public static double Now => Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
+
+        /// <summary>A packet that came after its moment had passed: counted, never played.</summary>
+        public void CountLate(int ticks)
+        {
+            Interlocked.Add(ref _statPackets, ticks);
+            Interlocked.Add(ref _statLate, ticks);
+            _diagLate += ticks;
+        }
+
         /// <summary>
-        /// One packet: always 5.8 ms of sound, at inRate (lower while the connection
-        /// struggles), straight to the device's rate in one step. Empty pcm means a
-        /// silent packet. Called from the network thread only.
+        /// One packet of sound at 48 kHz stereo: 'ticks' 5 ms ticks from seq on.
+        /// concealed: made up by Opus for packets that never came (counted as lost).
+        /// Called from the network thread only, in order.
         /// </summary>
-        public void Push(uint seq, ReadOnlySpan<byte> pcm, int frames = Protocol.PacketFrames, int inRate = Protocol.AudioRate)
+        public void Push(uint seq, ReadOnlySpan<short> pcm, int ticks, bool concealed = false, double arrivedAt = 0)
         {
             int rate = _deviceRate;
             if (rate == 0) return;
-            if (pcm.IsEmpty && _rsIn != 0) inRate = _rsIn; // silence at the current rate: no needless rate change
-
-            Resampler? finishing = null;
-            float holdL = 0, holdR = 0;
-            if (_rs == null || _rsRate != rate || _rsIn != inRate)
+            if (_rs == null || _rsRate != rate)
             {
-                bool rateChanged = _rs != null && _rsRate == rate;
-                if (rateChanged)
-                {
-                    // The host changed sample rate. Glide: play out what the old rate still
-                    // holds, and start the new one from its last value. No gap, dip or pop.
-                    finishing = _rs;
-                    if (_lastFrames > 0) { holdL = _last[(_lastFrames - 1) * 2]; holdR = _last[(_lastFrames - 1) * 2 + 1]; }
-                }
-                _rs = new Resampler(inRate, rate);
-                if (rateChanged) _rs.Prime(holdL, holdR);
-                else { _haveSeq = false; _fadeIn = true; }
+                _rs = new Resampler(Protocol.AudioRate, rate);
                 _rsRate = rate;
-                _rsIn = inRate;
-                _lastFrames = 0; // the old rate's last packet cannot stand in for a lost one
+                _haveSeq = false;
             }
 
             double now = Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
             int diff = (int)(seq - _expect);
-            bool newSpurt = !_haveSeq || diff > 8 || diff < -200;
-            if (newSpurt)
+            if (!_haveSeq || diff > 40 || diff < -400)
             {
+                // The start, or after a pause: a fresh start, faded in.
                 _diagSpurts++;
                 _spurtSeq = seq;
-                _ref = now;
+                _ref = now - ticks * Protocol.TickMs;
                 diff = 0;
                 _fadeIn = true;
+                if (_lateCount == 0) _measureFrom = now;
             }
-
-            // How late this packet is, against the earliest any packet has been. The
-            // reference creeps later at 200 ppm so a slow host clock is not mistaken
-            // for growing lateness.
-            double raw = now - (int)(seq - _spurtSeq) * PacketMs;
-            _ref = Math.Min(raw, _ref + PacketMs * 0.0002);
-            float lateMs = (float)Math.Min(raw - _ref, 400);
-            if (_lateCount >= 86 && lateMs > _coverMs + 40)
-            {
-                // After a stall: never a reason to build delay. The backlog is skipped (or
-                // fast-forwarded) when it lands, and the buffer stays as it was. If every
-                // packet stays this late for a second, the network has simply got slower:
-                // measure from here instead.
-                if (++_stallRun >= 172) { _ref = raw; _stallRun = 0; }
-            }
+            if (diff < 0) { CountLate(ticks); return; }
+            if (diff > 0) { Interlocked.Add(ref _statLost, diff); _diagLost += diff; _fadeIn = true; } // a gap nobody filled
+            Interlocked.Add(ref _statPackets, ticks + diff);
+            if (concealed) { Interlocked.Add(ref _statLost, ticks); _diagLost += ticks; }
             else
             {
-                _stallRun = 0;
-                _late[_lateAt++ % _late.Length] = lateMs;
-                if (_lateCount < _late.Length) _lateCount++;
+                _packetMs = (float)(ticks * Protocol.TickMs);
+                Measure(arrivedAt > 0 ? arrivedAt : now, seq, ticks); // when it came off the network, not when the reorder queue let it go
             }
-            UpdateTarget();
-
-            Interlocked.Increment(ref _statPackets);
-            if (diff < 0) { Interlocked.Increment(ref _statLate); _diagLate++; return; } // late: its moment has passed
-            if (diff > 0) { Interlocked.Add(ref _statLost, diff); _diagLost += diff; }
             _haveSeq = true;
-            _expect = seq + 1;
+            _expect = seq + (uint)ticks;
 
-            _scratchLen = 0;
-            finishing?.Flush(holdL, holdR, _collect ??= Collect);
-            for (int lost = 0; lost < diff; lost++)
-            {
-                // Lost: the last packet played backwards, fading out, then silence;
-                // always one packet's worth of time at the current rate. Backwards
-                // starts exactly where the sound stopped, so there is no click (playing
-                // it forwards again jumped back to its start).
-                int n = lost == 0 && _lastFrames > 0 ? _lastFrames : PacketAt(inRate);
-                for (int i = 0; i < n * 2; i += 2)
-                {
-                    float g = lost == 0 && _lastFrames > 0 ? 1f - (float)i / (n * 2) : 0f;
-                    int from = (n - 1) * 2 - i;
-                    _in[i] = _last[from] * g;
-                    _in[i + 1] = _last[from + 1] * g;
-                }
-                _rs.Process(_in.AsSpan(0, n * 2), _collect ??= Collect);
-                _fadeIn = true;
-            }
-
-            if (pcm.IsEmpty) frames = PacketAt(inRate);
-            var block = _in.AsSpan(0, frames * 2);
-            if (pcm.IsEmpty) block.Clear();
-            else
-                for (int i = 0; i < block.Length; i++)
-                    block[i] = BitConverter.ToInt16(pcm.Slice(i * 2, 2)) / 32768f;
+            int floats = Math.Min(pcm.Length, _in.Length);
+            var block = _in.AsSpan(0, floats);
+            for (int i = 0; i < floats; i++) block[i] = pcm[i] / 32768f;
             if (_fadeIn)
             {
-                int fade = Math.Min(block.Length, 128);
+                int fade = Math.Min(floats, 128);
                 for (int i = 0; i < fade; i += 2) { float g = (float)i / fade; block[i] *= g; block[i + 1] *= g; }
                 _fadeIn = false;
             }
-            block.CopyTo(_last);
-            _lastFrames = frames;
+            _scratchLen = 0;
             _rs.Process(block, _collect ??= Collect);
 
             lock (_gate)
@@ -268,45 +229,57 @@ namespace TailRemote
             }
         }
 
-        /// <summary>Frames in one 5.8 ms packet at this rate, carrying the fraction so time never drifts.</summary>
-        private int PacketAt(int inRate)
-        {
-            if (inRate == Protocol.AudioRate) return Protocol.PacketFrames;
-            double exact = Protocol.PacketFrames * (double)inRate / Protocol.AudioRate + _silenceCarry;
-            int n = (int)exact;
-            _silenceCarry = exact - n;
-            return n;
-        }
-
         /// <summary>
-        /// The buffer covers 98% of the last 10 seconds' lateness, worked out every
-        /// half second: up at once, down 20% of the way each time. A rare spike (a
-        /// Wi-Fi scan) costs one short gap rather than raising the delay.
+        /// How late this packet is (its last tick against the earliest any packet has
+        /// been), and from that the buffer: worked out every half second over the last
+        /// 3 seconds as the spread from the earliest packet to the 98th percentile, so
+        /// a delay every packet shares (Clumsy's lag, a slower route) costs nothing.
+        /// Up at once, half way back down each time. Packets more than 40 ms past the
+        /// spread came after a stall: never a reason to build delay. If they keep
+        /// coming that late for a second, the network has simply got slower.
         /// </summary>
-        private void UpdateTarget()
+        private void Measure(double now, uint seq, int ticks)
         {
-            if (_lateCount < 86)
+            // The reference creeps later at 200 ppm so a slow host clock is not mistaken for growing lateness.
+            double raw = now - (int)(seq + (uint)ticks - _spurtSeq) * Protocol.TickMs;
+            _ref = Math.Min(raw, _ref + ticks * Protocol.TickMs * 0.0002);
+            float lateMs = (float)Math.Min(raw - _ref, 400);
+            if (_measured && lateMs > _coverMs + 40)
             {
-                // The first half second: no 98% yet, so cover the worst lateness so far
-                // at once. Starting too small ran dry and rebuilt just after connecting.
-                float l = _late[(_lateAt - 1) % _late.Length];
-                if (l > _coverMs) _coverMs = Math.Min(l, 100);
+                if (_stallSince == 0) _stallSince = now;
+                else if (now - _stallSince > 1000) { _ref = raw; _stallSince = 0; }
             }
-            else if (++_sinceTarget >= 86)
+            else
             {
-                _sinceTarget = 0;
-                Array.Copy(_late, _lateSorted, _lateCount);
-                Array.Sort(_lateSorted, 0, _lateCount);
-                // How uneven, not how late: from the earliest packet in the window. A delay
-                // that every packet shares (Clumsy's lag, a slower route) is not unevenness;
-                // measured from the start it held the buffer at 300 ms for good.
-                float spread = Math.Min(_lateSorted[(int)(_lateCount * 0.98) - 1] - _lateSorted[0], MaxCoverMs);
-                // Up at once, half way back down each time; the first real measurement simply
-                // replaces the start-up guess, which the connect burst made too big.
-                _coverMs = spread > _coverMs || !_measured ? spread : _coverMs + (spread - _coverMs) * 0.5f;
-                _measured = true;
+                _stallSince = 0;
+                _late[_lateAt] = lateMs;
+                _lateWhen[_lateAt] = now;
+                _lateAt = (_lateAt + 1) % _late.Length;
+                if (_lateCount < _late.Length) _lateCount++;
             }
-            _targetMs = (float)(PacketMs + MarginMs + _coverMs);
+
+            if (!_measured && now - _measureFrom < 500)
+            {
+                // The first half second: no 98% yet, so cover the worst so far at once.
+                // Starting too small ran dry and rebuilt just after connecting.
+                if (lateMs > _coverMs) _coverMs = Math.Min(lateMs, MaxCoverMs);
+            }
+            else if (now - _targetAt >= 500)
+            {
+                _targetAt = now;
+                int n = 0;
+                for (int i = 0; i < _lateCount; i++)
+                    if (now - _lateWhen[i] <= 3000) _lateSorted[n++] = _late[i];
+                if (n >= 4)
+                {
+                    Array.Sort(_lateSorted, 0, n);
+                    float spread = Math.Min(_lateSorted[Math.Max(0, (int)(n * 0.98) - 1)] - _lateSorted[0], MaxCoverMs);
+                    // The first real measurement simply replaces the start-up guess.
+                    _coverMs = spread > _coverMs || !_measured ? spread : _coverMs + (spread - _coverMs) * 0.5f;
+                    _measured = true;
+                }
+            }
+            _targetMs = (float)(_packetMs + MarginMs + _coverMs);
         }
 
         private void Collect(float l, float r)
@@ -453,7 +426,7 @@ namespace TailRemote
                 double levelMs = _count / floatsPerMs;
                 _diagLevelMin = Math.Min(_diagLevelMin, levelMs);
                 _diagLevelMax = Math.Max(_diagLevelMax, levelMs);
-                if (!_playing && levelMs >= target + PacketMs / 2) { _playing = true; _avgMs = levelMs; }
+                if (!_playing && levelMs >= target + Protocol.TickMs / 2) { _playing = true; _avgMs = levelMs; }
 
                 if (_playing)
                 {

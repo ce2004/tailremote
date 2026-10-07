@@ -8,9 +8,26 @@ namespace TailRemote
     internal static class Program
     {
         [STAThread]
+        /// <summary>Writes an unexpected error to TailRemote-crash.txt next to the exe (and the log, if on).</summary>
+        private static void Crash(Exception? e)
+        {
+            try
+            {
+                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  TailRemote " + Updater.Current + ": " + e + Environment.NewLine;
+                System.IO.File.AppendAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TailRemote-crash.txt"), text);
+                DiagLog.Write("unexpected error: " + e);
+            }
+            catch { }
+        }
+
         private static int Main(string[] args)
         {
             Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
+            // Nothing may ever close TailRemote by surprise: a problem in the window is
+            // written down and the app carries on.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) => Crash(e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, e) => Crash(e.ExceptionObject as Exception);
             if (args.Length == 2 && args[0] == "--startup")
                 return Startup.Apply(args[1] == "on");
 
@@ -46,9 +63,13 @@ namespace TailRemote
 
             if (args.Length == 1 && args[0] == "--licence")
             {
-                using var s = typeof(Program).Assembly.GetManifestResourceStream("NVDA-controllerClient-LICENSE.txt")!;
-                using var f = File.Create(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, "NVDA-controllerClient-LICENSE.txt"));
-                s.CopyTo(f);
+                // The licences of what is built in: the NVDA controller client and Concentus (Opus).
+                foreach (var name in new[] { "NVDA-controllerClient-LICENSE.txt", "Concentus-LICENSE.txt" })
+                {
+                    using var s = typeof(Program).Assembly.GetManifestResourceStream(name)!;
+                    using var f = File.Create(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, name));
+                    s.CopyTo(f);
+                }
                 return 0;
             }
 
@@ -133,7 +154,7 @@ namespace TailRemote
                 player.Diagnose();
                 for (int i = 1; i <= 15; i++)
                 {
-                    if (Client.TestHoldQuality) c.TestSetQuality(i % Protocol.Rates.Length); // every rate in turn, down and back up
+                    if (Client.TestHoldQuality) c.TestSetQuality(i % Protocol.OpusSteps.Length); // every bitrate in turn, down and back up
                     System.Threading.Thread.Sleep(1000);
                     int fills = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFills, 0);
                     int fillMs = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
@@ -222,55 +243,41 @@ namespace TailRemote
                     return Fail($"resampler {from}->{to}: rms {rms:F4}, crossings {crossings}, frames {outL.Count}");
             }
 
-            // Lossless packing gives back exactly what went in, for hard material too.
+            // Every Opus step: a 1 kHz tone comes back at the same pitch and about the same
+            // level, in packets of the step's length, near the step's bitrate.
             {
-                var rnd = new Random(3);
-                long rawBytes;
-                var kinds = new Func<int, int, short>[]
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                for (int step = 0; step < Protocol.OpusSteps.Length; step++)
                 {
-                    (i, ch) => (short)(9000 * Math.Sin(i * 0.07 + ch) + rnd.Next(-300, 300)), // a voice-like tone with noise
-                    (i, ch) => 0,                                                          // silence
-                    (i, ch) => (i & 1) == 0 ? short.MaxValue : short.MinValue,               // the worst case
-                    (i, ch) => (short)rnd.Next(short.MinValue, short.MaxValue + 1),          // pure noise
-                };
-                byte[] packed = new byte[Protocol.PacketFrames * 4], back = new byte[Protocol.PacketFrames * 4];
-                rawBytes = kinds.Length * 20 * Protocol.PacketFrames * 4;
-
-                // Lossless2: exact at quality 0, and within half a step at 1 to 4.
-                long packed2 = 0;
-                for (int quality = 0; quality <= 4; quality++)
-                    foreach (var kind in kinds)
-                        for (int rep = 0; rep < 20; rep++)
-                        {
-                            short[] pcm = new short[Protocol.PacketFrames * 2];
-                            for (int i = 0; i < Protocol.PacketFrames; i++) { pcm[i * 2] = kind(i + rep * 256, 0); pcm[i * 2 + 1] = kind(i + rep * 256, 1); }
-                            int n = Lossless2.Encode(pcm, quality, packed);
-                            if (quality == 0) packed2 += n > 0 ? n : pcm.Length * 2;
-                            if (n <= 0) continue;
-                            if (!Lossless2.Decode(packed.AsSpan(0, n), back)) return Fail("lossless2 q" + quality + ": did not decode");
-                            int step = 1 << quality;
-                            for (int i = 0; i < pcm.Length; i++)
-                            {
-                                int decoded = BitConverter.ToInt16(back, i * 2), want = pcm[i];
-                                if (quality == 0 ? decoded != want : Math.Abs(decoded - want) > step) return Fail("lossless2 q" + quality + ": sample " + i + " " + want + " became " + decoded);
-                            }
-                        }
-                lossless = " | lossless " + (packed2 * 100 / rawBytes) + "% of raw over the test mix";
-
-                // Each lower rate: a voice-like tone survives (same pitch), exactly lossless at that rate.
-                for (int level = 1; level < Protocol.Rates.Length; level++)
-                {
-                    int rate = Protocol.Rates[level];
-                    int n = Protocol.PacketFrames * rate / Protocol.AudioRate;
-                    short[] low = new short[n * 2];
-                    for (int i = 0; i < n; i++) low[i * 2] = low[i * 2 + 1] = (short)(9000 * Math.Sin(2 * Math.PI * 440 * i / rate));
-                    int len = Lossless2.EncodeRate(low, n, level, packed);
-                    if (len <= 0 || !Lossless2.DecodeRate(packed.AsSpan(0, len), back, out int gotLevel, out int gotFrames) || gotLevel != level || gotFrames != n)
-                        return Fail("rate " + rate + ": did not round-trip");
-                    for (int i = 0; i < n * 2; i++)
-                        if (BitConverter.ToInt16(back, i * 2) != low[i]) return Fail("rate " + rate + ": sample changed");
-                    if (level == Protocol.Rates.Length - 1) lossless += ", 8 kHz " + (len * 100 / (Protocol.PacketFrames * 4)) + "%";
+                    var (kbps, ms) = Protocol.OpusSteps[step];
+                    var enc = OpusBank.CreateEncoder(step);
+                    var dec = Concentus.OpusCodecFactory.CreateDecoder(Protocol.AudioRate, 2);
+                    int frame = Protocol.AudioRate * ms / 1000;
+                    short[] pcm = new short[frame * 2], back = new short[5760 * 2];
+                    byte[] packet = new byte[Protocol.MaxOpusBytes];
+                    var output = new System.Collections.Generic.List<short>();
+                    long bytes = 0;
+                    int packets = 1200 / ms, pos = 0;
+                    for (int n = 0; n < packets; n++)
+                    {
+                        for (int f = 0; f < frame; f++, pos++)
+                            pcm[f * 2] = pcm[f * 2 + 1] = (short)(0.3 * 32767 * Math.Sin(2 * Math.PI * 1000 * pos / Protocol.AudioRate));
+                        int len = enc.Encode(pcm, frame, packet, packet.Length);
+                        if (len <= 0 || len > 1200) return Fail("opus " + kbps + ": packet of " + len + " bytes");
+                        bytes += len;
+                        int decoded = dec.Decode(packet.AsSpan(0, len), back, back.Length / 2, false);
+                        if (decoded != frame) return Fail("opus " + kbps + ": decoded " + decoded + " frames, not " + frame);
+                        for (int f = 0; f < decoded; f++) output.Add(back[f * 2]);
+                    }
+                    var mid = output.GetRange(Protocol.AudioRate / 5, Protocol.AudioRate); // one second, after the start
+                    double rms = Math.Sqrt(mid.Average(v => (double)v * v)) / 32768;
+                    int crossings = 0;
+                    for (int k = 1; k < mid.Count; k++) if (mid[k - 1] < 0 && mid[k] >= 0) crossings++;
+                    double actual = bytes * 8.0 / (packets * ms);
+                    if (Math.Abs(crossings - 1000) > 5 || rms < 0.212 * 0.6 || rms > 0.212 * 1.4 || actual > kbps * 1.3 + 2)
+                        return Fail($"opus {kbps} kbit/s: rms {rms:F3}, crossings {crossings}, {actual:0} kbit/s");
                 }
+                lossless = " | Opus: all " + Protocol.OpusSteps.Length + " steps clean, " + watch.ElapsedMilliseconds + " ms";
             }
 
             // Audio encryption: a sealed packet opens on the other side; a changed one does not.
@@ -279,9 +286,9 @@ namespace TailRemote
                 n2[0] = 1;
                 using var hostLink = new SecureLink(k, n1, n2, isHost: true);
                 using var clientLink = new SecureLink(k, n1, n2, isHost: false);
-                byte[] pkt = new byte[Protocol.AudioPacketBytes];
-                pkt[0] = Protocol.UdpAudio; pkt[1] = 7; pkt[10] = 42;
-                hostLink.SealAudio(pkt, Protocol.PacketFrames * 4);
+                byte[] pkt = new byte[5 + 256 + SecureLink.TagSize];
+                pkt[0] = Protocol.UdpOpus; pkt[1] = 7; pkt[10] = 42;
+                hostLink.SealAudio(pkt, 256);
                 if (pkt[10] == 42 && pkt[9] == 0 && pkt[11] == 0) return Fail("audio was not encrypted");
                 byte[] bad = (byte[])pkt.Clone();
                 bad[100] ^= 1;

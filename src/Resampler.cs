@@ -37,26 +37,6 @@ namespace TailRemote
             Reset();
         }
 
-        /// <summary>
-        /// Starts a fresh stream as if the signal had been sitting at (l, r): the
-        /// new stream carries on from where the old one stopped instead of rising
-        /// out of silence, so a sample-rate change neither dips nor pops.
-        /// </summary>
-        public void Prime(float l, float r)
-        {
-            _frames = Half;
-            for (int i = 0; i < Half; i++) { _buf[i * 2] = l; _buf[i * 2 + 1] = r; }
-            _pos = Half;
-        }
-
-        /// <summary>Plays out the last samples still held back by the filter, holding (l, r) after them.</summary>
-        public void Flush(float l, float r, Action<float, float> emit)
-        {
-            Span<float> hold = stackalloc float[Half * 2];
-            for (int i = 0; i < Half; i++) { hold[i * 2] = l; hold[i * 2 + 1] = r; }
-            Process(hold, emit);
-        }
-
         public void Reset()
         {
             _frames = Half;

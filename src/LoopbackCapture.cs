@@ -6,8 +6,8 @@ namespace TailRemote
 {
     /// <summary>
     /// Records what the host plays (WASAPI loopback on the default output),
-    /// converts it to 16-bit 44.1 kHz stereo and hands out 256-frame packets.
-    /// All-silent packets become 5-byte markers, then stop, so a quiet PC costs nothing.
+    /// converts it to 16-bit 48 kHz stereo and hands out 5 ms ticks (240 frames).
+    /// All-silent ticks are passed on as silence for a second, then stop, so a quiet PC costs nothing.
     /// </summary>
     internal sealed class LoopbackCapture : IDisposable
     {
@@ -16,7 +16,7 @@ namespace TailRemote
         private volatile bool _stop;
         private readonly Thread _thread;
 
-        private readonly short[] _packet = new short[Protocol.PacketFrames * 2];
+        private readonly short[] _packet = new short[Protocol.TickFrames * 2];
         private int _fill;
         private readonly Action<float, float> _emit; // made once: a new one per packet was garbage every 5.8 ms
         private uint _seq;
@@ -97,7 +97,8 @@ namespace TailRemote
             client.GetService(ref iid, out object o);
             var cap = (Wasapi.IAudioCaptureClient)o;
 
-            var rs = new Resampler(fmt.Rate, Protocol.AudioRate);
+            // Most devices already run at 48 kHz, Opus's own rate: then nothing is converted.
+            var rs = fmt.Rate == Protocol.AudioRate ? null : new Resampler(fmt.Rate, Protocol.AudioRate);
             float[] stereo = new float[4096];
             client.Start();
             long lastDataAt = Environment.TickCount64, lastDeviceCheck = lastDataAt;
@@ -128,7 +129,7 @@ namespace TailRemote
                             // A real pause (nothing played for 200 ms): finish the part-filled
                             // packet and move the count on, so the player starts fresh.
                             while (_fill > 0) Emit(0, 0);
-                            _seq += (uint)(since * Protocol.AudioRate / 1000 / Protocol.PacketFrames);
+                            _seq += (uint)(since / Protocol.TickMs);
                             Interlocked.Increment(ref TestSeqSkips);
                         }
                         else if (havePos && (flags & 1) != 0 && devPos > expectedPos && devPos - expectedPos < (ulong)(fmt.Rate / 5))
@@ -138,14 +139,14 @@ namespace TailRemote
                             int n = Math.Min((int)(devPos - expectedPos), silence.Length / 2);
                             Interlocked.Increment(ref TestGapFills);
                             Interlocked.Add(ref TestGapFillMs, n * 1000 / fmt.Rate);
-                            rs.Process(silence.AsSpan(0, n * 2), _emit);
+                            Convert(rs, silence.AsSpan(0, n * 2));
                         }
                         expectedPos = devPos + frames;
                         havePos = true;
                         if (stereo.Length < frames * 2) stereo = new float[frames * 4];
                         ToStereo(data, (int)frames, fmt, (flags & Wasapi.AUDCLNT_BUFFERFLAGS_SILENT) != 0, stereo);
                         cap.ReleaseBuffer(frames);
-                        rs.Process(stereo.AsSpan(0, (int)frames * 2), _emit);
+                        Convert(rs, stereo.AsSpan(0, (int)frames * 2));
                         lastDataAt = Environment.TickCount64;
                         drained += (int)frames;
                     }
@@ -179,6 +180,12 @@ namespace TailRemote
             }
         }
 
+        private void Convert(Resampler? rs, Span<float> stereo)
+        {
+            if (rs != null) { rs.Process(stereo, _emit); return; }
+            for (int i = 0; i + 1 < stereo.Length; i += 2) Emit(stereo[i], stereo[i + 1]);
+        }
+
         private void Emit(float l, float r)
         {
             _packet[_fill++] = ToShort(l);
@@ -190,9 +197,9 @@ namespace TailRemote
             {
                 if (s != 0) { _silentRun = 0; _onPacket(seq, _packet); return; }
             }
-            // Silence: a 5-byte marker for the first second, so the player can
-            // tell silence from a lost packet; after that, nothing at all.
-            if (_silentRun++ < 172) _onPacket(seq, null);
+            // Silence: passed on for the first second, so the sound fades out
+            // properly; after that, nothing at all.
+            if (_silentRun++ < 200) _onPacket(seq, null);
         }
 
         private int _silentRun;

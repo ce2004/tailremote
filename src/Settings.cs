@@ -30,6 +30,8 @@ namespace TailRemote
         public bool Logging { get; set; }
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
         public bool CatchUpBySpeed { get; set; }
+        /// <summary>Sound quality: -1 follows the connection (Variable); otherwise the bitrate step it is locked to.</summary>
+        public int SoundQuality { get; set; } = -1;
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();
 
         [JsonIgnore]

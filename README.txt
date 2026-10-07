@@ -41,14 +41,13 @@ Settings in the main window
 - Output device: where the remote PC's sound plays here.
 
 How it keeps delay down
-- Audio is 16-bit 44.1 kHz stereo, packed losslessly like FLAC: well under half of the 1.4 megabits per second raw sound would take, and on a struggling connection it steps the sample rate down, as far as 8 kHz, instead of lagging, nothing when it is silent, and well under a millisecond of delay.
-- Audio goes over UDP in 5.8 millisecond packets and is never waited for or resent.
-- The buffer sizes itself to how unevenly packets arrive (98 percent of the last 10 seconds), then holds steady. A rare spike makes one short gap rather than raising the delay.
-- The pitch never changes. When the sound falls behind (a burst after a network stall, or the two PCs' clocks drifting apart), TailRemote skips ahead to its normal delay with a tiny fade.
-- Catch up by fast-forwarding (Alt Y, Control mode): instead of skipping, the sound plays at 2x, or 4x when it is far behind, at its own pitch, until it has caught up.
-- Sound quality steps down as soon as packets go missing and comes back to full the moment the connection is clean again. Each change glides with no gap or pop.
-- A lost packet fades out instead of clicking.
-- Playback uses the smallest audio period the sound driver offers.
+- Sound is Opus at 48 kHz stereo, up to 510 kilobits per second, in 5 millisecond packets over UDP, never waited for or resent. Opus adds about 2.5 milliseconds.
+- Sound quality (Alt Q, Control mode): Variable follows the connection, lowering the bitrate until the sound fits, down to 6 kilobits per second, one step at most every three quarters of a second. Or lock it to one bitrate and it never changes. Above 16 kilobits per second it is tuned for music, from 16 down for speech. The lowest steps send longer packets (up to 60 milliseconds), so they fit even dial-up, at the cost of more delay.
+- The Streaming line (Tab) says the bitrate, whether it is locked or variable, and the audio delay.
+- It always heads back to live: nothing old is ever played. The buffer covers how unevenly packets arrived over the last 3 seconds, never more than 40 milliseconds; a stall never raises it, and whatever piles up behind a stall is skipped the moment it lands.
+- Catch up by fast-forwarding (Alt Y, Control mode): instead of skipping, the sound plays at 1.5x, 2x or 4x at its own pitch until it has caught up.
+- Packets that arrive out of order are put back in order. A packet that never comes is filled in by Opus, smoothly.
+- The pitch never changes.
 - Keys go over TCP with no batching, so each key is sent the moment it is pressed.
 - The window title shows the ping and the total audio delay. Press NVDA T to hear it. Run tailscale ping with the host's name: if it says via DERP, the connection is relayed and slower; a direct connection is best.
 
