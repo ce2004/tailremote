@@ -180,6 +180,11 @@ namespace TailRemote
 
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
+        public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
+
+        /// <summary>Asks the host PC to restart.</summary>
+        public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
+
         /// <summary>Sends clipboard text to the host, if it shares the clipboard. Not for listeners.</summary>
         public void SendClipboard(string text)
         {

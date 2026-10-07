@@ -315,6 +315,13 @@ namespace TailRemote
                     case Protocol.ReleaseAll:
                         ReleaseHeld(s);
                         break;
+                    case Protocol.RestartPc when _controller == s:
+                        _status("Restarting this PC, as the controlling PC asked.");
+                        Broadcast("The remote PC is restarting.");
+                        // A normal restart: programs can still ask to save their work.
+                        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("shutdown.exe", "/r /t 0") { CreateNoWindow = true, UseShellExecute = false }); }
+                        catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }
+                        break;
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
                         break;

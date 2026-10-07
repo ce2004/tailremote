@@ -28,6 +28,8 @@ namespace TailRemote
         private readonly Button _audioRemove = new() { Text = "Remove audio de&vice", AutoSize = true };
         private readonly Button _portEditor = new() { Text = "Port &editor", AutoSize = true };
         private readonly Button _sendFiles = new() { Text = "Send f&iles", AutoSize = true };
+        private readonly Button _restart = new() { Text = "Restart remote PC and reco&nnect", AutoSize = true };
+        private bool _expectRestart; // the remote PC was asked to restart: say when it is back
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
         private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel;
@@ -76,6 +78,7 @@ namespace TailRemote
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
             buttons.Controls.Add(_sendFiles);
+            buttons.Controls.Add(_restart);
             buttons.Controls.Add(_audioSetup);
             buttons.Controls.Add(_audioRemove);
             buttons.Controls.Add(_portEditor);
@@ -110,6 +113,7 @@ namespace TailRemote
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
             _sendFiles.Click += (_, _) => SendFiles();
+            _restart.Click += (_, _) => RestartRemote();
             _audioSetup.Click += (_, _) => SetUpAudio();
             _audioRemove.Click += (_, _) => RemoveAudio();
             _portEditor.Click += (_, _) => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); };
@@ -139,6 +143,7 @@ namespace TailRemote
             _savedLabel.Visible = _saved.Visible = _savedButtons.Visible = !host;
             _listenLabel.Visible = _listenPassword.Visible = host;
             _toggle.Visible = !host;
+            _restart.Visible = !host;
             _startup.Visible = host;
             UpdateButtons();
         }
@@ -150,6 +155,7 @@ namespace TailRemote
             if (HostMode) _go.Text = _host == null ? "&Start hosting" : "&Stop hosting";
             else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
+            _restart.Enabled = _client != null && !_client.ListenOnly;
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -192,6 +198,23 @@ namespace TailRemote
                 try { Clipboard.SetText(text); return; }
                 catch { System.Threading.Thread.Sleep(20); }
             }
+        }
+
+        // ---- Restart ----
+
+        private void RestartRemote()
+        {
+            var c = _client;
+            if (c == null || c.ListenOnly) { Say("Connect first."); return; }
+            if (!c.CanRestart) { Say("The remote PC's TailRemote is too old to restart it. Update it first."); return; }
+            var answer = MessageBox.Show(this,
+                "Restart the remote PC now? Programs there close as in a normal restart, and may ask to save first." + Environment.NewLine + Environment.NewLine +
+                "TailRemote reconnects when it is back. That only happens if the remote PC starts hosting by itself: turn on Start hosting when Windows starts there, or the service.",
+                "Restart remote PC", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+            _expectRestart = true;
+            c.RestartHost();
+            Say("Asked the remote PC to restart.");
         }
 
         // ---- Files ----
@@ -437,7 +460,8 @@ namespace TailRemote
                 bool wasReconnecting = _reconnecting;
                 _reconnecting = false;
                 _retryTimer.Stop();
-                string start = wasReconnecting ? "Reconnected." : "Connected.";
+                string start = _expectRestart ? "The remote PC is back." : wasReconnecting ? "Reconnected." : "Connected.";
+                _expectRestart = false;
                 Say(c.ListenOnly
                     ? start + " Listen only: you hear the remote PC, but cannot control it."
                     : start + " Press Control Shift Enter to control the remote PC.");
@@ -465,7 +489,14 @@ namespace TailRemote
             _keys?.SetClient(null);
             _client.Dispose();
             _client = null;
-            if (byUser) Say(why);
+            if (byUser) { _expectRestart = false; Say(why); }
+            else if (_expectRestart)
+            {
+                // Expected: keep trying until it is back, however long the restart takes.
+                _reconnecting = true;
+                _retryTimer.Start();
+                Say("The remote PC is restarting. TailRemote reconnects as soon as it is back.");
+            }
             else
             {
                 // Dropped, or the host restarted after an update: keep trying.

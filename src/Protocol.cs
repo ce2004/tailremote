@@ -40,6 +40,7 @@ namespace TailRemote
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
         public const byte Ping = 2;     // stamp i64
         public const byte ReleaseAll = 3;
+        public const byte RestartPc = 4;     // controller asks the host PC to restart
         // Either way
         public const byte Features = 0x40;   // u32 flags
         public const byte Clipboard = 0x41;  // UTF-8 text
@@ -60,9 +61,10 @@ namespace TailRemote
         public const uint FeatureClipboard = 1;
         public const uint FeatureFiles = 2;
         public const uint FeatureLossless = 4;
+        public const uint FeatureRestart = 8;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart;
 
         public const int MaxClipboardChars = 1_000_000;
 
