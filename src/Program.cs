@@ -57,6 +57,7 @@ namespace TailRemote
             {
                 if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;
                 Client.TestHoldQuality = Array.IndexOf(args, "steps") >= 0;
+                foreach (var a in args) if (a.StartsWith("drop") && int.TryParse(a[4..], out int drop)) Client.TestDropPercent = drop;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 

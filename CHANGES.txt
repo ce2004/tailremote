@@ -1,3 +1,11 @@
+1.7.9
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: the sound was fuzzy, most of all the bass, over Wi-Fi. 1.7.8 threw away good audio whenever packets arrived out of order and a little late, which Wi-Fi does all the time, leaving tiny gaps many times a second. Nothing good is thrown away now.
+Bug fixed: the sound quality often dropped and sometimes never came back. Those same thrown-away packets counted as lost. Now only heavy loss (more than a tenth of the sound) lowers the quality, and if a lower quality does not actually help, it goes straight back to full. Scattered loss, like 2 to 5 percent, never lowers it.
+Bug fixed: right after connecting, the sound could stop and buffer for a moment. The buffer now sizes itself before the sound starts.
+Bug fixed: a packet that really is lost no longer makes a click.
+Changed: fast-forwarding sounds much smoother. It plays at 1.5x when a little behind, 2x when further behind and 4x only when far behind, and blends each jump so it sounds like a podcast player sped up rather than chopped pieces. Skipping ahead, the default, is blended the same way, so you should not hear it at all.
+
 1.7.8
 Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the pitch of the sound wobbled. TailRemote sped the sound up and slowed it down a little to keep its delay steady, and you could hear it. The pitch now never changes. When the sound falls behind, TailRemote skips ahead to catch up, with a tiny fade so it does not click.

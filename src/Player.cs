@@ -14,11 +14,12 @@ namespace TailRemote
     /// and comes down gently.
     ///
     /// When the buffer is too full (clock drift, or a burst after a stall) it
-    /// catches up one of two ways, never by changing the speed of the sound:
-    /// by default it skips straight back, fading over 2 ms; with Catch up by
-    /// speeding up the sound it fast-forwards, playing 10 ms pieces at their
-    /// own pitch and skipping one (2x) or three (4x) between them, until it is
-    /// back on time.
+    /// catches up one of two ways, never by changing the pitch: by default it
+    /// skips straight back; with Catch up by fast-forwarding it plays 30 ms
+    /// pieces and jumps ahead between them (1.5x, 2x or 4x) until it is back on
+    /// time. Every jump crossfades over 10 ms into the point, within 5 ms of the
+    /// aim, where the waveform lines up best, so there is no click, gap or
+    /// warble: the way podcast players speed up speech.
     ///
     /// A lost packet fades out instead of clicking, and a change of sample rate
     /// glides: the old rate plays out and the new one starts from its last value.
@@ -44,7 +45,9 @@ namespace TailRemote
         private float _gain, _lastL, _lastR;
         private int _fadeOut;
         private double _avgMs;
-        private int _ffFactor, _grainPos; // fast-forward: 0 = off, else 2x or 4x
+        private double _ff; // fast-forward speed: 0 = off, else 1.5, 2 or 4
+        private int _grainPos; // frames played since the last jump
+        private int _xfLeft, _xfLen, _xfFrom, _xfJump; // a jump under way: frames left, length, where the new sound reads, how far ahead
 
         private volatile int _deviceRate;
         private double _periodMs = 10;
@@ -67,6 +70,7 @@ namespace TailRemote
         private readonly float[] _lateSorted = new float[1720];
         private int _lateAt, _lateCount, _sinceTarget;
         private float _coverMs;
+        private bool _measured;
 
         // How the connection is coping, for the quality steps (since the last TakeStats).
         private int _statPackets, _statLost, _statLate;
@@ -107,10 +111,10 @@ namespace TailRemote
         {
             lock (_gate)
             {
-                _read = 0; _count = 0; _playing = false; _fadeOut = 0; _gain = 0; _ffFactor = 0;
+                _read = 0; _count = 0; _playing = false; _fadeOut = 0; _gain = 0; _ff = 0; _xfLeft = 0;
             }
             _haveSeq = false;
-            _lateCount = 0; _lateAt = 0; _coverMs = 0; // the old connection's lateness must not size the new buffer
+            _lateCount = 0; _lateAt = 0; _coverMs = 0; _measured = false; // the old connection's lateness must not size the new buffer
         }
 
         /// <summary>Packets, lost and late since the last call: how the connection is coping.</summary>
@@ -202,14 +206,17 @@ namespace TailRemote
             finishing?.Flush(holdL, holdR, _collect ??= Collect);
             for (int lost = 0; lost < diff; lost++)
             {
-                // Lost: fade the last packet out over the first gap, then silence,
-                // always one packet's worth of time at the current rate.
+                // Lost: the last packet played backwards, fading out, then silence;
+                // always one packet's worth of time at the current rate. Backwards
+                // starts exactly where the sound stopped, so there is no click (playing
+                // it forwards again jumped back to its start).
                 int n = lost == 0 && _lastFrames > 0 ? _lastFrames : PacketAt(inRate);
                 for (int i = 0; i < n * 2; i += 2)
                 {
                     float g = lost == 0 && _lastFrames > 0 ? 1f - (float)i / (n * 2) : 0f;
-                    _in[i] = _last[i] * g;
-                    _in[i + 1] = _last[i + 1] * g;
+                    int from = (n - 1) * 2 - i;
+                    _in[i] = _last[from] * g;
+                    _in[i + 1] = _last[from + 1] * g;
                 }
                 _rs.Process(_in.AsSpan(0, n * 2), _collect ??= Collect);
                 _fadeIn = true;
@@ -260,13 +267,23 @@ namespace TailRemote
         /// </summary>
         private void UpdateTarget()
         {
-            if (++_sinceTarget >= 86 && _lateCount >= 86)
+            if (_lateCount < 86)
+            {
+                // The first half second: no 98% yet, so cover the worst lateness so far
+                // at once. Starting too small ran dry and rebuilt just after connecting.
+                float l = _late[(_lateAt - 1) % _late.Length];
+                if (l > _coverMs) _coverMs = Math.Min(l, 100);
+            }
+            else if (++_sinceTarget >= 86)
             {
                 _sinceTarget = 0;
                 Array.Copy(_late, _lateSorted, _lateCount);
                 Array.Sort(_lateSorted, 0, _lateCount);
                 float p98 = _lateSorted[(int)(_lateCount * 0.98) - 1];
-                _coverMs = p98 > _coverMs ? p98 : _coverMs + (p98 - _coverMs) * 0.2f;
+                // Up at once, down 20% of the way; the first real measurement simply
+                // replaces the start-up guess, which the connect burst made too big.
+                _coverMs = p98 > _coverMs || !_measured ? p98 : _coverMs + (p98 - _coverMs) * 0.2f;
+                _measured = true;
             }
             _targetMs = (float)(PacketMs + MarginMs + _coverMs);
         }
@@ -328,7 +345,7 @@ namespace TailRemote
 
             lock (_gate)
             {
-                _read = 0; _count = 0; _playing = false; _ffFactor = 0;
+                _read = 0; _count = 0; _playing = false; _ff = 0; _xfLeft = 0;
                 _periodMs = periodMs;
             }
             _deviceRate = fmt.Rate;
@@ -368,13 +385,47 @@ namespace TailRemote
             }
         }
 
+        private float Mono(int i) => _ring[i % _ring.Length] + _ring[(i + 1) % _ring.Length];
+
+        /// <summary>
+        /// Starts a jump about 'want' floats ahead: it lands within 'search' frames of
+        /// that, wherever the next 'xfLen' frames best match what is playing now
+        /// (normalised cross-correlation), and crossfades over them. Call under _gate.
+        /// </summary>
+        private bool StartJump(int want, int xfLen, int search)
+        {
+            if (_count < want + (xfLen + search) * 2 + 2) return false;
+            int best = want;
+            double bestScore = double.MinValue;
+            for (int d = -search; d <= search; d++)
+            {
+                int b = want + d * 2;
+                if (b < 2) continue;
+                double corr = 0, energy = 1e-12;
+                for (int k = 0; k < xfLen; k += 2) // every other frame is plenty
+                {
+                    float x = Mono(_read + k * 2), y = Mono(_read + b + k * 2);
+                    corr += x * y;
+                    energy += y * y;
+                }
+                double score = corr / Math.Sqrt(energy);
+                if (score > bestScore) { bestScore = score; best = b; }
+            }
+            _xfJump = best;
+            _xfFrom = (_read + best) % _ring.Length;
+            _xfLen = _xfLeft = xfLen;
+            return true;
+        }
+
         private unsafe void Fill(IntPtr data, int frames, Wasapi.Format fmt)
         {
             int ch = fmt.Channels;
             int cap = _ring.Length;
             double floatsPerMs = fmt.Rate * 2 / 1000.0;
             int fadeLen = Math.Max(1, fmt.Rate / 500); // 2 ms
-            int grainLen = Math.Max(fadeLen * 3, fmt.Rate / 100); // 10 ms fast-forward pieces
+            int grainLen = fmt.Rate * 3 / 100;          // 30 ms fast-forward pieces
+            int xfLen = fmt.Rate / 100;                 // 10 ms crossfade at every jump
+            int search = fmt.Rate / 200;                // the jump lands within 5 ms of its aim
             lock (_gate)
             {
                 double target = _targetMs + _periodMs;
@@ -389,24 +440,21 @@ namespace TailRemote
                     double over = levelMs - target;
                     if (SpeedUp && over < 300)
                     {
-                        // Fast-forward: on at 12 ms behind on average (or 40 at once), 4x from
-                        // 120 ms behind, off once back within 2 ms.
-                        if (_ffFactor == 0 && (_avgMs > target + 12 || over > 40)) { _ffFactor = 2; _grainPos = 0; }
-                        if (_ffFactor > 0) _ffFactor = over <= 2 ? 0 : over > 120 ? 4 : 2;
+                        // Fast-forward: on at 7 ms behind on average (or 40 at once); 1.5x,
+                        // 2x from 40 ms behind, 4x from 120; off once back within 3 ms.
+                        if (_ff == 0 && (_avgMs > target + 7 || over > 40)) { _ff = 1.5; _grainPos = grainLen; }
+                        if (_ff > 0) _ff = over <= 3 ? 0 : over > 120 ? 4 : over > 40 ? 2 : 1.5;
                     }
-                    else if (_avgMs > target + 12 || over > 60)
+                    else if (_xfLeft == 0 && (_avgMs > target + 7 || over > 60))
                     {
-                        // Skip straight back to the target, fading over 2 ms so it does not click.
-                        int drop = (int)(over * floatsPerMs) & ~1;
-                        if (drop > 0)
+                        // Skip straight back to the target, crossfaded.
+                        _ff = 0;
+                        int drop = Math.Min((int)(over * floatsPerMs), _count - (xfLen + search) * 2 - 2) & ~1;
+                        if (drop >= fadeLen * 2 && StartJump(drop, xfLen, search))
                         {
-                            _read = (_read + drop) % cap;
-                            _count -= drop;
                             _avgMs = target;
-                            _gain = 0;
-                            _ffFactor = 0;
                             _diagSkips++;
-                            _diagSkippedMs += drop / floatsPerMs;
+                            _diagSkippedMs += _xfJump / floatsPerMs;
                         }
                     }
                 }
@@ -422,34 +470,37 @@ namespace TailRemote
                         _playing = false;
                         _fadeOut = fadeLen;
                         _gain = 0;
-                        _ffFactor = 0;
+                        _ff = 0;
+                        _xfLeft = 0;
                         _diagDry++;
                     }
                     if (_playing)
                     {
+                        if (_xfLeft == 0 && _ff > 0 && ++_grainPos >= grainLen)
+                        {
+                            // Fast-forward: after each 30 ms piece, jump over (speed - 1) pieces,
+                            // never below the target.
+                            _grainPos = 0;
+                            int want = Math.Min((int)((_ff - 1) * grainLen) * 2, _count - keep - (xfLen + search) * 2) & ~1;
+                            if (want >= fadeLen * 2 && StartJump(want, xfLen, search)) _diagFastMs += _xfJump / floatsPerMs;
+                        }
                         l = _ring[_read]; r = _ring[(_read + 1) % cap];
+                        if (_xfLeft > 0)
+                        {
+                            // Crossfading into the sound further ahead, which was lined up to match.
+                            float w = 1f - (float)_xfLeft / _xfLen;
+                            l += (_ring[_xfFrom] - l) * w;
+                            r += (_ring[(_xfFrom + 1) % cap] - r) * w;
+                            _xfFrom = (_xfFrom + 2) % cap;
+                        }
                         _read = (_read + 2) % cap;
                         _count -= 2;
-                        if (_gain < 1f) { _gain = Math.Min(1f, _gain + 1f / fadeLen); l *= _gain; r *= _gain; }
-                        if (_ffFactor > 0)
+                        if (_xfLeft > 0 && --_xfLeft == 0)
                         {
-                            // A 10 ms piece at its own pitch: fade its end, then jump over the
-                            // next one (2x) or three (4x). Jumbled, never pitch-shifted.
-                            int left = grainLen - ++_grainPos;
-                            if (left < fadeLen) { float g = (float)left / fadeLen; l *= g; r *= g; }
-                            if (_grainPos >= grainLen)
-                            {
-                                _grainPos = 0;
-                                _gain = 0;
-                                int jump = (_ffFactor - 1) * grainLen * 2;
-                                if (_count - jump > keep)
-                                {
-                                    _read = (_read + jump) % cap;
-                                    _count -= jump;
-                                    _diagFastMs += jump / floatsPerMs;
-                                }
-                            }
+                            _read = _xfFrom;
+                            _count -= _xfJump;
                         }
+                        if (_gain < 1f) { _gain = Math.Min(1f, _gain + 1f / fadeLen); l *= _gain; r *= _gain; }
                         _lastL = l; _lastR = r;
                     }
                     else if (_fadeOut > 0)

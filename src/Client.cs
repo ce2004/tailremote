@@ -283,6 +283,8 @@ namespace TailRemote
 
         /// <summary>Test only (--audiotest): delay each audio packet by a random 0 to N ms, like a bumpy network.</summary>
         public static int TestJitterMs;
+        /// <summary>Test only (--audiotest ... dropN): throws away N percent of audio packets at random, like Clumsy.</summary>
+        public static int TestDropPercent;
         private readonly SortedList<(long Due, long N), byte[]> _jitterQueue = new();
         private readonly Stopwatch _jitterClock = Stopwatch.StartNew();
         private long _jitterN;
@@ -316,6 +318,7 @@ namespace TailRemote
                 Interlocked.Increment(ref _rxPackets);
                 Interlocked.Add(ref _rxBytes, d.Length);
                 if (d.Length > 0 && d[0] >= 0xA0 && d[0] <= 0xA5) Interlocked.Increment(ref _rxTypes[d[0] - 0xA0]);
+                if (TestDropPercent > 0 && Random.Shared.Next(100) < TestDropPercent) continue;
                 if (TestJitterMs > 0)
                 {
                     lock (_jitterQueue) _jitterQueue.Add((_jitterClock.ElapsedMilliseconds + Random.Shared.Next(TestJitterMs + 1), _jitterN++), d);
@@ -337,12 +340,11 @@ namespace TailRemote
         // packets swapped. Played as they come, that is a lost packet (a fade-out
         // gap) and a late one (thrown away). So a packet that arrives one ahead is
         // held until the next arrival: if that is the missing one, both play in
-        // order; if not, the missing one really was lost. A held packet more than
-        // 30 ms old is dropped rather than played, so a scrap of old sound never
-        // plays in front of new sound after a pause.
+        // order; if not, the missing one really was lost. The held packet is always
+        // played: throwing it away when the next arrival took over 30 ms (1.7.8) made
+        // a gap many times a second on Wi-Fi, which sounded fuzzy.
 
         private byte[]? _held;
-        private long _heldAt;
         private uint _lastSeq;
         private bool _haveLastSeq;
 
@@ -356,9 +358,9 @@ namespace TailRemote
                 var held = _held;
                 _held = null;
                 if (ahead == 1) { Deliver(d); Deliver(held); return; } // it turned up: both in order
-                if (Environment.TickCount64 - _heldAt <= 30) Deliver(held); // it really was lost
+                Deliver(held); // the one before it really was lost
             }
-            else if (ahead == 2) { _held = d; _heldAt = Environment.TickCount64; return; } // one missing: give it one arrival to turn up
+            else if (ahead == 2) { _held = d; return; } // one missing: give it one arrival to turn up
             Deliver(d);
         }
 
@@ -382,6 +384,10 @@ namespace TailRemote
 
         private const int QualityTickMs = 200;
         private int _cleanTicks;
+        private readonly int[] _bad = new int[5], _sent = new int[5]; // the last second, by 0.2 s tick
+        private int _badAt;
+        private long _downAt, _noHelpUntil, _lastStepAt;
+        private double _lossBefore, _noHelpLoss;
         private int _upAfterTicks = 3; // 0.6 s of clean sound, then straight back to full quality
         private long _lastUpAt;
 
@@ -406,11 +412,18 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// Five times a second. Two or more packets that never arrived in 0.2 s step
-        /// the sample rate down at once, two steps when it is heavy. After 0.6 clean
-        /// seconds it goes straight back to full quality. If that brings trouble
-        /// straight back, the wait before the next try doubles, up to 8 seconds,
-        /// and resets once full quality has held for 10 seconds.
+        /// Five times a second, looking at the last second. A lower sample rate only
+        /// helps when the connection cannot carry the sound, which shows as heavy
+        /// loss; scattered loss (Wi-Fi, or 2 to 5 percent in Clumsy) is covered by
+        /// the player and never lowers the quality. So: more than 10 percent of the
+        /// last second's packets never arriving steps down one rate, a quarter of a
+        /// 0.2 s tick at once steps down two. After 0.6 s below 7 percent it goes
+        /// straight back to full quality. If trouble comes straight back, the wait
+        /// before the next try doubles, up to 3 seconds, and resets after 10 good seconds.
+        ///
+        /// A lower rate that does not help (2 seconds later the loss has not halved:
+        /// random loss, not a full connection) goes straight back to full quality,
+        /// and the same loss cannot step it down again for 30 seconds.
         /// </summary>
         private void AdaptQuality()
         {
@@ -419,18 +432,45 @@ namespace TailRemote
             // Only packets that never came: one that arrived late was counted lost first,
             // then late, and lateness is not a bandwidth problem a lower rate could fix.
             int bad = Math.Max(0, lost - late);
+            _badAt = (_badAt + 1) % _bad.Length;
+            _bad[_badAt] = bad;
+            _sent[_badAt] = packets + bad;
+            int badSecond = 0, sentSecond = 0;
+            for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; }
+            bool heavy = bad * 4 >= packets + bad && bad >= 4;
+            bool struggling = heavy || (sentSecond > 0 && badSecond * 100 > sentSecond * 10);
+            bool clean = sentSecond == 0 || badSecond * 100 < sentSecond * 7;
+            double loss = sentSecond == 0 ? 0 : (double)badSecond / sentSecond;
             long now = Environment.TickCount64;
             int q = AudioQuality;
-            if (bad >= 2)
+            if (struggling && now < _noHelpUntil && loss < _noHelpLoss * 1.5) struggling = false; // lowering did not help last time
+            if (struggling && now - _lastStepAt < 1000) struggling = false; // give each rate a full second
+            if (q > 0 && _downAt > 0 && now - _downAt > 2000 && loss >= _lossBefore * 0.5)
             {
+                // Two seconds at the lower rate and the loss has not halved: it is not the
+                // connection being full, so the lower rate only costs sound. Back to full.
+                _noHelpUntil = now + 30_000;
+                _noHelpLoss = _lossBefore;
+                _downAt = 0;
+                q = 0;
                 _cleanTicks = 0;
-                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 40); // the last return was too soon
-                q = Math.Min(Protocol.Rates.Length - 1, q + (bad >= 6 ? 2 : 1));
             }
+            else if (struggling)
+            {
+                if (q == 0 || _downAt == 0) { _lossBefore = loss; _downAt = now; }
+                _lastStepAt = now;
+                _cleanTicks = 0;
+                Array.Clear(_bad); // judge the new rate on its own packets
+                Array.Clear(_sent);
+                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 15); // the last return was too soon
+                q = Math.Min(Protocol.Rates.Length - 1, q + (heavy ? 2 : 1));
+            }
+            else if (!clean) _cleanTicks = 0;
             else if (++_cleanTicks >= _upAfterTicks && q > 0)
             {
                 q = 0; // the connection is good again: straight back to full quality, not step by step
                 _lastUpAt = now;
+                _downAt = 0;
                 _cleanTicks = 0;
             }
             else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 3;
