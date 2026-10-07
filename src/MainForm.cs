@@ -53,7 +53,7 @@ namespace TailRemote
         private bool _connecting, _reconnecting;
         private int _attempt; // bumped to abandon a connection attempt still under way
         private readonly Timer _titleTimer = new() { Interval = 1000 };
-        private readonly Timer _retryTimer = new() { Interval = 1000 };
+        private readonly Timer _retryTimer = new() { Interval = 3000 }; // Connect keeps trying every 3 seconds until Disconnect
         private bool _resumeRemote;     // was controlling the remote PC when the connection dropped
         private bool _quietModeChange;  // the reconnect message already says it
 
@@ -199,7 +199,7 @@ namespace TailRemote
             bool busy = _client != null || _host != null || _reconnecting;
             _mode.Enabled = !busy;
             if (HostMode) _go.Text = _service.Checked ? "Apply &settings to the service" : _host == null ? "&Start hosting" : "&Stop hosting";
-            else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
+            else _go.Text = _client == null && !_reconnecting ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
             _restart.Enabled = _client != null && !_client.ListenOnly;
             SaveResumeState();
@@ -420,11 +420,11 @@ namespace TailRemote
 
         private void Go()
         {
-            if (_connecting) return; // a second press while connecting would start a second connection
+            if (_connecting && !_reconnecting) return; // a second press while connecting would start a second connection
             SaveSettings();
             if (HostMode && _service.Checked) ApplyService();
             else if (HostMode) { if (_host == null) StartHost(); else StopHost(); }
-            else if (_reconnecting) StopReconnecting("Stopped reconnecting.");
+            else if (_reconnecting) StopReconnecting("Disconnected.");
             else if (_client == null) Connect(quiet: false);
             else Disconnect("Disconnected.", byUser: true);
         }
@@ -570,9 +570,16 @@ namespace TailRemote
             }
             catch (Exception e) when (attempt == _attempt)
             {
+                // Keeps trying every 3 seconds until Disconnect, except when trying again
+                // cannot help (and a wrong password tried again gets this PC blocked).
                 bool hopeless = e.Message.StartsWith("Wrong password") || e.Message.Contains("different TailRemote version");
-                if (_reconnecting && hopeless) StopReconnecting("Stopped reconnecting: " + e.Message);
-                else if (!quiet) Say("Could not connect: " + e.Message);
+                if (hopeless) { if (_reconnecting) StopReconnecting("Stopped trying: " + e.Message); else Say("Could not connect: " + e.Message); }
+                else if (!_reconnecting)
+                {
+                    _reconnecting = true;
+                    _retryTimer.Start();
+                    Say("Could not connect: " + e.Message + " Trying again every 3 seconds until you press Disconnect.");
+                }
             }
             catch { } // an abandoned attempt failing: nobody is waiting for it
             finally
@@ -605,7 +612,7 @@ namespace TailRemote
             }
             else
             {
-                // Dropped, or the host restarted after an update: try at once, then every second.
+                // Dropped, or the host restarted after an update: try at once, then every 3 seconds.
                 _reconnecting = true;
                 _retryTimer.Start();
                 Say(why + " Reconnecting.");

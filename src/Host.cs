@@ -537,6 +537,16 @@ namespace TailRemote
             for (int i = 0; i < _downIn.Length; i++) _downIn[i] = pcm[i] / 32768f;
             for (int level = 1; level < Protocol.Rates.Length; level++)
             {
+                if (level == Protocol.MonoLevel)
+                {
+                    // 8 kHz mono: the 8 kHz stereo packet with both sides the same, which the
+                    // coder packs into little more than one channel.
+                    int n = _downFrames[level - 1];
+                    short[] from = _downPcm[level - 1], to = _downPcm[level];
+                    for (int i = 0; i < n; i++) to[i * 2] = to[i * 2 + 1] = (short)((from[i * 2] + from[i * 2 + 1]) >> 1);
+                    _downFrames[level] = n;
+                    continue;
+                }
                 var rs = _down[level] ??= new Resampler(Protocol.AudioRate, Protocol.Rates[level]);
                 if (_downNext[level] != seq) rs.Reset(); // after a pause: start clean
                 _downNext[level] = seq + 1;

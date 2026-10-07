@@ -58,6 +58,9 @@ namespace TailRemote
                 if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;
                 Client.TestHoldQuality = Array.IndexOf(args, "steps") >= 0;
                 foreach (var a in args) if (a.StartsWith("drop") && int.TryParse(a[4..], out int drop)) Client.TestDropPercent = drop;
+                foreach (var a in args) if (a.StartsWith("lag") && int.TryParse(a[3..], out int lag)) Client.TestLagMs = lag;
+                foreach (var a in args) if (a.StartsWith("stall") && int.TryParse(a[5..], out int stall)) Client.TestStallMs = stall;
+                foreach (var a in args) if (a.StartsWith("bw") && int.TryParse(a[2..], out int kbps)) Client.TestKbps = kbps;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 

@@ -228,7 +228,7 @@ namespace TailRemote
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
         /// <summary>How the sound is reduced right now, for the title; null at full quality.</summary>
-        public string? ReducedSound => AudioQuality == 0 ? null : (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz";
+        public string? ReducedSound => AudioQuality == 0 ? null : (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz" + (AudioQuality == Protocol.MonoLevel ? " mono" : "");
 
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
@@ -283,8 +283,16 @@ namespace TailRemote
 
         /// <summary>Test only (--audiotest): delay each audio packet by a random 0 to N ms, like a bumpy network.</summary>
         public static int TestJitterMs;
+        /// <summary>Test only (--audiotest ... lagN): from 5 seconds in, every packet arrives N ms later, like Clumsy's lag.</summary>
+        public static int TestLagMs;
+        /// <summary>Test only (--audiotest ... stallN): 5 seconds in, nothing arrives for N ms, then all of it at once.</summary>
+        public static int TestStallMs;
         /// <summary>Test only (--audiotest ... dropN): throws away N percent of audio packets at random, like Clumsy.</summary>
         public static int TestDropPercent;
+        /// <summary>Test only (--audiotest ... bwN): from 3 seconds in, audio over N kbit/s is thrown away, like Clumsy's bandwidth limit.</summary>
+        public static int TestKbps;
+        private double _bucket;
+        private long _bucketAt;
         private readonly SortedList<(long Due, long N), byte[]> _jitterQueue = new();
         private readonly Stopwatch _jitterClock = Stopwatch.StartNew();
         private long _jitterN;
@@ -308,7 +316,7 @@ namespace TailRemote
 
         private void UdpLoop()
         {
-            if (TestJitterMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
+            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
@@ -319,9 +327,20 @@ namespace TailRemote
                 Interlocked.Add(ref _rxBytes, d.Length);
                 if (d.Length > 0 && d[0] >= 0xA0 && d[0] <= 0xA5) Interlocked.Increment(ref _rxTypes[d[0] - 0xA0]);
                 if (TestDropPercent > 0 && Random.Shared.Next(100) < TestDropPercent) continue;
-                if (TestJitterMs > 0)
+                if (TestKbps > 0 && _jitterClock.ElapsedMilliseconds > 3000)
                 {
-                    lock (_jitterQueue) _jitterQueue.Add((_jitterClock.ElapsedMilliseconds + Random.Shared.Next(TestJitterMs + 1), _jitterN++), d);
+                    long t = _jitterClock.ElapsedMilliseconds;
+                    _bucket = Math.Min(TestKbps * 1000 / 8 * 0.05, _bucket + (t - _bucketAt) * TestKbps / 8.0); // bytes; 50 ms of burst
+                    _bucketAt = t;
+                    if (_bucket < d.Length) continue;
+                    _bucket -= d.Length;
+                }
+                if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0)
+                {
+                    long at = _jitterClock.ElapsedMilliseconds;
+                    if (at >= 5000 && at < 5000 + TestStallMs) at = 5000 + TestStallMs;
+                    at += Random.Shared.Next(TestJitterMs + 1) + (at > 5000 ? TestLagMs : 0);
+                    lock (_jitterQueue) _jitterQueue.Add((at, _jitterN++), d);
                     continue;
                 }
                 SafeHandle(d);
@@ -350,7 +369,8 @@ namespace TailRemote
 
         private void HandlePacket(byte[] d)
         {
-            if (d.Length < Protocol.SilencePacketBytes || d[0] < Protocol.UdpAudio || d[0] > Protocol.UdpPackedRate || !_link.OpenAudio(d, d.Length)) return;
+            if (d.Length < Protocol.SilencePacketBytes || d[0] < Protocol.UdpAudio || d[0] > Protocol.UdpPackedRate) return;
+            if (!_link.OpenAudio(d, d.Length)) { Interlocked.Increment(ref _rxDamaged); return; } // changed on the way (or not for us): counts as lost
             uint seq = BitConverter.ToUInt32(d, 1);
             int ahead = _haveLastSeq ? (int)(seq - _lastSeq) : 1;
             if (_held != null)
@@ -383,12 +403,12 @@ namespace TailRemote
         // ---- Quality steps ----
 
         private const int QualityTickMs = 200;
-        private int _cleanTicks;
+        private int _cleanTicks, _upFrom, _ceiling;
+        private long _ceilingUntil;
         private readonly int[] _bad = new int[5], _sent = new int[5]; // the last second, by 0.2 s tick
         private int _badAt;
         private long _downAt, _noHelpUntil, _lastStepAt;
         private double _lossBefore, _noHelpLoss;
-        private int _upAfterTicks = 3; // 0.6 s of clean sound, then straight back to full quality
         private long _lastUpAt;
 
         /// <summary>Test only (--audiotest ... steps): hold the quality where the test puts it.</summary>
@@ -412,18 +432,20 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// Five times a second, looking at the last second. A lower sample rate only
-        /// helps when the connection cannot carry the sound, which shows as heavy
-        /// loss; scattered loss (Wi-Fi, or 2 to 5 percent in Clumsy) is covered by
-        /// the player and never lowers the quality. So: more than 10 percent of the
-        /// last second's packets never arriving steps down one rate, a quarter of a
-        /// 0.2 s tick at once steps down two. After 0.6 s below 7 percent it goes
-        /// straight back to full quality. If trouble comes straight back, the wait
-        /// before the next try doubles, up to 3 seconds, and resets after 10 good seconds.
+        /// Five times a second, looking at the last second of packets.
         ///
-        /// A lower rate that does not help (2 seconds later the loss has not halved:
-        /// random loss, not a full connection) goes straight back to full quality,
-        /// and the same loss cannot step it down again for 30 seconds.
+        /// More than 10 percent never arriving (or a quarter of one 0.2 s tick) steps
+        /// the sample rate down, one step a second (two when heavy), down to 8 kHz
+        /// mono, until the sound fits. That is what a slow or capped connection needs.
+        ///
+        /// A lower rate that does not help (two steps down and the loss has not fallen,
+        /// or at the lowest step it has not halved) means random loss, which no rate
+        /// fixes: straight back to full quality, and that loss cannot step it down again
+        /// for 30 seconds.
+        ///
+        /// Below 7 percent for 0.6 s it goes back up, straight to full quality. If full
+        /// quality overloads the connection again within 2 seconds, it goes straight
+        /// back to the rate that worked and stays there for 10 seconds before trying again.
         /// </summary>
         private void AdaptQuality()
         {
@@ -437,61 +459,79 @@ namespace TailRemote
             _sent[_badAt] = packets + bad;
             int badSecond = 0, sentSecond = 0;
             for (int i = 0; i < _bad.Length; i++) { badSecond += _bad[i]; sentSecond += _sent[i]; }
-            bool heavy = bad * 4 >= packets + bad && bad >= 4;
-            bool struggling = heavy || (sentSecond > 0 && badSecond * 100 > sentSecond * 10);
-            bool clean = sentSecond == 0 || badSecond * 100 < sentSecond * 7;
             double loss = sentSecond == 0 ? 0 : (double)badSecond / sentSecond;
+            bool heavy = bad >= 4 && bad * 4 >= packets + bad;
+            bool struggling = heavy || loss > 0.10;
+            bool clean = loss < 0.07;
             long now = Environment.TickCount64;
-            int q = AudioQuality;
-            if (struggling && now < _noHelpUntil && loss < _noHelpLoss * 1.5) struggling = false; // lowering did not help last time
-            if (struggling && now - _lastStepAt < 1000) struggling = false; // give each rate a full second
-            if (q > 0 && _downAt > 0 && now - _downAt > 2000 && loss >= _lossBefore * 0.5)
+            int q = AudioQuality, lowest = Protocol.Rates.Length - 1;
+
+            if (struggling && now < _noHelpUntil && loss < _noHelpLoss * 1.5 && loss < 0.4) struggling = false; // lowering did not help last time
+            if (struggling && now - _lastStepAt < 1000) struggling = false; // each rate gets a full second
+
+            // Did stepping down help? Less data only helps a full connection, and then the
+            // loss falls with every step. Two steps down with no fall at all, or the lowest
+            // step without even halving it, is random loss: the lower rates only cost sound.
+            // Losing more than 40 percent is a starved connection, never random loss: keep the lowest rate.
+            bool noHelp = q > 0 && _lossBefore > 0.05 && loss < 0.4 && now >= _ceilingUntil && now - _lastStepAt >= 1000 &&
+                ((q >= 2 && loss >= _lossBefore * 0.9) || (q == lowest && now - _lastStepAt >= 2000 && loss >= _lossBefore * 0.5));
+            if (noHelp)
             {
-                // Two seconds at the lower rate and the loss has not halved: it is not the
-                // connection being full, so the lower rate only costs sound. Back to full.
                 _noHelpUntil = now + 30_000;
                 _noHelpLoss = _lossBefore;
-                _downAt = 0;
                 q = 0;
                 _cleanTicks = 0;
             }
-            else if (struggling)
+            else if (struggling && (q < lowest || (q == 0 && _upFrom > 0)))
             {
-                if (q == 0 || _downAt == 0) { _lossBefore = loss; _downAt = now; }
+                if (q == 0 && now - _lastUpAt < 2000 && _upFrom > 0)
+                {
+                    // Full quality did not fit: straight back to the rate that did.
+                    q = _upFrom;
+                    _ceiling = q;
+                    _ceilingUntil = now + 10_000;
+                }
+                else
+                {
+                    if (q == 0) _lossBefore = loss;
+                    q = Math.Min(lowest, q + (heavy ? 2 : 1));
+                }
                 _lastStepAt = now;
                 _cleanTicks = 0;
                 Array.Clear(_bad); // judge the new rate on its own packets
                 Array.Clear(_sent);
-                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 15); // the last return was too soon
-                q = Math.Min(Protocol.Rates.Length - 1, q + (heavy ? 2 : 1));
             }
             else if (!clean) _cleanTicks = 0;
-            else if (++_cleanTicks >= _upAfterTicks && q > 0)
+            else if (++_cleanTicks >= 3 && q > 0)
             {
-                q = 0; // the connection is good again: straight back to full quality, not step by step
-                _lastUpAt = now;
-                _downAt = 0;
-                _cleanTicks = 0;
+                int target = now < _ceilingUntil ? _ceiling : 0;
+                if (target < q)
+                {
+                    _upFrom = q;
+                    q = target; // straight back up, not step by step
+                    _lastUpAt = now;
+                    _cleanTicks = 0;
+                }
             }
-            else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 3;
             if (q == AudioQuality) return;
-            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (in 0.2 s: " + packets + " packets, " + lost + " lost, " + late + " late)");
+            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (last second: " + badSecond + " of " + sentSecond + " packets never came)");
             AudioQuality = q;
             Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
 
         // ---- The once-a-second log line (only while logging is on) ----
-        private int _rxPackets, _rxBytes, _keysSent;
+        private int _rxPackets, _rxBytes, _keysSent, _rxDamaged;
         private readonly int[] _rxTypes = new int[6]; // A0 to A5
 
         private void LogSecond()
         {
             int packets = Interlocked.Exchange(ref _rxPackets, 0), bytes = Interlocked.Exchange(ref _rxBytes, 0), keys = Interlocked.Exchange(ref _keysSent, 0);
+            int damaged = Interlocked.Exchange(ref _rxDamaged, 0);
             var t = new int[6];
             for (int i = 0; i < 6; i++) t[i] = Interlocked.Exchange(ref _rxTypes[i], 0);
             DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, quality step " + AudioQuality +
                 (ReducedSound is string r ? " (" + r + ")" : "") +
-                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", full rate " + t[4] + ", lower rate " + t[5] + ")" +
+                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", full rate " + t[4] + ", lower rate " + t[5] + ", damaged " + damaged + ")" +
                 ", keys sent " + keys + ", playing on " + _player.DeviceInfo);
         }
 

@@ -75,7 +75,10 @@ namespace TailRemote
         /// The steps down for a struggling connection: every one is lossless at
         /// its own rate, and each packet still covers the same 5.8 ms.
         /// </summary>
-        public static readonly int[] Rates = { 44100, 32000, 24000, 16000, 11025, 8000 };
+        public static readonly int[] Rates = { 44100, 32000, 24000, 16000, 11025, 8000, 8000 };
+
+        /// <summary>The last step: 8 kHz in mono, about half of 8 kHz stereo. Older PCs never ask for it.</summary>
+        public const int MonoLevel = 6;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
         public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureLossless2 | FeatureRate;

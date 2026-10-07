@@ -8,10 +8,13 @@ namespace TailRemote
     /// <summary>
     /// Plays the host's audio. The pitch never changes.
     ///
-    /// The buffer is sized to the connection: it covers 98% of how late packets
-    /// were over the last 10 seconds (Wi-Fi and Tailscale always bunch packets),
-    /// plus one packet, a 2 ms margin and the device period. It rises at once
-    /// and comes down gently.
+    /// The buffer is sized to the connection and always heads back to live: it
+    /// covers how unevenly packets arrived over the last 3 seconds (98% of them,
+    /// measured from the earliest, so a network that simply got slower costs
+    /// nothing once 3 seconds have passed), plus one packet, a 2 ms margin and
+    /// the device period, never more than 40 ms. A stall never raises it: what
+    /// piles up behind a stall is skipped (or fast-forwarded) the moment it lands. It rises at once and halves
+    /// back each half second.
     ///
     /// When the buffer is too full (clock drift, or a burst after a stall) it
     /// catches up one of two ways, never by changing the pitch: by default it
@@ -65,9 +68,11 @@ namespace TailRemote
         private readonly float[] _in = new float[Protocol.PacketFrames * 2];
         private readonly float[] _last = new float[Protocol.PacketFrames * 2];
 
-        // Lateness of the last 1720 packets (10 seconds), and the buffer worked out from it.
-        private readonly float[] _late = new float[1720];
-        private readonly float[] _lateSorted = new float[1720];
+        // Lateness of the last 516 packets (3 seconds), and the buffer worked out from it.
+        private readonly float[] _late = new float[516];
+        private readonly float[] _lateSorted = new float[516];
+        private const float MaxCoverMs = 40; // live at all costs: past this, a rare gap rather than more delay
+        private int _stallRun; // packets in a row that came after a stall
         private int _lateAt, _lateCount, _sinceTarget;
         private float _coverMs;
         private bool _measured;
@@ -192,8 +197,21 @@ namespace TailRemote
             // for growing lateness.
             double raw = now - (int)(seq - _spurtSeq) * PacketMs;
             _ref = Math.Min(raw, _ref + PacketMs * 0.0002);
-            _late[_lateAt++ % _late.Length] = (float)Math.Min(raw - _ref, 400);
-            if (_lateCount < _late.Length) _lateCount++;
+            float lateMs = (float)Math.Min(raw - _ref, 400);
+            if (_lateCount >= 86 && lateMs > _coverMs + 40)
+            {
+                // After a stall: never a reason to build delay. The backlog is skipped (or
+                // fast-forwarded) when it lands, and the buffer stays as it was. If every
+                // packet stays this late for a second, the network has simply got slower:
+                // measure from here instead.
+                if (++_stallRun >= 172) { _ref = raw; _stallRun = 0; }
+            }
+            else
+            {
+                _stallRun = 0;
+                _late[_lateAt++ % _late.Length] = lateMs;
+                if (_lateCount < _late.Length) _lateCount++;
+            }
             UpdateTarget();
 
             Interlocked.Increment(ref _statPackets);
@@ -279,10 +297,13 @@ namespace TailRemote
                 _sinceTarget = 0;
                 Array.Copy(_late, _lateSorted, _lateCount);
                 Array.Sort(_lateSorted, 0, _lateCount);
-                float p98 = _lateSorted[(int)(_lateCount * 0.98) - 1];
-                // Up at once, down 20% of the way; the first real measurement simply
+                // How uneven, not how late: from the earliest packet in the window. A delay
+                // that every packet shares (Clumsy's lag, a slower route) is not unevenness;
+                // measured from the start it held the buffer at 300 ms for good.
+                float spread = Math.Min(_lateSorted[(int)(_lateCount * 0.98) - 1] - _lateSorted[0], MaxCoverMs);
+                // Up at once, half way back down each time; the first real measurement simply
                 // replaces the start-up guess, which the connect burst made too big.
-                _coverMs = p98 > _coverMs || !_measured ? p98 : _coverMs + (p98 - _coverMs) * 0.2f;
+                _coverMs = spread > _coverMs || !_measured ? spread : _coverMs + (spread - _coverMs) * 0.5f;
                 _measured = true;
             }
             _targetMs = (float)(PacketMs + MarginMs + _coverMs);
@@ -440,12 +461,15 @@ namespace TailRemote
                     double over = levelMs - target;
                     if (SpeedUp && over < 300)
                     {
-                        // Fast-forward: on at 7 ms behind on average (or 40 at once); 1.5x,
-                        // 2x from 40 ms behind, 4x from 120; off once back within 3 ms.
-                        if (_ff == 0 && (_avgMs > target + 7 || over > 40)) { _ff = 1.5; _grainPos = grainLen; }
-                        if (_ff > 0) _ff = over <= 3 ? 0 : over > 120 ? 4 : over > 40 ? 2 : 1.5;
+                        // Fast-forward: on at 4 ms behind on average (or 10 at once); 1.5x,
+                        // 2x from 20 ms behind, 4x from 60; off once back within 3 ms.
+                        // Judged on the smoothed level as well: the level dips by a device period
+                        // at every refill, and those dips kept switching fast-forward off.
+                        double behind = Math.Max(over, _avgMs - target);
+                        if (_ff == 0 && (_avgMs > target + 4 || over > 10)) { _ff = 1.5; _grainPos = grainLen; }
+                        if (_ff > 0) _ff = _avgMs - target <= 2 || over <= -5 ? 0 : behind > 60 ? 4 : behind > 20 ? 2 : 1.5;
                     }
-                    else if (_xfLeft == 0 && (_avgMs > target + 7 || over > 60))
+                    else if (_xfLeft == 0 && (_avgMs > target + 4 || over > 10))
                     {
                         // Skip straight back to the target, crossfaded.
                         _ff = 0;
@@ -482,7 +506,11 @@ namespace TailRemote
                             // never below the target.
                             _grainPos = 0;
                             int want = Math.Min((int)((_ff - 1) * grainLen) * 2, _count - keep - (xfLen + search) * 2) & ~1;
-                            if (want >= fadeLen * 2 && StartJump(want, xfLen, search)) _diagFastMs += _xfJump / floatsPerMs;
+                            if (want >= fadeLen * 2 && StartJump(want, xfLen, search))
+                            {
+                                _diagFastMs += _xfJump / floatsPerMs;
+                                _avgMs -= _xfJump / floatsPerMs; // the average knows at once what was cut
+                            }
                         }
                         l = _ring[_read]; r = _ring[(_read + 1) % cap];
                         if (_xfLeft > 0)

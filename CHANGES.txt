@@ -1,5 +1,11 @@
+1.7.10
+Changed: the sound always heads back to live. Nothing ever builds up a delay: if the connection stalls, what piles up behind it is skipped (or fast-forwarded, if you turned that on) the moment it arrives, and a network that simply gets slower no longer adds its delay to the sound for good. Nothing old is ever played: sound that arrives behind is thrown away as if it never existed, and the buffer never goes above 40 ms.
+New feature: on a slow or capped connection, the sound steps down in quality until it fits, all the way to 8 kHz mono, and stays at the quality that works instead of bouncing back up and breaking up again. It tries full quality again every 10 seconds.
+Changed: Connect keeps trying every 3 seconds until you press Disconnect, instead of giving up. A wrong password still stops it at once.
+Bug fixed: fast-forwarding sometimes stopped short and left the sound a little behind.
+Changed: both PCs need the newest version.
+
 1.7.9
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the sound was fuzzy, most of all the bass, over Wi-Fi. 1.7.8 threw away good audio whenever packets arrived out of order and a little late, which Wi-Fi does all the time, leaving tiny gaps many times a second. Nothing good is thrown away now.
 Bug fixed: the sound quality often dropped and sometimes never came back. Those same thrown-away packets counted as lost. Now only heavy loss (more than a tenth of the sound) lowers the quality, and if a lower quality does not actually help, it goes straight back to full. Scattered loss, like 2 to 5 percent, never lowers it.
 Bug fixed: right after connecting, the sound could stop and buffer for a moment. The buffer now sizes itself before the sound starts.
@@ -7,7 +13,6 @@ Bug fixed: a packet that really is lost no longer makes a click.
 Changed: fast-forwarding sounds much smoother. It plays at 1.5x when a little behind, 2x when further behind and 4x only when far behind, and blends each jump so it sounds like a podcast player sped up rather than chopped pieces. Skipping ahead, the default, is blended the same way, so you should not hear it at all.
 
 1.7.8
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the pitch of the sound wobbled. TailRemote sped the sound up and slowed it down a little to keep its delay steady, and you could hear it. The pitch now never changes. When the sound falls behind, TailRemote skips ahead to catch up, with a tiny fade so it does not click.
 New feature: Catch up by fast-forwarding (Alt Y, off at first). Instead of skipping, the sound plays at 2x, or 4x if it is far behind, until it has caught up. It keeps its pitch, so it sounds like a quick jumbled fast-forward rather than chipmunks.
 Changed: when the connection gets better, the sound goes back to full quality at once instead of a second later.
@@ -20,67 +25,54 @@ Bug fixed: if TailRemote closed unexpectedly, it did not always come back hostin
 Bug fixed: Port editor said its error messages twice with NVDA.
 Bug fixed: the service's log was wiped when it got big. The older half is now kept in service.log.old.
 Changed: an update is only installed when GitHub gives a checksum to check the download against.
-Changed: TailRemote no longer sends sound in the old format from version 1.4. A PC still on 1.4 gets the sound uncompressed instead.
 
 1.7.7
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the sound chopped over Wi-Fi even though every packet arrived. Packets never arrive evenly over Wi-Fi, and the tiny fixed buffer kept running dry and throwing sound away, about a tenth of a second every second. The buffer now sizes itself to how unevenly packets really arrive and then holds steady, so the delay stays the same while the sound stays smooth. Expect about 30 ms on a wired connection and somewhat more over Wi-Fi.
 
 1.7.6
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: hosting from some virtual audio devices, such as Virtual Audio Cable, made the sound choppy. TailRemote mistook uneven timing information from the device for gaps and added about a third more sound than there was, which the other PC then had to cut away. Only real gaps count now.
 New feature: while connected or hosting, TailRemote keeps Wi-Fi steady. It turns on Windows media streaming mode and pauses background network scans, which made the sound chop whenever the Wi-Fi card was busy. Windows puts both back when TailRemote disconnects or closes.
 
 1.7.5
-Works with 1.7 and older, so the two PCs can update one at a time.
 New feature: Enable logging (Alt G). While it is on, TailRemote writes TailRemote-log.txt next to itself: every connection, every sound problem, and a line every second with how the sound is doing on that PC. What you type is never written down, only how many keys were pressed. For the service, press Apply settings to the service after turning it on.
 
 1.7.4
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the sound kept buffering and catching up, and the delay drifted. TailRemote was cutting the sound at normal small swings and moving its buffer whenever the capture device handed over one odd chunk. Now the delay stays fixed, about 30 ms on a good connection, and only a real pile-up after a network bump is cut.
 Bug fixed: when two audio packets arrived swapped, which networks do, one was lost and made a tiny gap, and the sound wrongly dropped to 8 kHz. Swapped packets are now put back in order, and the quality only drops for packets that really never arrive.
 Bug fixed: on some PCs Windows ran TailRemote on its slow power-saving cores, which made the sound run dry. TailRemote now asks to run at full speed.
 
 1.7.3
-Works with 1.7 and older, so the two PCs can update one at a time.
 Changed: the TailRemote service no longer checks for updates by itself. It only updates when you update TailRemote on that PC with Check for updates, and then it follows straight away to the same version, with no questions and no administrator prompt.
 
 1.7.2
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: capturing sound from a device other than the default lagged and stuttered. Some devices, such as Bluetooth and USB ones, hand over their sound in bigger chunks; the host now measures that and the other PC allows for exactly that much, so the delay stays fixed.
 New feature: the TailRemote service updates itself. It checks GitHub every 10 minutes, and straight away after you update TailRemote on that PC, with no questions and no administrator prompt. The service needs this version once; after that it keeps itself up to date.
 
 1.7.1
-Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: if the connection dropped while you were controlling the remote PC, you had to press Control Shift Enter again after it reconnected. Now it goes straight back to controlling the remote PC and says so.
 Changed: reconnecting starts at once and tries every second.
 Changed: the sound delay is fixed and never grows. Audio that arrives late is skipped instead of waited for, so on a jittery connection you may hear a tiny gap, but never a growing delay.
 
 1.7.0
-Works with 1.6, 1.5 and 1.4, so the two PCs can update one at a time.
 Changed: the sound reacts to the connection much faster. It steps down within a fifth of a second of trouble, two steps at once when it is bad, and climbs back after a second and a half of clean sound, one step a second. If climbing back brings the trouble straight back, it waits longer before trying again.
 New feature: in Host mode, Capture sound from (Alt A) chooses which output the other PCs hear, or Windows default. Changing it while hosting switches straight away. The service uses it too after Apply settings to the service.
 
 1.6.0
-Works with 1.5 and 1.4, so the two PCs can update one at a time.
 Changed: on a slow or struggling connection, the sound now steps down in sample rate instead of detail: 32, 24, 16, 11 and finally 8 kHz, which is phone quality and still perfectly clear for speech. Every step is lossless at its own rate. At 8 kHz it uses a small fraction of the data. It climbs back to full quality after 10 good seconds, and the window title says when the sound is reduced.
 
 1.5.0
-Works with 1.4, so the two PCs can update one at a time.
 New feature: sound uses about a fifth less data again, and is still exactly lossless.
 New feature: on a slow or struggling connection, TailRemote drops the finest detail one step at a time (down to 12-bit) instead of letting the sound lag, and goes back to lossless after 10 good seconds. The window title says when it has.
 Safer: TailRemote cannot be frozen by someone flooding it with logins, by a PC that stops responding, or by many listeners. After 5 wrong passwords, that address is refused for a minute.
 Faster: less work and less memory churn while sound plays.
 
 1.4.1
-Works with 1.4.0, so the two PCs can update one at a time.
 New feature: while hosting, closing the window hides TailRemote in the notification area, where it keeps hosting. Press Windows B to find it; its menu has Stop hosting and exit.
 New feature: up to 100 people can listen at once.
 Bug fixed: connecting or disconnecting cut all sound on the PC for about a second.
 Bug fixed: the sound crackled, most of all from a busy cloud PC. Audio that arrived late was treated as silence; now only real silence is. When sound does run short, it fades instead of clicking.
 
 1.4.0
-Update both PCs: this version cannot connect to older ones.
 New feature: Run as a Windows service, in Host mode. The remote PC can then be used at the lock screen, the sign-in screen and administrator prompts, even right after a restart, and Control Alt End sends Control Alt Delete.
 New feature: Restart remote PC and reconnect. TailRemote reconnects by itself when the remote PC is back, and tells you.
 New feature: Send files, both ways. Files arrive in Downloads, TailRemote, on the other PC, checked so nothing arrives damaged, and never overwrite anything.
@@ -88,10 +80,8 @@ New feature: the clipboard is shared. Copy text on one PC and paste it on the ot
 New feature: a listen-only password. Up to 100 people can listen to the remote PC with it, without being able to control it.
 New feature: Saved PCs. Save an address, port and password, and pick it from the list next time.
 New feature: sound uses about half the data, with no change at all to how it sounds.
-Changed: newer versions can add features without breaking older ones from now on.
 
 1.3.0
-Update both PCs: this version cannot connect to older ones.
 New feature: everything TailRemote sends is encrypted, so you can connect with or without Tailscale, for example straight to a cloud PC's address.
 New feature: Port editor opens and closes TailRemote's ports in Windows Firewall. It remembers every port TailRemote has used, so you can still close an old one after changing the port.
 New feature: starting to host offers to open the port if Windows Firewall would keep other PCs out.
@@ -100,7 +90,6 @@ Changed: the Only accept Tailscale connections checkbox is gone. Anyone who know
 Changed: Start hosting when Windows starts no longer adds its own firewall rule, and removes the one older versions added. Use Port editor instead.
 
 1.2.0
-Update both PCs: this version cannot connect to older ones.
 New feature: Remove audio device takes VB-Cable off the PC completely, after making your speakers the default again.
 New feature: both audio buttons explain what they will do before they start, and they show in both modes. Before, Set up audio device only appeared in Host mode.
 Safer: both PCs now prove they know the password, so your keys are never sent to a PC that does not know it. Wrong passwords are slowed down.
