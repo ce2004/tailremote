@@ -1,3 +1,6 @@
+1.8.1
+Bug fixed: with Sound quality locked, the first half second after connecting played at the highest bitrate. Now you only ever hear the bitrate you locked, from the very first sound, and changing the lock takes effect at once.
+
 1.8.0
 Changed: the sound now uses Opus, the codec behind Discord and most voice apps, at up to 510 kilobits per second. At the top it sounds the same as the PC itself, uses far less data than before, and adds only about 2 ms of delay.
 New feature: Sound quality (Alt Q, on the controlling PC). Variable follows the connection: on a slow or busy connection it lowers the bitrate until the sound fits, all the way down to 6 kilobits per second, which even works over dial-up, and comes back up when it can. It moves one step at a time, never faster than one step every three quarters of a second, so the sound changes over a few seconds rather than suddenly. Or lock it to any bitrate from 510 down to 6, and it stays there no matter what.

@@ -561,15 +561,15 @@ namespace TailRemote
                 }
                 _player.SpeedUp = _speedUp.Checked;
                 var player = _player;
+                int locked = _quality.SelectedIndex - 1; // from the very first sound
                 var c = await System.Threading.Tasks.Task.Run(() =>
-                    Client.Connect(address, port, pw, player, msg => Later(() => Say(msg))));
+                    Client.Connect(address, port, pw, player, msg => Later(() => Say(msg)), locked));
                 if (attempt != _attempt || HostMode || _client != null)
                 {
                     // Stopped, switched to hosting, or already connected while this was under way.
                     c.Dispose();
                     return;
                 }
-                c.LockedStep = _quality.SelectedIndex - 1;
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 c.FileMessage += msg => Later(() => Say(msg));

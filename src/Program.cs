@@ -82,6 +82,7 @@ namespace TailRemote
                 foreach (var a in args) if (a.StartsWith("lag") && int.TryParse(a[3..], out int lag)) Client.TestLagMs = lag;
                 foreach (var a in args) if (a.StartsWith("stall") && int.TryParse(a[5..], out int stall)) Client.TestStallMs = stall;
                 foreach (var a in args) if (a.StartsWith("bw") && int.TryParse(a[2..], out int kbps)) Client.TestKbps = kbps;
+                foreach (var a in args) if (a.StartsWith("lock") && int.TryParse(a[4..], out int lk)) Client.TestLockStep = lk;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 
@@ -149,7 +150,7 @@ namespace TailRemote
                 Host.WrongPasswordDelayMs = 0;
                 using var host = new Host(47998, "audiotest", null, _ => { }, src.Id);
                 using var player = new Player("", s => Say("player: " + s)) { Mute = true, SpeedUp = Array.IndexOf(Environment.GetCommandLineArgs(), "speed") >= 0 };
-                using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s));
+                using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s), Client.TestLockStep);
                 System.Threading.Thread.Sleep(1500);
                 player.Diagnose();
                 for (int i = 1; i <= 15; i++)
@@ -160,6 +161,7 @@ namespace TailRemote
                     int fillMs = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
                     int seqSkips = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestSeqSkips, 0);
                     int chunk = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestChunkMax, 0);
+                    if (Client.TestLockStep >= 0 && i == 15) Say("locked test: first packet " + Client.TestFirstTicks + " ticks, other lengths " + Client.TestOtherTicks);
                     Say($"{i,2}s  {player.Diagnose()}, quality step {c.AudioQuality} | host: biggest chunk {chunk} ms, silence added {fills}x ({fillMs} ms), count skips {seqSkips}");
                 }
                 return 0;

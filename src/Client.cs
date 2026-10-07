@@ -49,7 +49,8 @@ namespace TailRemote
         /// The player is the caller's and outlives the connection, so connecting never
         /// opens or closes an audio device.
         /// </summary>
-        public static Client Connect(string address, int port, string password, Player player, Action<string> status)
+        /// <summary>lockedStep: the bitrate step to hold from the very first sound, or -1 for Variable.</summary>
+        public static Client Connect(string address, int port, string password, Player player, Action<string> status, int lockedStep = -1)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
             tcp.Client.DualMode = true;
@@ -119,6 +120,14 @@ namespace TailRemote
                 {
                     ListenOnly = role[0] == Protocol.RoleListen,
                 };
+                if (lockedStep >= 0)
+                {
+                    // Before the features message: the host sends no sound until that
+                    // arrives, so the very first packet is already at the locked bitrate.
+                    c._lockedStep = Math.Min(lockedStep, Protocol.OpusSteps.Length - 1);
+                    c.AudioQuality = c._lockedStep;
+                    c._link.Send(stream, new[] { Protocol.AudioQuality, (byte)c._lockedStep });
+                }
                 c._link.Send(stream, Protocol.FeaturesMessage());
                 if (!c.ListenOnly) c._files = OpenFiles(hostEp, token, key, hostNonce, myNonce, msg => c.FileMessage?.Invoke(msg));
                 c.Status += status;
@@ -291,6 +300,9 @@ namespace TailRemote
         public static int TestDropPercent;
         /// <summary>Test only (--audiotest ... bwN): from 3 seconds in, audio over N kbit/s is thrown away, like Clumsy's bandwidth limit.</summary>
         public static int TestKbps;
+        /// <summary>Test only: the length (in 5 ms ticks) of the first audio packet, and how many packets came at another length.</summary>
+        public static int TestFirstTicks, TestOtherTicks;
+        public static int TestLockStep = -1;
         private double _bucket;
         private long _bucketAt;
         private readonly SortedList<(long Due, long N), byte[]> _jitterQueue = new();
@@ -378,6 +390,7 @@ namespace TailRemote
             Interlocked.Add(ref _qBytes, d.Length);
             int ticks = d[5];
             if (ticks < 1 || ticks > 24) return;
+            if (TestFirstTicks == 0) TestFirstTicks = ticks; else if (ticks != TestFirstTicks) TestOtherTicks++;
             uint seq = BitConverter.ToUInt32(d, 1);
             double now = Player.Now;
             if (_haveNext && (int)(seq - _next) < 0) { _player.CountLate(ticks); return; } // its moment has passed
@@ -445,8 +458,18 @@ namespace TailRemote
         private double _lossBefore, _noHelpLoss;
         private int _qPackets, _qBytes;
 
-        /// <summary>The bitrate step to hold no matter what, or -1 to follow the connection (Variable).</summary>
-        public volatile int LockedStep = -1;
+        /// <summary>The bitrate step to hold no matter what, or -1 to follow the connection (Variable). Takes effect at once.</summary>
+        public int LockedStep
+        {
+            get => _lockedStep;
+            set
+            {
+                _lockedStep = Math.Min(value, Protocol.OpusSteps.Length - 1);
+                if (_lockedStep >= 0) lock (_stepGate) SetStep(_lockedStep);
+            }
+        }
+        private volatile int _lockedStep = -1;
+        private readonly object _stepGate = new();
 
         /// <summary>Test only (--audiotest ... steps): hold the quality where the test puts it.</summary>
         public static bool TestHoldQuality;
@@ -497,8 +520,8 @@ namespace TailRemote
             var (packets, lost, late) = _player.TakeStats();
             int bytes = Interlocked.Exchange(ref _qBytes, 0), arrived = Interlocked.Exchange(ref _qPackets, 0);
             if (TestHoldQuality) return;
-            int locked = LockedStep;
-            if (locked >= 0) { SetStep(Math.Min(locked, Protocol.OpusSteps.Length - 1)); return; }
+            int locked = _lockedStep;
+            if (locked >= 0) { lock (_stepGate) SetStep(locked); return; }
             if (packets == 0) return; // silence: nothing to judge
             // Only sound that never came: what arrived late was counted lost first, then
             // late, and lateness is not a bandwidth problem a lower bitrate could fix.
@@ -554,7 +577,7 @@ namespace TailRemote
             if (_target != q && now - _lastMoveAt >= StepEveryMs)
             {
                 _lastMoveAt = now;
-                SetStep(q + Math.Sign(_target - q));
+                lock (_stepGate) if (_lockedStep < 0) SetStep(q + Math.Sign(_target - q));
             }
         }
 

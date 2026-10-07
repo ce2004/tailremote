@@ -51,6 +51,7 @@ namespace TailRemote
             public required byte[] Key, HostNonce, ClientNonce;
             public FileChannel? Files;
             public uint PeerFeatures;
+            public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
             public volatile IPEndPoint? AudioTo;
             public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
@@ -471,6 +472,7 @@ namespace TailRemote
                         break;
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
+                        s.Ready = true;
                         break;
                     case Protocol.Clipboard when s.Role == Protocol.RoleControl:
                         ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
@@ -522,12 +524,12 @@ namespace TailRemote
             // seconds) gets nothing, rather than a stream nobody hears until it times out.
             long now = Environment.TickCount64;
             Array.Clear(_wanted);
-            foreach (var s in all) if (s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) _wanted[s.Quality] = true;
+            foreach (var s in all) if (s.Ready && s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) _wanted[s.Quality] = true;
             _opus.Feed(seq, pcm, _wanted);
             foreach (var s in all)
             {
                 var to = s.AudioTo;
-                if (to == null || now - Volatile.Read(ref s.HeardAt) >= 3000 || !_opus.Ready(s.Quality, out uint first, out int ticks, out var packet)) continue;
+                if (to == null || !s.Ready || now - Volatile.Read(ref s.HeardAt) >= 3000 || !_opus.Ready(s.Quality, out uint first, out int ticks, out var packet)) continue;
                 // The packet number is also the audio nonce: never send one at or before what
                 // this session already has (after a change of step, the new step's packet can
                 // start earlier). The player fills the gap.
