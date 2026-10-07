@@ -235,12 +235,13 @@ namespace TailRemote
             if (lateMs > _jitter[b]) _jitter[b] = Math.Min(lateMs, 400);
         }
 
-        private void UpdateTarget()
-        {
-            double worst = 0;
-            foreach (double j in _jitter) worst = Math.Max(worst, j);
-            _targetMs = (float)(worst + _extraMs + PacketMs / 2 + MarginMs);
-        }
+        /// <summary>
+        /// The buffer is fixed: one packet plus a 2 ms margin, never more, whatever
+        /// the network does. Late audio is skipped rather than waited for, so the
+        /// delay always stays the same. (Jitter is still measured, for nothing but
+        /// interest; it no longer moves the target.)
+        /// </summary>
+        private void UpdateTarget() => _targetMs = (float)(PacketMs + MarginMs);
 
         private void Collect(float l, float r)
         {
@@ -354,8 +355,9 @@ namespace TailRemote
                     double speed = Math.Clamp((_avgMs - target) * 0.0005, -0.005, 0.005);
                     Volatile.Write(ref _speed, speed);
 
-                    // A pile-up after a stall: cut straight back to the target.
-                    if (levelMs > target + 80)
+                    // Anything more than a packet over the target is late audio: skip it,
+                    // so the delay never grows.
+                    if (levelMs > target + PacketMs + MarginMs)
                     {
                         int drop = (int)((levelMs - target) * floatsPerMs) & ~1;
                         _read = (_read + drop) % cap;

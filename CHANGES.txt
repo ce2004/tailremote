@@ -1,3 +1,9 @@
+1.7.1
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: if the connection dropped while you were controlling the remote PC, you had to press Control Shift Enter again after it reconnected. Now it goes straight back to controlling the remote PC and says so.
+Changed: reconnecting starts at once and tries every second.
+Changed: the sound delay is fixed and never grows. Audio that arrives late is skipped instead of waited for, so on a jittery connection you may hear a tiny gap, but never a growing delay.
+
 1.7.0
 Works with 1.6, 1.5 and 1.4, so the two PCs can update one at a time.
 Changed: the sound reacts to the connection much faster. It steps down within a fifth of a second of trouble, two steps at once when it is bad, and climbs back after a second and a half of clean sound, one step a second. If climbing back brings the trouble straight back, it waits longer before trying again.

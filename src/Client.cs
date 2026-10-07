@@ -295,8 +295,10 @@ namespace TailRemote
             var (packets, lost, late, starved) = _player.TakeStats();
             if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return; // silence: nothing to judge
             int bad = lost + late;
-            bool struggling = starved > 0 || bad >= 2;
-            bool heavy = starved > 1 || bad >= 6;
+            // Only lost or late packets count. With a fixed, tiny buffer the player runs
+            // dry on any jitter by design, and that alone must not lower the sound.
+            bool struggling = bad >= 2;
+            bool heavy = bad >= 6;
             int lowest = (_peerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4;
             long now = Environment.TickCount64;
             int q = AudioQuality;

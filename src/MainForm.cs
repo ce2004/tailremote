@@ -51,7 +51,9 @@ namespace TailRemote
         private bool _connecting, _reconnecting;
         private int _attempt; // bumped to abandon a connection attempt still under way
         private readonly Timer _titleTimer = new() { Interval = 1000 };
-        private readonly Timer _retryTimer = new() { Interval = 2000 };
+        private readonly Timer _retryTimer = new() { Interval = 1000 };
+        private bool _resumeRemote;     // was controlling the remote PC when the connection dropped
+        private bool _quietModeChange;  // the reconnect message already says it
 
         public MainForm(bool autoHost, bool autoConnect, bool updated)
         {
@@ -346,7 +348,8 @@ namespace TailRemote
         private void ModeChanged(bool remote)
         {
             _toggle.Text = remote ? "Control &this PC (Ctrl+Shift+Enter)" : "Control &remote PC (Ctrl+Shift+Enter)";
-            Say(remote ? "Controlling remote PC." : "Controlling this PC.");
+            if (_quietModeChange) _quietModeChange = false; // the reconnect message says it
+            else Say(remote ? "Controlling remote PC." : "Controlling this PC.");
             UpdateTitle();
         }
 
@@ -516,8 +519,15 @@ namespace TailRemote
                 _retryTimer.Stop();
                 string start = _expectRestart ? "The remote PC is back." : wasReconnecting ? "Reconnected." : "Connected.";
                 _expectRestart = false;
-                Say(c.ListenOnly
-                    ? start + " Listen only: you hear the remote PC, but cannot control it."
+                bool resume = _resumeRemote && !c.ListenOnly;
+                _resumeRemote = false;
+                if (resume)
+                {
+                    _quietModeChange = true;
+                    _keys?.Toggle(); // straight back to controlling the remote PC
+                }
+                Say(c.ListenOnly ? start + " Listen only: you hear the remote PC, but cannot control it."
+                    : resume ? start + " Controlling the remote PC."
                     : start + " Press Control Shift Enter to control the remote PC.");
             }
             catch (Exception e) when (attempt == _attempt)
@@ -540,6 +550,10 @@ namespace TailRemote
         private void Disconnect(string why, bool byUser)
         {
             if (_client == null) return;
+            // Keys come back to this PC while the connection is down, so nothing is
+            // typed into nowhere; remote control resumes by itself on reconnecting.
+            _resumeRemote = !byUser && _keys?.Remote == true;
+            _quietModeChange = _resumeRemote;
             _keys?.SetClient(null);
             _client.Dispose();
             _client = null;
@@ -553,10 +567,11 @@ namespace TailRemote
             }
             else
             {
-                // Dropped, or the host restarted after an update: keep trying.
+                // Dropped, or the host restarted after an update: try at once, then every second.
                 _reconnecting = true;
                 _retryTimer.Start();
                 Say(why + " Reconnecting.");
+                Connect(quiet: true);
             }
             UpdateButtons();
             UpdateTitle();
@@ -564,6 +579,7 @@ namespace TailRemote
 
         private void StopReconnecting(string why)
         {
+            _resumeRemote = false;
             _attempt++;
             _reconnecting = false;
             _retryTimer.Stop();
