@@ -290,14 +290,25 @@ namespace TailRemote
             _statusHandle = NativeService.RegisterServiceCtrlHandlerExW(Name, _handler!, IntPtr.Zero);
             Report(NativeService.SERVICE_START_PENDING);
             new Thread(SasPipe) { IsBackground = true, Name = "TailRemote SAS" }.Start();
+            new Thread(UpdateLoop) { IsBackground = true, Name = "TailRemote service updates" }.Start();
+            new Thread(UpdatePipe) { IsBackground = true, Name = "TailRemote update nudge" }.Start();
             Report(NativeService.SERVICE_RUNNING);
-            Log("Service started.");
+            try { File.Delete(InstalledExe + ".old"); } catch { } // left by the last self-update
+            Log("Service started, version " + Updater.Current + ".");
 
             Process? agent = null;
             uint agentSession = uint.MaxValue;
             long lastStart = 0;
             while (!Stop.WaitOne(0))
             {
+                if (Restarting)
+                {
+                    // A new copy is in place: close the agent and leave without saying
+                    // "stopped", so Windows' recovery setting starts the new copy.
+                    try { if (agent != null && !agent.HasExited) agent.Kill(); } catch { }
+                    Log("Restarting into the new version.");
+                    Environment.Exit(1);
+                }
                 uint session = NativeService.WTSGetActiveConsoleSessionId();
                 bool alive = agent != null && !agent.HasExited;
                 if (session != 0xFFFFFFFF && (!alive || session != agentSession) && Environment.TickCount64 - lastStart > 2000)
@@ -365,6 +376,88 @@ namespace TailRemote
                 }
                 catch (Exception e) { Log("SAS pipe: " + e.Message); Thread.Sleep(1000); }
             }
+        }
+
+        // ================= The service keeps itself up to date =================
+
+        private const string UpdatePipeName = "TailRemoteUpdate";
+        private static readonly AutoResetEvent CheckNow = new(false);
+        private static volatile bool Restarting;
+
+        /// <summary>
+        /// 30 seconds after starting, then every 10 minutes (or at once when
+        /// nudged): if GitHub has a newer TailRemote, download this PC's copy,
+        /// check it against GitHub's fingerprint, put it in place of the running
+        /// one and restart into it. No questions, no administrator prompt: the
+        /// service already runs as SYSTEM.
+        /// </summary>
+        private static void UpdateLoop()
+        {
+            WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }, 30_000);
+            while (!Stop.WaitOne(0))
+            {
+                try { TryUpdate(); } catch (Exception e) { Log("Update check failed: " + e.Message); }
+                if (Restarting) { Wake.Set(); return; }
+                WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }, 10 * 60_000);
+            }
+        }
+
+        private static void TryUpdate()
+        {
+            var r = Updater.CheckAsync().GetAwaiter().GetResult();
+            if (r == null) return;
+            Log("Updating the service to version " + r.Version + ".");
+            byte[] data;
+            using (var h = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(10) })
+            {
+                h.DefaultRequestHeaders.UserAgent.ParseAdd("TailRemote-service/" + Updater.Current);
+                data = h.GetByteArrayAsync(r.Url).GetAwaiter().GetResult();
+            }
+            if (r.Sha256 == null || !Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("the download did not match GitHub's fingerprint, so it was not used");
+            string exe = Environment.ProcessPath!, fresh = exe + ".new", old = exe + ".old";
+            File.WriteAllBytes(fresh, data);
+            try { File.Delete(old); } catch { }
+            File.Move(exe, old);       // a running exe can be renamed, not overwritten
+            try { File.Move(fresh, exe); }
+            catch { File.Move(old, exe); throw; }
+            Restarting = true;
+        }
+
+        /// <summary>A nudge from TailRemote after it updated itself: check now. At most once a minute.</summary>
+        private static void UpdatePipe()
+        {
+            var sec = new PipeSecurity();
+            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            long last = -60_000;
+            while (!Stop.WaitOne(0))
+            {
+                try
+                {
+                    using var pipe = NamedPipeServerStreamAcl.Create(UpdatePipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, sec);
+                    pipe.WaitForConnection();
+                    if (pipe.ReadByte() == 1 && Environment.TickCount64 - last >= 60_000)
+                    {
+                        last = Environment.TickCount64;
+                        CheckNow.Set();
+                    }
+                }
+                catch { Thread.Sleep(1000); }
+            }
+        }
+
+        /// <summary>From the TailRemote window, after it updated: ask the service to check for its update now.</summary>
+        public static bool NudgeUpdate()
+        {
+            try
+            {
+                using var pipe = new NamedPipeClientStream(".", UpdatePipeName, PipeDirection.Out);
+                pipe.Connect(2000);
+                pipe.WriteByte(1);
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>From the agent: ask the service to send Ctrl+Alt+Del.</summary>

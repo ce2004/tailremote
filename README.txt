@@ -32,7 +32,7 @@ Running the host as a Windows service
 - The service starts with Windows, before anyone signs in, and has full system access. You can use the lock screen, sign in, answer administrator prompts and send Control Alt Delete with Control Alt End.
 - Anyone who knows the TailRemote password gets that access too, so use a long password.
 - While the service runs, the hosting button becomes Apply settings to the service. Press it after changing the port or passwords.
-- The service runs its own copy from Program Files. After updating TailRemote, it offers to update the service as well.
+- The service runs its own copy from Program Files and updates itself from GitHub: every 10 minutes, and straight away after you update TailRemote on that PC.
 - Uncheck Run as a Windows service to remove it completely.
 
 Settings in the main window

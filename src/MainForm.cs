@@ -705,14 +705,15 @@ namespace TailRemote
             _settingService = false;
         }
 
-        /// <summary>After this copy updated, the service may still run the old one: offer to bring it up to date.</summary>
-        private async void OfferServiceUpdate()
+        /// <summary>
+        /// The service updates itself from GitHub. After this copy updated, nudge
+        /// it to check now rather than at its next 10-minute check. No questions.
+        /// </summary>
+        private void OfferServiceUpdate()
         {
             var v = ServiceHost.InstalledVersion();
             if (v == null || !_service.Checked || v >= Updater.Current) return;
-            if (MessageBox.Show(this, "The TailRemote service runs version " + v + ", and this copy is " + Updater.Current + ". Update the service too? Windows asks for administrator permission.",
-                    "Update the service", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            Say(await ServiceHost.SetAsync(true) ? "The service is updated to version " + Updater.Current + "." : "The service was not updated: " + ServiceHost.LastError());
+            if (ServiceHost.NudgeUpdate()) Log("The TailRemote service is updating itself to version " + Updater.Current + ".");
         }
 
         private async void StartupChanged()

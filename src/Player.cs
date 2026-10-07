@@ -241,7 +241,15 @@ namespace TailRemote
         /// delay always stays the same. (Jitter is still measured, for nothing but
         /// interest; it no longer moves the target.)
         /// </summary>
-        private void UpdateTarget() => _targetMs = (float)(PacketMs + MarginMs);
+        private void UpdateTarget() => _targetMs = (float)(PacketMs + MarginMs + Math.Max(0, HostBurstMs - 11));
+
+        /// <summary>
+        /// The largest chunk the host's capture device hands over at once (ms),
+        /// sent by the host. A normal 10 ms device adds nothing; a device that
+        /// hands over 30 ms at a time adds 20 ms. Fixed for that device: it never
+        /// grows with the network.
+        /// </summary>
+        public volatile int HostBurstMs;
 
         private void Collect(float l, float r)
         {

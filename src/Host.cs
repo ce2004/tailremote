@@ -228,7 +228,10 @@ namespace TailRemote
             // start or stop audio capture. With nobody connected it sends nothing.
             bool anyone = !_stop;
             if (anyone && _capture == null)
+            {
                 _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice);
+                _capture.Burst += ms => { _burstMs = ms; SendToAll(BurstMessage(ms)); };
+            }
             else if (!anyone && _capture != null)
             {
                 var c = _capture;
@@ -236,6 +239,22 @@ namespace TailRemote
                 // Disposing joins the capture thread, which may be waiting on _gate: do it outside.
                 ThreadPool.QueueUserWorkItem(_ => c.Dispose());
             }
+        }
+
+        private volatile int _burstMs;
+
+        private static byte[] BurstMessage(int ms)
+        {
+            byte[] m = new byte[3];
+            m[0] = Protocol.CaptureBurst;
+            BitConverter.TryWriteBytes(m.AsSpan(1), (ushort)Math.Clamp(ms, 0, 1000));
+            return m;
+        }
+
+        private void SendToAll(byte[] m)
+        {
+            foreach (var s in AllSessions())
+                ThreadPool.QueueUserWorkItem(_ => { try { s.Link.Send(s.Stream, m); } catch { } });
         }
 
         private void Broadcast(string msg)
@@ -334,6 +353,7 @@ namespace TailRemote
                     Link = new SecureLink(key, nonce, clientNonce, isHost: true),
                 };
                 s.Link.Send(s.Stream, Protocol.FeaturesMessage(SecureAttention != null ? Protocol.FeatureSecureAttention : 0));
+                if (_burstMs > 0) s.Link.Send(s.Stream, BurstMessage(_burstMs));
                 EndHandshake(remote);
                 counted = false;
                 lock (_gate)

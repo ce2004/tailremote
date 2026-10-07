@@ -23,6 +23,16 @@ namespace TailRemote
 
         private readonly string? _deviceId;
 
+        /// <summary>
+        /// The largest chunk (ms) the device hands over at once, measured every 2
+        /// seconds and raised when it changes by 2 ms or more. A normal output
+        /// gives 10 ms; Bluetooth, USB and some virtual devices give 20 to 40,
+        /// which arrive at the other PC as a burst its buffer has to cover.
+        /// </summary>
+        public event Action<int>? Burst;
+        private int _burstWindow, _burstReported;
+        private long _burstCheckedAt;
+
         /// <summary>deviceId: the output to record, or null for Windows' default (followed when it changes).</summary>
         public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status, string? deviceId = null)
         {
@@ -93,6 +103,7 @@ namespace TailRemote
                 while (!_stop)
                 {
                     ev.WaitOne(5); // loopback events are not guaranteed on every build; poll too
+                    int drained = 0;
                     while (true)
                     {
                         int nhr = cap.GetNextPacketSize(out uint next);
@@ -127,9 +138,21 @@ namespace TailRemote
                         cap.ReleaseBuffer(frames);
                         rs.Process(stereo.AsSpan(0, (int)frames * 2), _emit);
                         lastDataAt = Environment.TickCount64;
+                        drained += (int)frames;
                     }
 
                     long now = Environment.TickCount64;
+                    if (drained > 0) _burstWindow = Math.Max(_burstWindow, drained * 1000 / fmt.Rate);
+                    if (now - _burstCheckedAt >= 2000)
+                    {
+                        _burstCheckedAt = now;
+                        if (_burstWindow > 0 && Math.Abs(_burstWindow - _burstReported) >= 2)
+                        {
+                            _burstReported = _burstWindow;
+                            try { Burst?.Invoke(_burstWindow); } catch { }
+                        }
+                        _burstWindow = 0;
+                    }
                     // The tail of a sound: after a real stop, send the part-filled packet
                     // rather than hold it. Not sooner: late audio is not the end of a sound.
                     if (_fill > 0 && now - lastDataAt > 100)

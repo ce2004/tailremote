@@ -49,6 +49,7 @@ namespace TailRemote
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
         public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
+        public const byte CaptureBurst = 0x84; // u16 ms: the largest chunk the host's capture device hands over at once
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second

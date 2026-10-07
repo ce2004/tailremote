@@ -1,3 +1,8 @@
+1.7.2
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: capturing sound from a device other than the default lagged and stuttered. Some devices, such as Bluetooth and USB ones, hand over their sound in bigger chunks; the host now measures that and the other PC allows for exactly that much, so the delay stays fixed.
+New feature: the TailRemote service updates itself. It checks GitHub every 10 minutes, and straight away after you update TailRemote on that PC, with no questions and no administrator prompt. The service needs this version once; after that it keeps itself up to date.
+
 1.7.1
 Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: if the connection dropped while you were controlling the remote PC, you had to press Control Shift Enter again after it reconnected. Now it goes straight back to controlling the remote PC and says so.

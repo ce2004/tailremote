@@ -229,6 +229,8 @@ namespace TailRemote
                     {
                         Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     }
+                    else if (m.Length >= 3 && m[0] == Protocol.CaptureBurst)
+                        _player.HostBurstMs = BitConverter.ToUInt16(m, 1);
                     else if (m.Length >= 5 && m[0] == Protocol.Features)
                         _peerFeatures = BitConverter.ToUInt32(m, 1);
                     else if (m.Length >= 1 && m[0] == Protocol.Clipboard && !ListenOnly)
