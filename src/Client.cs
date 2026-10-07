@@ -29,6 +29,7 @@ namespace TailRemote
         /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
         public event Action<string>? FileMessage;
         private FileChannel? _files;
+        private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
         private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
@@ -235,6 +236,9 @@ namespace TailRemote
                     _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
                 else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence && _link.OpenAudio(d, d.Length))
                     _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
+                else if (d[0] == Protocol.UdpPacked && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
+                         && _link.OpenAudio(d, d.Length) && Lossless.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
+                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
             }
         }
 

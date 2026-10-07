@@ -51,6 +51,7 @@ namespace TailRemote
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
         public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
         public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
+        public const byte UdpPacked = 0xA3;  // u32 sequence, losslessly packed audio (Lossless.cs)
 
         // Roles
         public const byte RoleControl = 1, RoleListen = 2;
@@ -58,9 +59,10 @@ namespace TailRemote
         // Feature flags
         public const uint FeatureClipboard = 1;
         public const uint FeatureFiles = 2;
+        public const uint FeatureLossless = 4;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless;
 
         public const int MaxClipboardChars = 1_000_000;
 

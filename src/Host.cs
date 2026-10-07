@@ -344,19 +344,35 @@ namespace TailRemote
         }
 
         /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
+        private readonly byte[] _packed = new byte[Protocol.PacketFrames * 4];
+
         private void SendAudio(uint seq, short[]? pcm)
         {
             List<Session> all;
             lock (_gate) all = AllSessions();
-            int payload = pcm == null ? 0 : pcm.Length * 2;
+            // Packed once, losslessly, for everyone whose PC can unpack it: about half the data.
+            int packedLength = pcm != null && all.Exists(x => (x.PeerFeatures & Protocol.FeatureLossless) != 0)
+                ? Lossless.Encode(pcm, _packed) : -1;
             foreach (var s in all)
             {
                 var to = s.AudioTo;
                 if (to == null) continue;
                 byte[] a = s.Audio; // each session seals its own copy with its own keys
-                a[0] = pcm == null ? Protocol.UdpSilence : Protocol.UdpAudio;
                 BitConverter.TryWriteBytes(a.AsSpan(1), seq);
-                if (pcm != null) Buffer.BlockCopy(pcm, 0, a, 5, payload);
+                int payload;
+                if (pcm == null) { a[0] = Protocol.UdpSilence; payload = 0; }
+                else if (packedLength > 0 && (s.PeerFeatures & Protocol.FeatureLossless) != 0)
+                {
+                    a[0] = Protocol.UdpPacked;
+                    payload = packedLength;
+                    _packed.AsSpan(0, payload).CopyTo(a.AsSpan(5));
+                }
+                else
+                {
+                    a[0] = Protocol.UdpAudio;
+                    payload = pcm.Length * 2;
+                    Buffer.BlockCopy(pcm, 0, a, 5, payload);
+                }
                 try
                 {
                     s.Link.SealAudio(a, payload);

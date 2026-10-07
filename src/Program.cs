@@ -85,6 +85,7 @@ namespace TailRemote
         /// <summary>Host and client on this PC: handshake, wrong password, ping. No audio is played.</summary>
         private static int SelfTest()
         {
+            string lossless = "";
             // A 1 kHz tone through 48k -> 44.1k -> 48k must keep its level and pitch.
             foreach (var (from, to) in new[] { (48000, 44100), (44100, 48000) })
             {
@@ -99,6 +100,34 @@ namespace TailRemote
                 for (int i = 1; i < mid.Count; i++) if (mid[i - 1] < 0 && mid[i] >= 0) crossings++;
                 if (Math.Abs(rms - 0.3536) > 0.005 || Math.Abs(crossings - 500) > 1 || Math.Abs(outL.Count - to) > 40)
                     return Fail($"resampler {from}->{to}: rms {rms:F4}, crossings {crossings}, frames {outL.Count}");
+            }
+
+            // Lossless packing gives back exactly what went in, for hard material too.
+            {
+                var rnd = new Random(3);
+                long rawBytes = 0, packedBytes = 0;
+                var kinds = new Func<int, int, short>[]
+                {
+                    (i, ch) => (short)(9000 * Math.Sin(i * 0.07 + ch) + rnd.Next(-300, 300)), // a voice-like tone with noise
+                    (i, ch) => 0,                                                          // silence
+                    (i, ch) => (i & 1) == 0 ? short.MaxValue : short.MinValue,               // the worst case
+                    (i, ch) => (short)rnd.Next(short.MinValue, short.MaxValue + 1),          // pure noise
+                };
+                byte[] packed = new byte[Protocol.PacketFrames * 4], back = new byte[Protocol.PacketFrames * 4];
+                foreach (var kind in kinds)
+                    for (int rep = 0; rep < 20; rep++)
+                    {
+                        short[] pcm = new short[Protocol.PacketFrames * 2];
+                        for (int i = 0; i < Protocol.PacketFrames; i++) { pcm[i * 2] = kind(i + rep * 256, 0); pcm[i * 2 + 1] = kind(i + rep * 256, 1); }
+                        int n = Lossless.Encode(pcm, packed);
+                        rawBytes += pcm.Length * 2;
+                        packedBytes += n > 0 ? n : pcm.Length * 2;
+                        if (n <= 0) continue; // sent raw instead
+                        if (!Lossless.Decode(packed.AsSpan(0, n), back)) return Fail("lossless: did not decode");
+                        for (int i = 0; i < pcm.Length; i++)
+                            if (BitConverter.ToInt16(back, i * 2) != pcm[i]) return Fail("lossless: sample " + i + " changed");
+                    }
+                lossless = " | lossless " + (packedBytes * 100 / rawBytes) + "% of raw over the test mix";
             }
 
             // Audio encryption: a sealed packet opens on the other side; a changed one does not.
@@ -165,7 +194,7 @@ namespace TailRemote
             if (got.Count < 2 || !File.Exists(a2) || !File.ReadAllBytes(a1).AsSpan().SequenceEqual(content) || !File.ReadAllBytes(a2).AsSpan().SequenceEqual(content))
                 return Fail("files: " + string.Join(" / ", got));
             Directory.Delete(dir, true);
-            File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + CableReport());
+            File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + lossless + CableReport());
             return 0;
 
             // Read-only: which virtual cable output setup would rename.
