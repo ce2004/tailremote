@@ -27,6 +27,7 @@ namespace TailRemote
         public string CaptureDevice { get; set; } = "";
         public string ListenPasswordEnc { get; set; } = "";
         public bool ShareClipboard { get; set; } = true;
+        public bool Logging { get; set; }
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();
 
         [JsonIgnore]

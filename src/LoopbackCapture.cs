@@ -33,6 +33,9 @@ namespace TailRemote
 
         /// <summary>Test only (--audiotest): silence inserted for timestamp gaps, and packet-count skips.</summary>
         public static int TestGapFills, TestGapFillMs, TestSeqSkips, TestChunkMax;
+
+        /// <summary>The device being recorded, for the log.</summary>
+        public static string DeviceInfo = "none yet";
         private int _burstReported, _burstPrevious, _burstWindows;
         private readonly System.Collections.Generic.List<int> _chunks = new(512);
         private long _burstCheckedAt;
@@ -69,6 +72,7 @@ namespace TailRemote
                 {
                     string msg = "Host audio is not available: " + e.Message +
                         " A cloud PC usually has no sound card; install a virtual audio device such as VB-Cable and make it the default output.";
+                    DiagLog.Write("host capture error: " + e);
                     if (msg != lastError) _status(msg);
                     lastError = msg;
                     for (int i = 0; i < 20 && !_stop; i++) Thread.Sleep(100);
@@ -90,6 +94,8 @@ namespace TailRemote
             var client = Wasapi.Activate(dev);
             client.GetMixFormat(out IntPtr fmtPtr);
             var fmt = Wasapi.ReadFormat(fmtPtr);
+            DeviceInfo = (Wasapi.FriendlyName(dev) ?? devId) + ", " + fmt.Rate + " Hz, " + fmt.Channels + " channels, " + fmt.Bits + "-bit" + (fmt.IsFloat ? " float" : "");
+            DiagLog.Write("host capture: opened " + DeviceInfo + (followDefault ? " (Windows default)" : " (chosen device)"));
             client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_LOOPBACK | Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 200_000, 0, fmtPtr, IntPtr.Zero);
             Marshal.FreeCoTaskMem(fmtPtr);

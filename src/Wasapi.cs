@@ -154,7 +154,7 @@ namespace TailRemote
             return list;
         }
 
-        private static string? FriendlyName(IMMDevice dev)
+        internal static string? FriendlyName(IMMDevice dev)
         {
             try
             {

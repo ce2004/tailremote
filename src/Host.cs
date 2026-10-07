@@ -66,7 +66,8 @@ namespace TailRemote
             _captureDevice = captureDevice;
             _key = Protocol.DeriveKey(password);
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword);
-            _status = status;
+            _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
+            new Thread(LogLoop) { IsBackground = true, Name = "TailRemote host log" }.Start();
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
             _listener.Server.DualMode = true;
@@ -230,7 +231,7 @@ namespace TailRemote
             if (anyone && _capture == null)
             {
                 _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice);
-                _capture.Burst += ms => { _burstMs = ms; SendToAll(BurstMessage(ms)); };
+                _capture.Burst += ms => { _burstMs = ms; DiagLog.Write("host: capture device's typical chunk is " + ms + " ms"); SendToAll(BurstMessage(ms)); };
             }
             else if (!anyone && _capture != null)
             {
@@ -242,6 +243,29 @@ namespace TailRemote
         }
 
         private volatile int _burstMs;
+        private int _txPackets, _txBytes;
+
+        /// <summary>Once a second while logging is on: what the host is capturing and sending.</summary>
+        private void LogLoop()
+        {
+            while (!_stop)
+            {
+                Thread.Sleep(1000);
+                if (!DiagLog.Enabled) continue;
+                int fills = Interlocked.Exchange(ref LoopbackCapture.TestGapFills, 0);
+                int fillMs = Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
+                int skips = Interlocked.Exchange(ref LoopbackCapture.TestSeqSkips, 0);
+                int chunk = Interlocked.Exchange(ref LoopbackCapture.TestChunkMax, 0);
+                int packets = Interlocked.Exchange(ref _txPackets, 0), bytes = Interlocked.Exchange(ref _txBytes, 0);
+                var sb = new System.Text.StringBuilder();
+                foreach (var s in AllSessions())
+                    sb.Append(" [").Append(s.Address).Append(s.Role == Protocol.RoleControl ? " control" : " listen")
+                      .Append(", quality step ").Append(s.Quality).Append(s.AudioTo == null ? ", no audio address yet" : "").Append(']');
+                DiagLog.Write("host: capturing " + LoopbackCapture.DeviceInfo + ", biggest chunk " + chunk + " ms, typical " + _burstMs +
+                    " ms, silence added " + fills + "x (" + fillMs + " ms), count skips " + skips + ", sent " + packets + " packets, " +
+                    (bytes * 8 / 1000) + " kbit/s, sessions" + (sb.Length == 0 ? " none" : sb.ToString()));
+            }
+        }
 
         private static byte[] BurstMessage(int ms)
         {
@@ -446,6 +470,7 @@ namespace TailRemote
                     case Protocol.AudioQuality when m.Length == 2:
                         // Sample-rate steps for PCs that understand them, bit steps for 1.5.0.
                         s.Quality = Math.Min((int)m[1], (s.PeerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4);
+                        DiagLog.Write("host: " + s.Address + " asked for quality step " + s.Quality);
                         break;
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
@@ -577,6 +602,8 @@ namespace TailRemote
                 {
                     s.Link.SealAudio(a, payload);
                     _udp.Send(a, 5 + payload + SecureLink.TagSize, to);
+                    Interlocked.Increment(ref _txPackets);
+                    Interlocked.Add(ref _txBytes, 5 + payload + SecureLink.TagSize);
                 }
                 catch { }
             }

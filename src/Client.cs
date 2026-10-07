@@ -162,6 +162,7 @@ namespace TailRemote
         private void Close(string? why)
         {
             if (Interlocked.Exchange(ref _closing, 1) == 1) return;
+            DiagLog.Write("client: connection closed" + (why != null ? ": " + why : " by this PC"));
             _closed = true;
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
@@ -174,6 +175,7 @@ namespace TailRemote
         public void SendKey(ushort vk, ushort scan, bool up, bool extended)
         {
             if (_closed) return;
+            if (!up) Interlocked.Increment(ref _keysSent); // counted only: what is typed is never logged
             Span<byte> f = stackalloc byte[6];
             f[0] = Protocol.Key;
             BitConverter.TryWriteBytes(f[1..], vk);
@@ -232,7 +234,10 @@ namespace TailRemote
                     else if (m.Length >= 3 && m[0] == Protocol.CaptureBurst)
                         _player.HostBurstMs = BitConverter.ToUInt16(m, 1);
                     else if (m.Length >= 5 && m[0] == Protocol.Features)
+                    {
                         _peerFeatures = BitConverter.ToUInt32(m, 1);
+                        DiagLog.Write("client: host features " + _peerFeatures + (ListenOnly ? ", listen only" : ", control"));
+                    }
                     else if (m.Length >= 1 && m[0] == Protocol.Clipboard && !ListenOnly)
                         ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     // Anything else is from a newer version: ignore it.
@@ -278,6 +283,9 @@ namespace TailRemote
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_closed) return; continue; }
+                Interlocked.Increment(ref _rxPackets);
+                Interlocked.Add(ref _rxBytes, d.Length);
+                if (d.Length > 0 && d[0] >= 0xA0 && d[0] <= 0xA5) Interlocked.Increment(ref _rxTypes[d[0] - 0xA0]);
                 if (TestJitterMs > 0)
                 {
                     lock (_jitterQueue) _jitterQueue.Add((_jitterClock.ElapsedMilliseconds + Random.Shared.Next(TestJitterMs + 1), _jitterN++), d);
@@ -348,11 +356,28 @@ namespace TailRemote
 
         private void QualityLoop()
         {
+            int tick = 0;
             while (!_closed)
             {
                 Thread.Sleep(QualityTickMs);
                 try { AdaptQuality(); } catch { }
+                if (++tick % (1000 / QualityTickMs) == 0 && DiagLog.Enabled) LogSecond();
             }
+        }
+
+        // ---- The once-a-second log line (only while logging is on) ----
+        private int _rxPackets, _rxBytes, _keysSent;
+        private readonly int[] _rxTypes = new int[6]; // A0 to A5
+
+        private void LogSecond()
+        {
+            int packets = Interlocked.Exchange(ref _rxPackets, 0), bytes = Interlocked.Exchange(ref _rxBytes, 0), keys = Interlocked.Exchange(ref _keysSent, 0);
+            var t = new int[6];
+            for (int i = 0; i < 6; i++) t[i] = Interlocked.Exchange(ref _rxTypes[i], 0);
+            DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, quality step " + AudioQuality +
+                (ReducedSound is string r ? " (" + r + ")" : "") + ", host chunk " + _player.HostBurstMs + " ms" +
+                ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s (raw " + t[1] + ", silence " + t[2] + ", packed " + t[3] + ", packed2 " + t[4] + ", lower rate " + t[5] + ")" +
+                ", keys sent " + keys + ", playing on " + _player.DeviceInfo);
         }
 
         /// <summary>
@@ -396,6 +421,7 @@ namespace TailRemote
                 else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 8;
             }
             if (q == AudioQuality) return;
+            DiagLog.Write("client: quality step " + AudioQuality + " to " + q + " (in 0.2 s: " + packets + " packets, " + lost + " lost, " + late + " late)");
             AudioQuality = q;
             Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }

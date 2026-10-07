@@ -118,6 +118,9 @@ namespace TailRemote
         }
 
         /// <summary>Audio delay right now: what is buffered plus the device, in ms. -1 when idle.</summary>
+        /// <summary>The playback device, for the log.</summary>
+        public string DeviceInfo = "none yet";
+
         /// <summary>Test only: play silence, with all the timing of the real thing.</summary>
         public bool Mute;
         private int _diagDry, _diagSkips, _diagLost, _diagLate, _diagSpurts;
@@ -302,6 +305,7 @@ namespace TailRemote
                 catch (Exception e)
                 {
                     string msg = "Playback problem: " + e.Message;
+                    DiagLog.Write("player error: " + e);
                     if (msg != lastError) _status(msg);
                     lastError = msg;
                     for (int i = 0; i < 10 && !_stop; i++) Thread.Sleep(100);
@@ -324,6 +328,8 @@ namespace TailRemote
             client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, fmtPtr, IntPtr.Zero);
             client.GetDevicePeriod(out long def, out _);
             double periodMs = def / 10000.0;
+            DeviceInfo = (Wasapi.FriendlyName(dev) ?? devId) + ", " + fmt.Rate + " Hz, " + fmt.Channels + " channels, " + fmt.Bits + "-bit" + (fmt.IsFloat ? " float" : "") + ", period " + periodMs.ToString("0.0") + " ms";
+            DiagLog.Write("player: opened " + DeviceInfo);
             Marshal.FreeCoTaskMem(fmtPtr);
 
             using var ev = new AutoResetEvent(false);

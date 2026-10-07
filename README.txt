@@ -36,6 +36,7 @@ Running the host as a Windows service
 - Uncheck Run as a Windows service to remove it completely.
 
 Settings in the main window
+- Enable logging (Alt G): writes TailRemote-log.txt next to TailRemote, with a line every second about the sound on that PC. Turn it on on both PCs and send both files when something sounds wrong. What you type is never logged.
 - Capture sound from (Host mode, Alt A): which output's sound the other PCs hear. Windows default follows whatever the default output is.
 - Output device: where the remote PC's sound plays here.
 

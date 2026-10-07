@@ -119,6 +119,7 @@ namespace TailRemote
                 timeBeginPeriod(1);
 
                 // Into the default output (speakers), quiet enough not to hear: loopback records it before the volume.
+                DiagLog.Enabled = true; // the test also exercises the log
                 using var tone = new ToneSource(src.Id, src.Id == defId ? 0.0003 : 0.3);
                 Host.WrongPasswordDelayMs = 0;
                 using var host = new Host(47998, "audiotest", null, _ => { }, src.Id);

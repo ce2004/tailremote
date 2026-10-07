@@ -21,6 +21,7 @@ namespace TailRemote
         private readonly Button _forgetPc = new() { Text = "&Forget saved PC", AutoSize = true };
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
         private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
+        private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
         private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly CheckBox _service = new() { Text = "Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts, and Control Alt End sends Control Alt Delete", AutoSize = true, MaximumSize = new Size(560, 0) };
@@ -83,6 +84,7 @@ namespace TailRemote
             _deviceLabel = AddRow(table, "&Output device", _device);
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
+            table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
             table.Controls.Add(_service); table.SetColumnSpan(_service, 2);
 
@@ -107,6 +109,8 @@ namespace TailRemote
             _password.Text = _settings.Password;
             _listenPassword.Text = _settings.ListenPassword;
             _shareClipboard.Checked = _settings.ShareClipboard;
+            _logging.Checked = _settings.Logging;
+            DiagLog.Enabled = _settings.Logging;
             _startup.Checked = Startup.IsEnabled();
             _settingService = true;
             _service.Checked = ServiceHost.IsInstalled();
@@ -130,6 +134,13 @@ namespace TailRemote
             _savePc.Click += (_, _) => SavePc();
             _forgetPc.Click += (_, _) => ForgetPc();
             _shareClipboard.CheckedChanged += (_, _) => SaveSettings();
+            _logging.CheckedChanged += (_, _) =>
+            {
+                SaveSettings();
+                DiagLog.Enabled = _logging.Checked;
+                Say(_logging.Checked ? "Logging to " + DiagLog.FilePath + "." + (_service.Checked ? " Press Apply settings to the service to log there too." : "")
+                                     : "Logging is off.");
+            };
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
@@ -379,6 +390,7 @@ namespace TailRemote
             _settings.CaptureDevice = _devices[Math.Max(0, _captureFrom.SelectedIndex)].Id;
             _settings.ListenPassword = _listenPassword.Text;
             _settings.ShareClipboard = _shareClipboard.Checked;
+            _settings.Logging = _logging.Checked;
             _settings.Save();
         }
 
@@ -732,6 +744,7 @@ namespace TailRemote
 
         private void Log(string line)
         {
+            DiagLog.Write("window: " + line);
             _log.AppendText((_log.TextLength > 0 ? Environment.NewLine : "") + DateTime.Now.ToString("HH:mm:ss") + "  " + line);
             // Trim only while nobody is reading it, so the caret never jumps.
             if (!_log.Focused && _log.Lines.Length > 300) _log.Lines = _log.Lines[^200..];

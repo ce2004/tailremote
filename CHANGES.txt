@@ -1,3 +1,7 @@
+1.7.5
+Works with 1.7 and older, so the two PCs can update one at a time.
+New feature: Enable logging (Alt G). While it is on, TailRemote writes TailRemote-log.txt next to itself: every connection, every sound problem, and a line every second with how the sound is doing on that PC. What you type is never written down, only how many keys were pressed. For the service, press Apply settings to the service after turning it on.
+
 1.7.4
 Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: the sound kept buffering and catching up, and the delay drifted. TailRemote was cutting the sound at normal small swings and moving its buffer whenever the capture device handed over one odd chunk. Now the delay stays fixed, about 30 ms on a good connection, and only a real pile-up after a network bump is cut.
