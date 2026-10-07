@@ -120,16 +120,31 @@ namespace TailRemote
             Host.WrongPasswordDelayMs = 0;
             var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
             string Dump() => string.Join(" | ", log);
-            using var host = new Host(47999, "secret", log.Enqueue);
+            using var host = new Host(47999, "secret", "listen", log.Enqueue);
+            string? toHost = null;
+            host.ClipboardReceived += t => toHost = t;
             if (Protocol.PortProblem("3389", out _) == null || Protocol.PortProblem("abc", out _) == null || Protocol.PortProblem("47120", out _) != null)
                 return Fail("port rules");
-            try { new Host(47999, "x", log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
+            try { new Host(47999, "x", null, log.Enqueue).Dispose(); return Fail("a busy port was accepted"); }
             catch (InvalidOperationException e) when (e.Message.Contains("already used")) { }
             try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
             catch (InvalidOperationException e) when (e.Message == "Wrong password.") { }
             using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, log.Enqueue);
             for (int i = 0; i < 40 && c.LastPingMs < 0; i++) System.Threading.Thread.Sleep(100);
             if (c.LastPingMs < 0) return Fail("no ping reply. " + Dump());
+            if (c.ListenOnly) return Fail("the main password gave a listener");
+
+            // Clipboard both ways, and a listener's clipboard is ignored.
+            string? toClient = null;
+            c.ClipboardReceived += t => toClient = t;
+            c.SendClipboard("from client ✓");
+            host.SendClipboard("from host ✓");
+            using var listener = Client.Connect("127.0.0.1", 47999, "listen", Player.NoDevice, log.Enqueue);
+            if (!listener.ListenOnly) return Fail("the listen password gave control");
+            listener.SendClipboard("from listener");
+            for (int i = 0; i < 40 && (toHost == null || toClient == null); i++) System.Threading.Thread.Sleep(50);
+            System.Threading.Thread.Sleep(100);
+            if (toHost != "from client ✓" || toClient != "from host ✓") return Fail("clipboard: host got " + toHost + ", client got " + toClient);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + CableReport());
             return 0;
 

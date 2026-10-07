@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -8,21 +9,32 @@ using System.Threading;
 namespace TailRemote
 {
     /// <summary>
-    /// The PC being controlled. One controller at a time; a new connection
-    /// replaces the old one, so reconnecting after a dropped network just works.
+    /// The PC being controlled. One controller at a time (a new controller
+    /// replaces the old one, so reconnecting after a dropped network just works),
+    /// plus up to four listeners who hear everything but cannot type. Which one a
+    /// client becomes depends on which password it proved.
     /// </summary>
     internal sealed class Host : IDisposable
     {
+        public const int MaxListeners = 4;
+
         private readonly byte[] _key;
-        /// <summary>The pause before answering a wrong password. The self-test sets it to 0.</summary>
-        public static int WrongPasswordDelayMs = 2000;
+        private readonly byte[]? _listenKey;
         private readonly Action<string> _status;
         private readonly TcpListener _listener;
         private readonly UdpClient _udp;
         private volatile bool _stop;
 
+        /// <summary>The pause before answering a wrong password. The self-test sets it to 0.</summary>
+        public static int WrongPasswordDelayMs = 2000;
+
+        /// <summary>Clipboard text from the controller. Raised on a network thread.</summary>
+        public event Action<string>? ClipboardReceived;
+
         private readonly object _gate = new();
-        private Session? _session;
+        private Session? _controller;
+        private readonly List<Session> _listeners = new();
+        private LoopbackCapture? _capture;
 
         private sealed class Session
         {
@@ -31,14 +43,17 @@ namespace TailRemote
             public required byte[] Token;
             public required IPAddress Address;
             public required SecureLink Link;
+            public required byte Role;
+            public uint PeerFeatures;
             public volatile IPEndPoint? AudioTo;
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
-            public LoopbackCapture? Capture;
+            public readonly byte[] Audio = new byte[Protocol.AudioPacketBytes];
         }
 
-        public Host(int port, string password, Action<string> status)
+        public Host(int port, string password, string? listenPassword, Action<string> status)
         {
             _key = Protocol.DeriveKey(password);
+            _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword);
             _status = status;
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
@@ -72,7 +87,13 @@ namespace TailRemote
             _stop = true;
             try { _listener.Stop(); } catch { }
             try { _udp.Dispose(); } catch { }
-            lock (_gate) { if (_session != null) End(_session, null); _session = null; }
+            lock (_gate)
+            {
+                foreach (var s in AllSessions()) End(s, null);
+                _controller = null;
+                _listeners.Clear();
+                UpdateCapture();
+            }
         }
 
         /// <summary>
@@ -83,6 +104,44 @@ namespace TailRemote
         {
             const int SIO_UDP_CONNRESET = unchecked((int)0x9800000C);
             try { s.IOControl(SIO_UDP_CONNRESET, new byte[4], null); } catch { }
+        }
+
+        /// <summary>Sends clipboard text to the controller, if it shares the clipboard.</summary>
+        public void SendClipboard(string text)
+        {
+            Session? c;
+            lock (_gate) c = _controller;
+            if (c == null || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
+            try { c.Link.Send(c.Stream, Protocol.TextMessage(Protocol.Clipboard, text)); } catch { }
+        }
+
+        private List<Session> AllSessions()
+        {
+            var all = new List<Session>(_listeners);
+            if (_controller != null) all.Add(_controller);
+            return all;
+        }
+
+        /// <summary>One capture serves everyone; it runs only while someone is connected. Call under _gate.</summary>
+        private void UpdateCapture()
+        {
+            bool anyone = !_stop && (_controller != null || _listeners.Count > 0);
+            if (anyone && _capture == null)
+                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); });
+            else if (!anyone && _capture != null)
+            {
+                var c = _capture;
+                _capture = null;
+                // Disposing joins the capture thread, which may be waiting on _gate: do it outside.
+                ThreadPool.QueueUserWorkItem(_ => c.Dispose());
+            }
+        }
+
+        private void Broadcast(string msg)
+        {
+            List<Session> all;
+            lock (_gate) all = AllSessions();
+            foreach (var s in all) { try { Protocol.SendMessage(s.Link, s.Stream, msg); } catch { } }
         }
 
         private void AcceptLoop()
@@ -116,9 +175,16 @@ namespace TailRemote
                 byte[] answer = new byte[52];
                 Protocol.ReadExactly(stream, answer);
                 byte[] clientNonce = answer[4..20];
-                bool ok = answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic) &&
-                          CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_key, 'C', nonce, clientNonce));
-                if (!ok)
+                byte role = 0;
+                byte[]? key = null;
+                if (answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic))
+                {
+                    if (CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_key, 'C', nonce, clientNonce)))
+                    { role = Protocol.RoleControl; key = _key; }
+                    else if (_listenKey != null && CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_listenKey, 'C', nonce, clientNonce)))
+                    { role = Protocol.RoleListen; key = _listenKey; }
+                }
+                if (key == null)
                 {
                     Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
                     stream.Write(new byte[] { 0 });
@@ -128,27 +194,43 @@ namespace TailRemote
                 }
 
                 byte[] token = RandomNumberGenerator.GetBytes(8);
-                byte[] accept = new byte[41];
+                byte[] accept = new byte[42];
                 accept[0] = 1;
-                token.CopyTo(accept, 1);
-                Protocol.Proof(_key, 'H', clientNonce, nonce).CopyTo(accept, 9);
+                accept[1] = role;
+                token.CopyTo(accept, 2);
+                Protocol.Proof(key, 'H', clientNonce, nonce).CopyTo(accept, 10);
                 stream.Write(accept);
                 // The client pings every 2 seconds; 10 silent seconds means it is gone,
                 // and ending the session lets go of any keys it was holding.
                 stream.ReadTimeout = 10_000;
 
-                s = new Session { Tcp = tcp, Stream = stream, Token = token, Address = remote, Link = new SecureLink(_key, nonce, clientNonce, isHost: true) };
-                var session = s;
-                s.Capture = new LoopbackCapture(
-                    (seq, pcm) => SendAudio(session, seq, pcm),
-                    msg => { _status(msg); try { Protocol.SendMessage(session.Link, session.Stream, msg); } catch { } });
+                s = new Session
+                {
+                    Tcp = tcp, Stream = stream, Token = token, Address = remote, Role = role,
+                    Link = new SecureLink(key, nonce, clientNonce, isHost: true),
+                };
+                s.Link.Send(s.Stream, Protocol.FeaturesMessage());
                 lock (_gate)
                 {
                     if (_stop) { End(s, null); return; }
-                    if (_session != null) End(_session, "Replaced by a new connection.");
-                    _session = s;
+                    if (role == Protocol.RoleControl)
+                    {
+                        if (_controller != null) End(_controller, "Replaced by a new connection.");
+                        _controller = s;
+                    }
+                    else
+                    {
+                        if (_listeners.Count >= MaxListeners)
+                        {
+                            End(s, "There are already " + MaxListeners + " people listening.");
+                            s = null;
+                            return;
+                        }
+                        _listeners.Add(s);
+                    }
+                    UpdateCapture();
                 }
-                _status("Connected: " + remote + ".");
+                _status((role == Protocol.RoleControl ? "Connected: " : "Listening: ") + remote + ".");
 
                 ReadLoop(s);
             }
@@ -160,10 +242,14 @@ namespace TailRemote
             {
                 if (s != null)
                 {
+                    bool was = false;
                     lock (_gate)
                     {
-                        if (_session == s) { End(s, null); _session = null; _status("Disconnected: " + remote + "."); }
+                        if (_controller == s) { _controller = null; was = true; }
+                        else if (_listeners.Remove(s)) was = true;
+                        if (was) { End(s, null); UpdateCapture(); }
                     }
+                    if (was) _status((s.Role == Protocol.RoleControl ? "Disconnected: " : "Stopped listening: ") + remote + ".");
                 }
                 else tcp.Dispose();
             }
@@ -174,7 +260,7 @@ namespace TailRemote
             while (!_stop)
             {
                 byte[] m = s.Link.Receive(s.Stream);
-                if (m.Length == 0) throw new InvalidOperationException("Empty message.");
+                if (m.Length == 0) continue;
                 switch (m[0])
                 {
                     case Protocol.Key when m.Length == 6:
@@ -183,8 +269,9 @@ namespace TailRemote
                         bool up = (m[5] & 1) != 0, ext = (m[5] & 2) != 0;
                         lock (_gate)
                         {
-                            // A replaced or closed session must not press anything after its keys were released.
-                            if (_session != s) return;
+                            // Only the current controller types. A replaced or closed session
+                            // must not press anything after its keys were released.
+                            if (_controller != s) break;
                             lock (s.Held) { if (up) s.Held.Remove((vk, ext)); else s.Held.Add((vk, ext)); }
                             Native.SendKey(vk, scan, up, ext);
                         }
@@ -196,8 +283,13 @@ namespace TailRemote
                     case Protocol.ReleaseAll:
                         ReleaseHeld(s);
                         break;
-                    default:
-                        throw new InvalidOperationException("Unknown message " + m[0]);
+                    case Protocol.Features when m.Length >= 5:
+                        s.PeerFeatures = BitConverter.ToUInt32(m, 1);
+                        break;
+                    case Protocol.Clipboard when s.Role == Protocol.RoleControl:
+                        ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
+                        break;
+                    // Anything else is from a newer version: ignore it.
                 }
             }
         }
@@ -215,27 +307,30 @@ namespace TailRemote
         {
             if (why != null) { try { Protocol.SendMessage(s.Link, s.Stream, why); } catch { } }
             ReleaseHeld(s);
-            s.Capture?.Dispose();
             try { s.Tcp.Dispose(); } catch { }
-            s.Link.Dispose();
         }
 
-        private readonly byte[] _audio = new byte[Protocol.AudioPacketBytes];
-
-        private void SendAudio(Session s, uint seq, short[]? pcm)
+        /// <summary>Called on the capture thread with each packet; sent to every session that said where.</summary>
+        private void SendAudio(uint seq, short[]? pcm)
         {
-            var to = s.AudioTo;
-            if (to == null) return;
-            _audio[0] = pcm == null ? Protocol.UdpSilence : Protocol.UdpAudio;
-            BitConverter.TryWriteBytes(_audio.AsSpan(1), seq);
+            List<Session> all;
+            lock (_gate) all = AllSessions();
             int payload = pcm == null ? 0 : pcm.Length * 2;
-            if (pcm != null) Buffer.BlockCopy(pcm, 0, _audio, 5, payload);
-            try
+            foreach (var s in all)
             {
-                s.Link.SealAudio(_audio, payload);
-                _udp.Send(_audio, 5 + payload + SecureLink.TagSize, to);
+                var to = s.AudioTo;
+                if (to == null) continue;
+                byte[] a = s.Audio; // each session seals its own copy with its own keys
+                a[0] = pcm == null ? Protocol.UdpSilence : Protocol.UdpAudio;
+                BitConverter.TryWriteBytes(a.AsSpan(1), seq);
+                if (pcm != null) Buffer.BlockCopy(pcm, 0, a, 5, payload);
+                try
+                {
+                    s.Link.SealAudio(a, payload);
+                    _udp.Send(a, 5 + payload + SecureLink.TagSize, to);
+                }
+                catch { }
             }
-            catch { }
         }
 
         private void UdpLoop()
@@ -248,8 +343,8 @@ namespace TailRemote
                 catch { if (_stop) return; continue; }
                 if (d.Length != 9 || d[0] != Protocol.UdpHello) continue;
                 Session? s;
-                lock (_gate) s = _session;
-                if (s == null || !d.AsSpan(1).SequenceEqual(s.Token)) continue;
+                lock (_gate) s = AllSessions().FirstOrDefault(x => d.AsSpan(1).SequenceEqual(x.Token));
+                if (s == null) continue;
                 var from = any.Address.IsIPv4MappedToIPv6 ? any.Address.MapToIPv4() : any.Address;
                 if (!from.Equals(s.Address)) continue;
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);

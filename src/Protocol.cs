@@ -16,24 +16,31 @@ namespace TailRemote
     ///
     /// Handshake, where key = PBKDF2-SHA256(password, 200000 rounds), slow on
     /// purpose so a recorded handshake cannot be guessed quickly:
-    ///   host:   "TRM3" + host nonce (16)
-    ///   client: "TRM3" + client nonce (16) + HMAC(key, "C" + host nonce + client nonce)
+    ///   host:   "TRM5" + host nonce (16)
+    ///   client: "TRM5" + client nonce (16) + HMAC(key, "C" + host nonce + client nonce)
     ///   host:   0 after a 2 s pause (wrong password), or
-    ///           1 + session token (8) + HMAC(key, "H" + client nonce + host nonce)
+    ///           1 + role (1) + session token (8) + HMAC(key, "H" + client nonce + host nonce)
+    /// The role is Control or Listen, decided by which of the host's two
+    /// passwords the client proved. Then each side sends Features: the extras
+    /// it supports. Unknown message types are ignored, so newer versions can
+    /// add messages without breaking older ones.
     /// The client checks the host's proof too, so a PC that does not know the
     /// password never receives a single key. After that, everything is
     /// encrypted by SecureLink, so the connection is private without Tailscale.
-    /// After that both sides send frames of [type][payload].
+    /// After that both sides send encrypted frames of [type][payload].
     /// </summary>
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM4"u8.ToArray();
+        public static readonly byte[] Magic = "TRM5"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
         public const byte Ping = 2;     // stamp i64
         public const byte ReleaseAll = 3;
+        // Either way
+        public const byte Features = 0x40;   // u32 flags
+        public const byte Clipboard = 0x41;  // UTF-8 text
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
         public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
@@ -42,6 +49,34 @@ namespace TailRemote
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
         public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
         public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
+
+        // Roles
+        public const byte RoleControl = 1, RoleListen = 2;
+
+        // Feature flags
+        public const uint FeatureClipboard = 1;
+
+        /// <summary>What this version supports, sent to the other side after login.</summary>
+        public const uint OurFeatures = FeatureClipboard;
+
+        public const int MaxClipboardChars = 1_000_000;
+
+        public static byte[] FeaturesMessage()
+        {
+            byte[] m = new byte[5];
+            m[0] = Features;
+            BitConverter.TryWriteBytes(m.AsSpan(1), OurFeatures);
+            return m;
+        }
+
+        public static byte[] TextMessage(byte type, string text)
+        {
+            byte[] utf = Encoding.UTF8.GetBytes(text);
+            byte[] m = new byte[1 + utf.Length];
+            m[0] = type;
+            utf.CopyTo(m, 1);
+            return m;
+        }
 
         public const int AudioRate = 44100;
         public const int PacketFrames = 256; // 5.8 ms; 1029 bytes, under Tailscale's 1280 MTU

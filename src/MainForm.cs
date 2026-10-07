@@ -14,6 +14,12 @@ namespace TailRemote
         private readonly TextBox _port = new();
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private readonly ComboBox _saved = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private readonly Button _savePc = new() { Text = "Save t&his PC", AutoSize = true };
+        private readonly Button _forgetPc = new() { Text = "&Forget saved PC", AutoSize = true };
+        private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
+        private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
+        private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
@@ -23,7 +29,8 @@ namespace TailRemote
         private readonly Button _portEditor = new() { Text = "Port &editor", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
-        private readonly Label _addressLabel, _deviceLabel;
+        private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel;
+        private readonly FlowLayoutPanel _savedButtons = new() { AutoSize = true };
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
         private Client? _client;
@@ -52,10 +59,16 @@ namespace TailRemote
 
             _mode.Items.AddRange(new object[] { "Control another PC", "Host: let this PC be controlled" });
             AddRow(table, "&Mode", _mode);
-            _addressLabel = AddRow(table, "&Address (Tailscale name or IP)", _address);
+            _savedLabel = AddRow(table, "&Saved PCs", _saved);
+            _savedButtons.Controls.Add(_savePc);
+            _savedButtons.Controls.Add(_forgetPc);
+            table.Controls.Add(_savedButtons); table.SetColumnSpan(_savedButtons, 2);
+            _addressLabel = AddRow(table, "&Address (name or IP)", _address);
             AddRow(table, "&Port", _port);
             AddRow(table, "Pass&word", _password);
+            _listenLabel = AddRow(table, "Listen-&only password (optional: lets someone hear, not control)", _listenPassword);
             _deviceLabel = AddRow(table, "&Output device", _device);
+            table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
 
             var buttons = new FlowLayoutPanel { AutoSize = true };
@@ -75,7 +88,10 @@ namespace TailRemote
             _address.Text = _settings.Address;
             _port.Text = _settings.Port.ToString();
             _password.Text = _settings.Password;
+            _listenPassword.Text = _settings.ListenPassword;
+            _shareClipboard.Checked = _settings.ShareClipboard;
             _startup.Checked = Startup.IsEnabled();
+            FillSaved();
 
             _device.Items.Add("Windows default");
             _devices.Add(("", "Windows default"));
@@ -84,6 +100,10 @@ namespace TailRemote
             _device.SelectedIndex = sel < 0 ? 0 : sel;
 
             _mode.SelectedIndexChanged += (_, _) => UpdateMode();
+            _saved.SelectedIndexChanged += (_, _) => UseSaved();
+            _savePc.Click += (_, _) => SavePc();
+            _forgetPc.Click += (_, _) => ForgetPc();
+            _shareClipboard.CheckedChanged += (_, _) => SaveSettings();
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
@@ -113,6 +133,8 @@ namespace TailRemote
             bool host = HostMode;
             _addressLabel.Visible = _address.Visible = !host;
             _deviceLabel.Visible = _device.Visible = !host;
+            _savedLabel.Visible = _saved.Visible = _savedButtons.Visible = !host;
+            _listenLabel.Visible = _listenPassword.Visible = host;
             _toggle.Visible = !host;
             _startup.Visible = host;
             UpdateButtons();
@@ -124,13 +146,100 @@ namespace TailRemote
             _mode.Enabled = !busy;
             if (HostMode) _go.Text = _host == null ? "&Start hosting" : "&Stop hosting";
             else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
-            _toggle.Enabled = _client != null;
+            _toggle.Enabled = _client != null && !_client.ListenOnly;
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
             _handle = Handle;
+            Native.AddClipboardFormatListener(Handle);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_CLIPBOARDUPDATE = 0x031D;
+            if (m.Msg == WM_CLIPBOARDUPDATE) ClipboardChanged();
+            base.WndProc(ref m);
+        }
+
+        // ---- Clipboard sharing: text only, both ways, never echoed back ----
+
+        private void ClipboardChanged()
+        {
+            if (!_shareClipboard.Checked || (_client == null && _host == null)) return;
+            string? text = null;
+            for (int i = 0; i < 5 && text == null; i++)
+            {
+                try { text = Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
+                catch { System.Threading.Thread.Sleep(20); } // another program has it open
+            }
+            if (string.IsNullOrEmpty(text) || text == _lastClipboardIn || text.Length > Protocol.MaxClipboardChars) return;
+            _lastClipboardIn = null;
+            _client?.SendClipboard(text);
+            _host?.SendClipboard(text);
+        }
+
+        private void ClipboardArrived(string text)
+        {
+            if (!_shareClipboard.Checked || text.Length == 0) return;
+            _lastClipboardIn = text;
+            for (int i = 0; i < 5; i++)
+            {
+                try { Clipboard.SetText(text); return; }
+                catch { System.Threading.Thread.Sleep(20); }
+            }
+        }
+
+        // ---- Saved PCs ----
+
+        private bool _filling;
+
+        private void FillSaved()
+        {
+            _filling = true;
+            _saved.Items.Clear();
+            _saved.Items.Add("None: type the address below");
+            foreach (var pc in _settings.SavedPcs) _saved.Items.Add(pc);
+            int i = _settings.SavedPcs.FindIndex(p => p.Address == _settings.Address && p.Port == _settings.Port);
+            _saved.SelectedIndex = i + 1;
+            _filling = false;
+            _forgetPc.Enabled = _saved.SelectedIndex > 0;
+        }
+
+        private void UseSaved()
+        {
+            _forgetPc.Enabled = _saved.SelectedIndex > 0;
+            if (_filling || _saved.SelectedItem is not SavedPc pc) return;
+            _address.Text = pc.Address;
+            _port.Text = pc.Port.ToString();
+            _password.Text = Settings.Unprotect(pc.PasswordEnc);
+            SaveSettings();
+        }
+
+        private void SavePc()
+        {
+            string address = _address.Text.Trim();
+            if (address.Length == 0) { Say("Type the address first."); _address.Focus(); return; }
+            if (!CheckPassword() || !CheckPort(out int port)) return;
+            var pc = _settings.SavedPcs.Find(p => string.Equals(p.Address, address, StringComparison.OrdinalIgnoreCase) && p.Port == port);
+            bool isNew = pc == null;
+            pc ??= new SavedPc { Address = address, Port = port };
+            pc.PasswordEnc = Settings.Protect(_password.Text);
+            if (isNew) _settings.SavedPcs.Add(pc);
+            SaveSettings();
+            FillSaved();
+            Say(isNew ? "Saved " + pc + "." : "Updated " + pc + ".");
+        }
+
+        private void ForgetPc()
+        {
+            if (_saved.SelectedItem is not SavedPc pc) return;
+            _settings.SavedPcs.Remove(pc);
+            _settings.Save();
+            FillSaved();
+            Say("Forgot " + pc + ".");
+            _saved.Focus();
         }
 
         protected override void OnShown(EventArgs e)
@@ -162,7 +271,7 @@ namespace TailRemote
             string t;
             if (_client != null)
             {
-                t = "TailRemote - " + (_keys?.Remote == true ? "controlling remote" : "connected");
+                t = "TailRemote - " + (_client.ListenOnly ? "listening" : _keys?.Remote == true ? "controlling remote" : "connected");
                 if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
                 int audio = _client.AudioDelayMs;
                 if (audio >= 0) t += ", audio " + (audio + Math.Max(0, _client.LastPingMs) / 2) + " ms";
@@ -179,6 +288,8 @@ namespace TailRemote
             if (int.TryParse(_port.Text.Trim(), out int port)) _settings.Port = port;
             _settings.Password = _password.Text;
             _settings.OutputDevice = _devices[Math.Max(0, _device.SelectedIndex)].Id;
+            _settings.ListenPassword = _listenPassword.Text;
+            _settings.ShareClipboard = _shareClipboard.Checked;
             _settings.Save();
         }
 
@@ -194,12 +305,23 @@ namespace TailRemote
         private async void StartHost()
         {
             if (!CheckPassword()) return;
+            string listen = _listenPassword.Text;
+            if (listen.Length > 0 && (listen.Length < MinPasswordLength || listen == _password.Text))
+            {
+                Say(listen == _password.Text
+                    ? "The listen-only password must be different from the main password, or empty."
+                    : "The listen-only password needs at least " + MinPasswordLength + " characters, or leave it empty.");
+                _listenPassword.Focus();
+                _listenPassword.SelectAll();
+                return;
+            }
             if (!CheckPort(out int port)) return;
             PortEditorForm.Remember(_settings, port);
             try
             {
-                _host = new Host(port, _password.Text, msg => Later(() => Log(msg)));
-                Say("Hosting on port " + port + ". Waiting for a connection.");
+                _host = new Host(port, _password.Text, listen, msg => Later(() => Log(msg)));
+                _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
+                Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
                 else if (Wasapi.OutputDevices().Count == 0)
                 {
@@ -288,12 +410,16 @@ namespace TailRemote
                     return;
                 }
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
+                c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 _client = c;
-                _keys?.SetClient(c);
+                if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys
                 bool wasReconnecting = _reconnecting;
                 _reconnecting = false;
                 _retryTimer.Stop();
-                Say(wasReconnecting ? "Reconnected. Press Control Shift Enter to control the remote PC." : "Connected. Press Control Shift Enter to control the remote PC.");
+                string start = wasReconnecting ? "Reconnected." : "Connected.";
+                Say(c.ListenOnly
+                    ? start + " Listen only: you hear the remote PC, but cannot control it."
+                    : start + " Press Control Shift Enter to control the remote PC.");
             }
             catch (Exception e) when (attempt == _attempt)
             {

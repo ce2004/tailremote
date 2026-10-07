@@ -6,7 +6,16 @@ using System.Text.Json.Serialization;
 
 namespace TailRemote
 {
-    /// <summary>Saved in %APPDATA%\TailRemote\settings.json; the password is DPAPI-encrypted.</summary>
+    /// <summary>A PC in the Saved PCs list; its password is DPAPI-encrypted like the others.</summary>
+    internal sealed class SavedPc
+    {
+        public string Address { get; set; } = "";
+        public int Port { get; set; } = Protocol.DefaultPort;
+        public string PasswordEnc { get; set; } = "";
+        public override string ToString() => Port == Protocol.DefaultPort ? Address : Address + ", port " + Port;
+    }
+
+    /// <summary>Saved in %APPDATA%\TailRemote\settings.json; the passwords are DPAPI-encrypted.</summary>
     internal sealed class Settings
     {
         public bool HostMode { get; set; }
@@ -14,6 +23,26 @@ namespace TailRemote
         public int Port { get; set; } = Protocol.DefaultPort;
         public string PasswordEnc { get; set; } = "";
         public string OutputDevice { get; set; } = "";
+        public string ListenPasswordEnc { get; set; } = "";
+        public bool ShareClipboard { get; set; } = true;
+        public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();
+
+        [JsonIgnore]
+        public string ListenPassword
+        {
+            get => Unprotect(ListenPasswordEnc);
+            set => ListenPasswordEnc = Protect(value);
+        }
+
+        public static string Protect(string value) =>
+            value.Length == 0 ? "" : Convert.ToBase64String(Native.Protect(Encoding.UTF8.GetBytes(value), true));
+
+        public static string Unprotect(string enc)
+        {
+            if (enc.Length == 0) return "";
+            try { return Encoding.UTF8.GetString(Native.Protect(Convert.FromBase64String(enc), false)); }
+            catch { return ""; }
+        }
         /// <summary>Every port TailRemote has used here, so Port editor can still close it later.</summary>
         public System.Collections.Generic.List<int> KnownPorts { get; set; } = new();
         /// <summary>What was running when TailRemote last closed: "host", "connect" or "". Used by --resume.</summary>

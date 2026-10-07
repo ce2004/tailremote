@@ -21,6 +21,11 @@ namespace TailRemote
 
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
+        /// <summary>Clipboard text from the host. Raised on a network thread.</summary>
+        public event Action<string>? ClipboardReceived;
+        /// <summary>True when the host let us in with its listen-only password: audio only, no keys.</summary>
+        public bool ListenOnly { get; private set; }
+        private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
@@ -78,7 +83,8 @@ namespace TailRemote
                 byte[] result = new byte[1];
                 Protocol.ReadExactly(stream, result);
                 if (result[0] != 1) throw new InvalidOperationException("Wrong password.");
-                byte[] token = new byte[8], hostProof = new byte[32];
+                byte[] role = new byte[1], token = new byte[8], hostProof = new byte[32];
+                Protocol.ReadExactly(stream, role);
                 Protocol.ReadExactly(stream, token);
                 Protocol.ReadExactly(stream, hostProof);
                 if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(hostProof, Protocol.Proof(key, 'H', myNonce, hostNonce)))
@@ -94,7 +100,11 @@ namespace TailRemote
                 udp.Connect(hostEp.Address, port);
 
                 var player = new Player(deviceId, status);
-                var c = new Client(tcp, stream, udp, token, player, new SecureLink(key, hostNonce, myNonce, isHost: false));
+                var c = new Client(tcp, stream, udp, token, player, new SecureLink(key, hostNonce, myNonce, isHost: false))
+                {
+                    ListenOnly = role[0] == Protocol.RoleListen,
+                };
+                c._link.Send(stream, Protocol.FeaturesMessage());
                 c.Status += status;
                 c.Start();
                 return c;
@@ -137,6 +147,13 @@ namespace TailRemote
 
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
+        /// <summary>Sends clipboard text to the host, if it shares the clipboard. Not for listeners.</summary>
+        public void SendClipboard(string text)
+        {
+            if (ListenOnly || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
+            Write(Protocol.TextMessage(Protocol.Clipboard, text));
+        }
+
         private void Write(ReadOnlySpan<byte> f)
         {
             try { _link.Send(_stream, f); }
@@ -160,7 +177,11 @@ namespace TailRemote
                     {
                         Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     }
-                    else throw new InvalidOperationException("Unknown message from host.");
+                    else if (m.Length >= 5 && m[0] == Protocol.Features)
+                        _peerFeatures = BitConverter.ToUInt32(m, 1);
+                    else if (m.Length >= 1 && m[0] == Protocol.Clipboard && !ListenOnly)
+                        ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
+                    // Anything else is from a newer version: ignore it.
                 }
             }
             catch (Exception e)

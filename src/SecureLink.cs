@@ -23,7 +23,7 @@ namespace TailRemote
         private readonly AesGcm _send, _recv, _audio;
         private readonly object _sendLock = new();
         private ulong _sendCounter, _recvCounter;
-        private readonly byte[] _recvHead = new byte[2];
+        private readonly byte[] _recvHead = new byte[4];
 
         public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost)
         {
@@ -50,16 +50,19 @@ namespace TailRemote
             BitConverter.TryWriteBytes(nonce[4..], counter);
         }
 
-        /// <summary>Sends one message as [u16 length][ciphertext][tag]. Safe from any thread.</summary>
+        public const int MaxMessage = 8 * 1024 * 1024;
+
+        /// <summary>Sends one message as [u32 length][ciphertext][tag]. Safe from any thread.</summary>
         public void Send(Stream s, ReadOnlySpan<byte> message)
         {
-            byte[] frame = new byte[2 + message.Length + TagSize];
-            BitConverter.TryWriteBytes(frame.AsSpan(0, 2), (ushort)message.Length);
+            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
+            byte[] frame = new byte[4 + message.Length + TagSize];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);
             Span<byte> nonce = stackalloc byte[12];
             lock (_sendLock)
             {
                 CounterNonce(nonce, _sendCounter++);
-                _send.Encrypt(nonce, message, frame.AsSpan(2, message.Length), frame.AsSpan(2 + message.Length, TagSize));
+                _send.Encrypt(nonce, message, frame.AsSpan(4, message.Length), frame.AsSpan(4 + message.Length, TagSize));
                 s.Write(frame);
             }
         }
@@ -68,7 +71,8 @@ namespace TailRemote
         public byte[] Receive(Stream s)
         {
             Protocol.ReadExactly(s, _recvHead);
-            int len = BitConverter.ToUInt16(_recvHead);
+            int len = BitConverter.ToInt32(_recvHead);
+            if (len < 0 || len > MaxMessage) throw new InvalidOperationException("The connection sent something too large.");
             byte[] body = new byte[len + TagSize];
             Protocol.ReadExactly(s, body);
             byte[] message = new byte[len];
