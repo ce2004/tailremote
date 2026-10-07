@@ -18,11 +18,13 @@ namespace TailRemote
 
         private readonly short[] _packet = new short[Protocol.PacketFrames * 2];
         private int _fill;
+        private readonly Action<float, float> _emit; // made once: a new one per packet was garbage every 5.8 ms
         private uint _seq;
 
         public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status)
         {
             _onPacket = onPacket;
+            _emit = Emit;
             _status = status;
             _thread = new Thread(Run) { IsBackground = true, Name = "TailRemote capture", Priority = ThreadPriority.Highest };
             _thread.Start();
@@ -110,14 +112,14 @@ namespace TailRemote
                             else if (gap100ns > 20_000) // over 2 ms of real silence: keep the timing exact
                             {
                                 int n = Math.Min((int)(gap100ns * fmt.Rate / 10_000_000), silence.Length / 2);
-                                rs.Process(silence.AsSpan(0, n * 2), Emit);
+                                rs.Process(silence.AsSpan(0, n * 2), _emit);
                             }
                         }
                         expectedQpc = (long)qpc + (long)frames * 10_000_000 / fmt.Rate;
                         if (stereo.Length < frames * 2) stereo = new float[frames * 4];
                         ToStereo(data, (int)frames, fmt, (flags & Wasapi.AUDCLNT_BUFFERFLAGS_SILENT) != 0, stereo);
                         cap.ReleaseBuffer(frames);
-                        rs.Process(stereo.AsSpan(0, (int)frames * 2), Emit);
+                        rs.Process(stereo.AsSpan(0, (int)frames * 2), _emit);
                         lastDataAt = Environment.TickCount64;
                     }
 

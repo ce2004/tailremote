@@ -30,6 +30,11 @@ namespace TailRemote
         public event Action<string>? FileMessage;
         private FileChannel? _files;
         private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
+
+        /// <summary>0 = lossless; 1 to 4 = bits dropped while the connection struggles.</summary>
+        public int AudioQuality { get; private set; }
+        private int _cleanSeconds;
+        private long _lastQualityChange;
         private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
@@ -246,10 +251,38 @@ namespace TailRemote
                     _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
                 else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence && _link.OpenAudio(d, d.Length))
                     _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
+                else if (d[0] == Protocol.UdpPacked2 && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
+                         && _link.OpenAudio(d, d.Length) && Lossless2.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
+                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
                 else if (d[0] == Protocol.UdpPacked && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
                          && _link.OpenAudio(d, d.Length) && Lossless.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
                     _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
             }
+        }
+
+        /// <summary>
+        /// Once a second: if packets are getting lost or late, ask the host to drop
+        /// one more bit (never more than 4, never faster than every 2 seconds);
+        /// after 10 clean seconds, ask for one bit back, up to lossless. Smaller
+        /// packets instead of a bigger buffer, so the delay never grows.
+        /// </summary>
+        private void AdaptQuality()
+        {
+            var (packets, lost, late, starved) = _player.TakeStats();
+            if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return;
+            bool struggling = starved > 0 || (lost + late >= 2 && (lost + late) * 100 > packets);
+            long now = Environment.TickCount64;
+            int q = AudioQuality;
+            if (struggling)
+            {
+                _cleanSeconds = 0;
+                if (q < 4 && now - _lastQualityChange >= 2000) q++;
+            }
+            else if (++_cleanSeconds >= 10 && q > 0) { q--; _cleanSeconds = 0; }
+            if (q == AudioQuality) return;
+            AudioQuality = q;
+            _lastQualityChange = now;
+            Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
 
         private void Heartbeat()
@@ -264,6 +297,7 @@ namespace TailRemote
             {
                 if (Environment.TickCount64 - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
                 try { _udp.Send(hello, hello.Length); } catch { }
+                AdaptQuality();
                 if (tick++ % 2 == 0)
                 {
                     ping[0] = Protocol.Ping;

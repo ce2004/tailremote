@@ -133,6 +133,27 @@ namespace TailRemote
                             if (BitConverter.ToInt16(back, i * 2) != pcm[i]) return Fail("lossless: sample " + i + " changed");
                     }
                 lossless = " | lossless " + (packedBytes * 100 / rawBytes) + "% of raw over the test mix";
+
+                // Lossless2: exact at quality 0, and within half a step at 1 to 4.
+                long packed2 = 0;
+                for (int quality = 0; quality <= 4; quality++)
+                    foreach (var kind in kinds)
+                        for (int rep = 0; rep < 20; rep++)
+                        {
+                            short[] pcm = new short[Protocol.PacketFrames * 2];
+                            for (int i = 0; i < Protocol.PacketFrames; i++) { pcm[i * 2] = kind(i + rep * 256, 0); pcm[i * 2 + 1] = kind(i + rep * 256, 1); }
+                            int n = Lossless2.Encode(pcm, quality, packed);
+                            if (quality == 0) packed2 += n > 0 ? n : pcm.Length * 2;
+                            if (n <= 0) continue;
+                            if (!Lossless2.Decode(packed.AsSpan(0, n), back)) return Fail("lossless2 q" + quality + ": did not decode");
+                            int step = 1 << quality;
+                            for (int i = 0; i < pcm.Length; i++)
+                            {
+                                int decoded = BitConverter.ToInt16(back, i * 2), want = pcm[i];
+                                if (quality == 0 ? decoded != want : Math.Abs(decoded - want) > step) return Fail("lossless2 q" + quality + ": sample " + i + " " + want + " became " + decoded);
+                            }
+                        }
+                lossless += ", new coder " + (packed2 * 100 / rawBytes) + "%";
             }
 
             // Audio encryption: a sealed packet opens on the other side; a changed one does not.
@@ -181,6 +202,31 @@ namespace TailRemote
             for (int i = 0; i < 40 && (toHost == null || toClient == null); i++) System.Threading.Thread.Sleep(50);
             System.Threading.Thread.Sleep(100);
             if (toHost != "from client ✓" || toClient != "from host ✓") return Fail("clipboard: host got " + toHost + ", client got " + toClient);
+
+            // A flood of logins that never finish must not touch a session that is
+            // already running, and someone else must still be able to log in.
+            {
+                var flood = new System.Collections.Generic.List<System.Net.Sockets.TcpClient>();
+                for (int i = 0; i < 200; i++)
+                {
+                    var t = new System.Net.Sockets.TcpClient();
+                    try { t.Connect("127.0.0.1", 47999); } catch { }
+                    flood.Add(t);
+                }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                toClient = null;
+                host.SendClipboard("during the flood");
+                while (toClient == null && sw.ElapsedMilliseconds < 3000) System.Threading.Thread.Sleep(10);
+                long clipMs = sw.ElapsedMilliseconds;
+                foreach (var t in flood) t.Dispose();
+                if (toClient != "during the flood") return Fail("the running session froze during a login flood");
+                if (clipMs > 500) return Fail("the running session was slow during a login flood: " + clipMs + " ms");
+                System.Threading.Thread.Sleep(200);
+                using var after = new Player(Player.NoDevice, log.Enqueue);
+                using var late = Client.Connect("127.0.0.1", 47999, "listen", after, log.Enqueue);
+                if (!late.ListenOnly) return Fail("could not log in after a flood");
+                lossless += " | login flood: session answered in " + clipMs + " ms";
+            }
 
             // Files both ways, into a temporary folder, checked byte for byte.
             string dir = Path.Combine(Path.GetTempPath(), "tailremote-selftest-files");

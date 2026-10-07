@@ -1,3 +1,10 @@
+1.5.0
+Works with 1.4, so the two PCs can update one at a time.
+New feature: sound uses about a fifth less data again, and is still exactly lossless.
+New feature: on a slow or struggling connection, TailRemote drops the finest detail one step at a time (down to 12-bit) instead of letting the sound lag, and goes back to lossless after 10 good seconds. The window title says when it has.
+Safer: TailRemote cannot be frozen by someone flooding it with logins, by a PC that stops responding, or by many listeners. After 5 wrong passwords, that address is refused for a minute.
+Faster: less work and less memory churn while sound plays.
+
 1.4.1
 Works with 1.4.0, so the two PCs can update one at a time.
 New feature: while hosting, closing the window hides TailRemote in the notification area, where it keeps hosting. Press Windows B to find it; its menu has Stop hosting and exit.

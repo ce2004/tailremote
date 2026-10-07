@@ -42,6 +42,7 @@ namespace TailRemote
         public const byte ReleaseAll = 3;
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
+        public const byte AudioQuality = 6;  // u8 0..4: bits to drop while the connection struggles (0 = lossless)
         // Either way
         public const byte Features = 0x40;   // u32 flags
         public const byte Clipboard = 0x41;  // UTF-8 text
@@ -54,6 +55,7 @@ namespace TailRemote
         public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
         public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
         public const byte UdpPacked = 0xA3;  // u32 sequence, losslessly packed audio (Lossless.cs)
+        public const byte UdpPacked2 = 0xA4; // u32 sequence, Lossless2 (smaller; carries its quality)
 
         // Roles
         public const byte RoleControl = 1, RoleListen = 2;
@@ -64,9 +66,10 @@ namespace TailRemote
         public const uint FeatureLossless = 4;
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
+        public const uint FeatureLossless2 = 32;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart | FeatureLossless2;
 
         public const int MaxClipboardChars = 1_000_000;
 

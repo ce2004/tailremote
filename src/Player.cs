@@ -42,6 +42,7 @@ namespace TailRemote
         private readonly float[] _ring = new float[192000 * 2 * 2]; // 2 s of stereo at up to 192 kHz
         private int _read, _count; // in floats
         private bool _playing, _starved;
+        private int _statPackets, _statLost, _statLate, _statStarved; // since the last TakeStats
         private float _gain, _lastL, _lastR;
         private int _fadeOut;
         private double _avgMs;
@@ -63,6 +64,7 @@ namespace TailRemote
         private bool _fadeIn;
         private float[] _scratch = new float[8192];
         private int _scratchLen;
+        private Action<float, float>? _collect; // made once, not per packet
         private readonly float[] _in = new float[Protocol.PacketFrames * 2];
         private readonly float[] _last = new float[Protocol.PacketFrames * 2];
 
@@ -87,6 +89,14 @@ namespace TailRemote
                 _read = 0; _count = 0; _playing = false; _starved = false; _fadeOut = 0; _gain = 0;
             }
             _haveSeq = false;
+        }
+
+        /// <summary>Packets, lost, late and ran-dry counts since the last call: how the connection is coping.</summary>
+        public (int Packets, int Lost, int Late, int Starved) TakeStats()
+        {
+            int starved;
+            lock (_gate) { starved = _statStarved; _statStarved = 0; }
+            return (Interlocked.Exchange(ref _statPackets, 0), Interlocked.Exchange(ref _statLost, 0), Interlocked.Exchange(ref _statLate, 0), starved);
         }
 
         public void Dispose()
@@ -128,13 +138,15 @@ namespace TailRemote
 
             lock (_gate)
             {
-                if (_starved && !newSpurt && diff == 0) _extraMs = Math.Min(_extraMs + 3, 60); // ran dry mid-sound
+                if (_starved && !newSpurt && diff == 0) { _extraMs = Math.Min(_extraMs + 3, 60); _statStarved++; } // ran dry mid-sound
                 _starved = false;
             }
             _extraMs *= 0.9997; // back down about 5% a second
             UpdateTarget();
 
-            if (diff < 0) return; // late; its moment has passed
+            Interlocked.Increment(ref _statPackets);
+            if (diff < 0) { Interlocked.Increment(ref _statLate); return; } // late; its moment has passed
+            if (diff > 0) Interlocked.Add(ref _statLost, diff);
             _haveSeq = true;
             _expect = seq + 1;
 
@@ -149,7 +161,7 @@ namespace TailRemote
                     _in[i] = _last[i] * g;
                     _in[i + 1] = _last[i + 1] * g;
                 }
-                _rs.Process(_in, Collect);
+                _rs.Process(_in, _collect ??= Collect);
                 _fadeIn = true;
             }
 
@@ -163,7 +175,7 @@ namespace TailRemote
                 _fadeIn = false;
             }
             Array.Copy(_in, _last, _in.Length);
-            _rs.Process(_in, Collect);
+            _rs.Process(_in, _collect ??= Collect);
 
             lock (_gate)
             {
