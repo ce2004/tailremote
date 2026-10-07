@@ -209,14 +209,14 @@ namespace TailRemote
 
         private readonly byte[] _audio = new byte[Protocol.AudioPacketBytes];
 
-        private void SendAudio(Session s, uint seq, short[] pcm)
+        private void SendAudio(Session s, uint seq, short[]? pcm)
         {
             var to = s.AudioTo;
             if (to == null) return;
-            _audio[0] = Protocol.UdpAudio;
+            _audio[0] = pcm == null ? Protocol.UdpSilence : Protocol.UdpAudio;
             BitConverter.TryWriteBytes(_audio.AsSpan(1), seq);
-            Buffer.BlockCopy(pcm, 0, _audio, 5, pcm.Length * 2);
-            try { _udp.Send(_audio, _audio.Length, to); } catch { }
+            if (pcm != null) Buffer.BlockCopy(pcm, 0, _audio, 5, pcm.Length * 2);
+            try { _udp.Send(_audio, pcm == null ? 5 : _audio.Length, to); } catch { }
         }
 
         private void UdpLoop()

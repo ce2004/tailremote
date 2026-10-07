@@ -7,32 +7,36 @@ namespace TailRemote
     internal sealed class MainForm : Form
     {
         private readonly Settings _settings = Settings.Load();
-        private readonly bool _autoHost;
+        private readonly bool _autoHost, _autoConnect, _updated;
 
         private readonly ComboBox _mode = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private readonly TextBox _address = new();
         private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535 };
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
-        private readonly NumericUpDown _buffer = new() { Minimum = 5, Maximum = 1000, Increment = 5 };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private readonly CheckBox _tailscaleOnly = new() { Text = "Only accept &Tailscale connections", AutoSize = true };
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
+        private readonly Button _update = new() { Text = "Check for &updates", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
-        private readonly Label _addressLabel, _bufferLabel, _deviceLabel;
+        private readonly Label _addressLabel, _deviceLabel;
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
         private Client? _client;
         private Host? _host;
         private KeyCapture? _keys;
         private IntPtr _handle;
-        private readonly Timer _pingTimer = new() { Interval = 2000 };
+        private bool _connecting, _reconnecting;
+        private readonly Timer _titleTimer = new() { Interval = 1000 };
+        private readonly Timer _retryTimer = new() { Interval = 2000 };
 
-        public MainForm(bool autoHost)
+        public MainForm(bool autoHost, bool autoConnect, bool updated)
         {
             _autoHost = autoHost;
+            _autoConnect = autoConnect;
+            _updated = updated;
             Text = "TailRemote";
             Font = new Font("Segoe UI", 10f);
             AutoSize = true;
@@ -48,7 +52,6 @@ namespace TailRemote
             _addressLabel = AddRow(table, "&Address (Tailscale name or IP)", _address);
             AddRow(table, "&Port", _port);
             AddRow(table, "Pass&word", _password);
-            _bufferLabel = AddRow(table, "Audio &buffer in milliseconds (lower means less delay)", _buffer);
             _deviceLabel = AddRow(table, "&Output device", _device);
             table.Controls.Add(_tailscaleOnly); table.SetColumnSpan(_tailscaleOnly, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
@@ -56,6 +59,7 @@ namespace TailRemote
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
+            buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
             AddRow(table, "Status &log", _log);
             _log.Dock = DockStyle.Fill;
@@ -66,7 +70,6 @@ namespace TailRemote
             _address.Text = _settings.Address;
             _port.Value = Math.Clamp(_settings.Port, 1, 65535);
             _password.Text = _settings.Password;
-            _buffer.Value = Math.Clamp(_settings.BufferMs, 5, 1000);
             _tailscaleOnly.Checked = _settings.TailscaleOnly;
             _startup.Checked = Startup.IsEnabled();
 
@@ -79,8 +82,10 @@ namespace TailRemote
             _mode.SelectedIndexChanged += (_, _) => UpdateMode();
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
+            _update.Click += (_, _) => CheckForUpdates();
             _startup.CheckedChanged += (_, _) => StartupChanged();
-            _pingTimer.Tick += (_, _) => UpdateTitle();
+            _titleTimer.Tick += (_, _) => UpdateTitle();
+            _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
             UpdateMode();
         }
 
@@ -100,7 +105,6 @@ namespace TailRemote
         {
             bool host = HostMode;
             _addressLabel.Visible = _address.Visible = !host;
-            _bufferLabel.Visible = _buffer.Visible = !host;
             _deviceLabel.Visible = _device.Visible = !host;
             _toggle.Visible = !host;
             _tailscaleOnly.Visible = _startup.Visible = host;
@@ -109,9 +113,10 @@ namespace TailRemote
 
         private void UpdateButtons()
         {
-            bool busy = _client != null || _host != null;
+            bool busy = _client != null || _host != null || _reconnecting;
             _mode.Enabled = !busy;
-            _go.Text = HostMode ? (_host == null ? "&Start hosting" : "&Stop hosting") : (_client == null ? "&Connect" : "Dis&connect");
+            if (HostMode) _go.Text = _host == null ? "&Start hosting" : "&Stop hosting";
+            else _go.Text = _reconnecting ? "Stop re&connecting" : _client == null ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null;
         }
 
@@ -127,12 +132,15 @@ namespace TailRemote
             _keys = new KeyCapture(() => _handle);
             _keys.ModeChanged += remote => BeginInvoke(() => ModeChanged(remote));
             _keys.NotConnected += () => BeginInvoke(() => Say("Not connected."));
+            _titleTimer.Start();
+            if (_updated) Say("Updated to version " + Updater.Current + ".");
             if (_autoHost)
             {
                 _mode.SelectedIndex = 1;
                 Go();
                 WindowState = FormWindowState.Minimized;
             }
+            else if (_autoConnect && !HostMode && _address.Text.Trim().Length > 0) Go();
         }
 
         private void ModeChanged(bool remote)
@@ -144,9 +152,17 @@ namespace TailRemote
 
         private void UpdateTitle()
         {
-            if (_client == null) { Text = _host != null ? "TailRemote - hosting" : "TailRemote"; return; }
-            string ping = _client.LastPingMs >= 0 ? ", " + _client.LastPingMs + " ms" : "";
-            Text = "TailRemote - " + (_keys?.Remote == true ? "controlling remote" : "connected") + ping;
+            string t;
+            if (_client != null)
+            {
+                t = "TailRemote - " + (_keys?.Remote == true ? "controlling remote" : "connected");
+                if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
+                int audio = _client.AudioDelayMs;
+                if (audio >= 0) t += ", audio " + (audio + Math.Max(0, _client.LastPingMs) / 2) + " ms";
+            }
+            else if (_reconnecting) t = "TailRemote - reconnecting";
+            else t = _host != null ? "TailRemote - hosting" : "TailRemote";
+            if (Text != t) Text = t;
         }
 
         private void SaveSettings()
@@ -155,7 +171,6 @@ namespace TailRemote
             _settings.Address = _address.Text.Trim();
             _settings.Port = (int)_port.Value;
             _settings.Password = _password.Text;
-            _settings.BufferMs = (int)_buffer.Value;
             _settings.OutputDevice = _devices[Math.Max(0, _device.SelectedIndex)].Id;
             _settings.TailscaleOnly = _tailscaleOnly.Checked;
             _settings.Save();
@@ -165,7 +180,9 @@ namespace TailRemote
         {
             SaveSettings();
             if (HostMode) { if (_host == null) StartHost(); else StopHost(); }
-            else { if (_client == null) Connect(); else Disconnect("Disconnected."); }
+            else if (_reconnecting) StopReconnecting("Stopped reconnecting.");
+            else if (_client == null) Connect(quiet: false);
+            else Disconnect("Disconnected.", byUser: true);
         }
 
         private void StartHost()
@@ -192,41 +209,99 @@ namespace TailRemote
             UpdateTitle();
         }
 
-        private async void Connect()
+        /// <summary>Connects with the saved settings. Quiet attempts are reconnects: only success is spoken.</summary>
+        private async void Connect(bool quiet)
         {
             string address = _address.Text.Trim();
             if (address.Length == 0) { Say("Type the address first."); _address.Focus(); return; }
-            _go.Enabled = false;
-            Say("Connecting to " + address + ".");
+            _connecting = true;
+            if (!quiet) { _go.Enabled = false; Say("Connecting to " + address + "."); }
             string pw = _password.Text;
-            int port = (int)_port.Value, buffer = (int)_buffer.Value;
+            int port = (int)_port.Value;
             string device = _devices[Math.Max(0, _device.SelectedIndex)].Id;
             try
             {
                 var c = await System.Threading.Tasks.Task.Run(() =>
-                    Client.Connect(address, port, pw, device, buffer, msg => BeginInvoke(() => Log(msg))));
-                c.Disconnected += why => BeginInvoke(() => Disconnect(why));
+                    Client.Connect(address, port, pw, device, msg => BeginInvoke(() => Log(msg))));
+                c.Disconnected += why => BeginInvoke(() => Disconnect(why, byUser: false));
                 _client = c;
                 _keys?.SetClient(c);
-                _pingTimer.Start();
-                Say("Connected. Press Control Shift Enter to control the remote PC.");
+                bool wasReconnecting = _reconnecting;
+                _reconnecting = false;
+                _retryTimer.Stop();
+                Say(wasReconnecting ? "Reconnected. Press Control Shift Enter to control the remote PC." : "Connected. Press Control Shift Enter to control the remote PC.");
             }
-            catch (Exception e) { Say("Could not connect: " + e.Message); }
+            catch (Exception e)
+            {
+                bool hopeless = e.Message.StartsWith("Wrong password") || e.Message.Contains("different TailRemote version");
+                if (_reconnecting && hopeless) StopReconnecting("Stopped reconnecting: " + e.Message);
+                else if (!quiet) Say("Could not connect: " + e.Message);
+            }
+            _connecting = false;
             _go.Enabled = true;
             UpdateButtons();
             UpdateTitle();
         }
 
-        private void Disconnect(string why)
+        private void Disconnect(string why, bool byUser)
         {
             if (_client == null) return;
             _keys?.SetClient(null);
             _client.Dispose();
             _client = null;
-            _pingTimer.Stop();
+            if (byUser) Say(why);
+            else
+            {
+                // Dropped, or the host restarted after an update: keep trying.
+                _reconnecting = true;
+                _retryTimer.Start();
+                Say(why + " Reconnecting.");
+            }
+            UpdateButtons();
+            UpdateTitle();
+        }
+
+        private void StopReconnecting(string why)
+        {
+            _reconnecting = false;
+            _retryTimer.Stop();
             Say(why);
             UpdateButtons();
             UpdateTitle();
+        }
+
+        private async void CheckForUpdates()
+        {
+            _update.Enabled = false;
+            Say("Checking for updates.");
+            string args = "";
+            try
+            {
+                var r = await Updater.CheckAsync();
+                if (r == null) { Say("TailRemote " + Updater.Current + " is the latest version."); return; }
+                string notes = r.Notes.Trim().Length > 0 ? r.Notes.Trim() : "No notes.";
+                var answer = MessageBox.Show(this, "Version " + r.Version + " is available. You have " + Updater.Current + "." +
+                    Environment.NewLine + Environment.NewLine + notes + Environment.NewLine + Environment.NewLine + "Update now? TailRemote restarts and carries on where it was.",
+                    "TailRemote update", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (answer != DialogResult.Yes) return;
+                Say("Downloading version " + r.Version + ".");
+                args = _host != null ? "--host" : _client != null || _reconnecting ? "--connect" : "";
+                SaveSettings();
+                // Let go of the port and the keyboard before the new copy starts.
+                _keys?.SetClient(null);
+                _client?.Dispose(); _client = null;
+                _host?.Dispose(); _host = null;
+                await Updater.InstallAsync(r, args);
+                Close();
+            }
+            catch (Exception e)
+            {
+                Say("Update failed: " + e.Message);
+                // Put back whatever was running before the update began.
+                if (args == "--host" && _host == null) StartHost();
+                else if (args == "--connect" && _client == null) Connect(quiet: false);
+            }
+            finally { if (!IsDisposed) _update.Enabled = true; }
         }
 
         private void StartupChanged()
@@ -258,6 +333,7 @@ namespace TailRemote
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             SaveSettings();
+            _retryTimer.Stop();
             _keys?.SetClient(null);
             _client?.Dispose();
             _host?.Dispose();

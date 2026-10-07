@@ -1,0 +1,66 @@
+name: release
+
+# Push a tag like v1.0.1 to build both architectures and publish a release.
+# Check for updates in the app reads the latest release from here.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'
+          if ($v -notmatch '^v\d+\.\d+\.\d+$') { $v = 'v0.0.0' }
+          "version=$($v.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($arch in 'arm64', 'x64') {
+            dotnet publish TailRemote.csproj -c Release -r "win-$arch" -o "out/$arch" -p:Version=${{ steps.ver.outputs.version }}
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            Copy-Item "out/$arch/TailRemote.exe" "dist/TailRemote-$arch.exe"
+          }
+          Get-ChildItem dist
+
+      - name: Self-test (x64)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/TailRemote-x64.exe -ArgumentList '--selftest' -PassThru -Wait
+          Get-Content "$env:TEMP/tailremote-selftest.txt"
+          exit $p.ExitCode
+
+      # This version's lines from CHANGES.txt: plain text, one change per line.
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          awk -v v="${{ steps.ver.outputs.version }}" '
+            $0 == v { f = 1; next }
+            /^[0-9]+[.][0-9]+[.][0-9]+$/ { f = 0 }
+            f && NF' CHANGES.txt > notes.txt
+          [ -s notes.txt ] || { echo "CHANGES.txt has no section for this version"; exit 1; }
+          cat notes.txt
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create '${{ github.ref_name }}' dist/TailRemote-arm64.exe dist/TailRemote-x64.exe --title "TailRemote ${{ steps.ver.outputs.version }}" --notes-file notes.txt

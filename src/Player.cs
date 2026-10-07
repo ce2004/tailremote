@@ -1,49 +1,72 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace TailRemote
 {
     /// <summary>
-    /// Plays the host's audio with as little delay as the network allows.
+    /// Plays the host's audio with as little delay as the network allows, and
+    /// works out for itself how little that is.
     ///
-    /// Packets are resampled to the device's rate as they arrive and kept in a
-    /// small jitter buffer. Playback starts once the buffer holds the chosen
-    /// number of milliseconds; if the buffer ever grows well past that (a burst
-    /// after a network stall, or clock drift), the excess is dropped so the
-    /// delay never creeps up.
+    /// Every packet's arrival is compared with when it should have arrived. The
+    /// worst lateness seen in the last 15 seconds sets the buffer: just enough
+    /// to ride it out, plus one packet and one device period. A rough patch
+    /// raises the buffer at once; when the network calms down it comes back
+    /// down over the following seconds.
+    ///
+    /// The buffer is steered to that size by playing up to half a percent
+    /// faster or slower, which nobody hears, never by cutting audio. Only a
+    /// pile-up after a long network stall is cut, because hearing the backlog
+    /// late would be worse.
+    ///
+    /// A lost packet fades the last sound out instead of clicking to silence,
+    /// and the next one fades back in.
     /// </summary>
     internal sealed class Player : IDisposable
     {
+        /// <summary>Device id that plays nothing (the self-test uses it).</summary>
+        public const string NoDevice = "-";
+
+        private const double PacketMs = Protocol.PacketFrames * 1000.0 / Protocol.AudioRate;
+        private const double MarginMs = 2;
+        private const int JitterBuckets = 15; // seconds of history
+
         private readonly string? _deviceId;
-        private readonly int _bufferMs;
         private readonly Action<string> _status;
         private volatile bool _stop;
         private readonly Thread _thread;
 
+        // Shared, under _gate.
         private readonly object _gate = new();
-        private readonly float[] _ring = new float[48000 * 4 * 2]; // 4 s of stereo at up to 96 kHz/2
+        private readonly float[] _ring = new float[192000 * 2 * 2]; // 2 s of stereo at up to 192 kHz
         private int _read, _count; // in floats
-        private bool _playing;
+        private bool _playing, _starved;
+        private double _avgMs;
+
         private volatile int _deviceRate;
-        private int _targetFloats, _maxFloats;
+        private double _periodMs = 10;
+        private double _speed; // read by the network thread
 
         // Network-thread state.
         private Resampler? _rs;
         private int _rsRate;
-        private uint _expect;
+        private uint _expect, _spurtSeq;
         private bool _haveSeq;
+        private double _ref;
+        private readonly double[] _jitter = new double[JitterBuckets];
+        private long _bucketSecond;
+        private double _extraMs;
+        private volatile float _targetMs = 20;
+        private bool _fadeIn;
         private float[] _scratch = new float[8192];
         private int _scratchLen;
         private readonly float[] _in = new float[Protocol.PacketFrames * 2];
+        private readonly float[] _last = new float[Protocol.PacketFrames * 2];
 
-        /// <summary>Device id that plays nothing (the self-test uses it).</summary>
-        public const string NoDevice = "-";
-
-        public Player(string? deviceId, int bufferMs, Action<string> status)
+        public Player(string? deviceId, Action<string> status)
         {
             _deviceId = deviceId;
-            _bufferMs = Math.Clamp(bufferMs, 5, 1000);
             _status = status;
             if (deviceId == NoDevice) _stop = true;
             _thread = new Thread(Run) { IsBackground = true, Name = "TailRemote playback", Priority = ThreadPriority.Highest };
@@ -56,30 +79,74 @@ namespace TailRemote
             _thread.Join(2000);
         }
 
-        /// <summary>Called from the network thread with one audio packet.</summary>
+        /// <summary>Audio delay right now: what is buffered plus the device, in ms. -1 when idle.</summary>
+        public int DelayMs
+        {
+            get { lock (_gate) return _playing ? (int)Math.Round(_avgMs + _periodMs) : -1; }
+        }
+
+        /// <summary>Called from the network thread with one packet; empty means a silent one.</summary>
         public void Push(uint seq, ReadOnlySpan<byte> pcm)
         {
             int rate = _deviceRate;
             if (rate == 0) return;
             if (_rs == null || _rsRate != rate) { _rs = new Resampler(Protocol.AudioRate, rate); _rsRate = rate; _haveSeq = false; }
 
-            _scratchLen = 0;
-            if (_haveSeq)
+            double now = Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
+            int diff = (int)(seq - _expect);
+            bool newSpurt = !_haveSeq || diff > 8 || diff < -200;
+            if (newSpurt)
             {
-                int diff = (int)(seq - _expect);
-                if (diff < 0) return; // late; its moment has passed
-                if (diff > 0 && diff <= 8)
-                {
-                    // Lost packets, or silence the host did not send: keep the timing.
-                    Array.Clear(_in);
-                    for (int i = 0; i < diff; i++) _rs.Process(_in, Collect);
-                }
+                _spurtSeq = seq;
+                _ref = now;
+                diff = 0;
+                _fadeIn = true;
             }
+
+            // How late this packet is, against the earliest any packet has been.
+            // The reference creeps later at 200 ppm so a host clock that runs
+            // slow is not mistaken for growing lateness.
+            double raw = now - (int)(seq - _spurtSeq) * PacketMs;
+            _ref = Math.Min(raw, _ref + PacketMs * 0.0002);
+            RecordJitter(now, raw - _ref);
+
+            lock (_gate)
+            {
+                if (_starved && !newSpurt && diff == 0) _extraMs = Math.Min(_extraMs + 3, 60); // ran dry mid-sound
+                _starved = false;
+            }
+            _extraMs *= 0.9997; // back down about 5% a second
+            UpdateTarget();
+
+            if (diff < 0) return; // late; its moment has passed
             _haveSeq = true;
             _expect = seq + 1;
 
-            for (int i = 0; i < _in.Length; i++)
-                _in[i] = BitConverter.ToInt16(pcm.Slice(i * 2, 2)) / 32768f;
+            _rs.SetSpeed(Volatile.Read(ref _speed));
+            _scratchLen = 0;
+            for (int lost = 0; lost < diff; lost++)
+            {
+                // Lost: fade the last packet out over the first gap, then silence.
+                for (int i = 0; i < _in.Length; i += 2)
+                {
+                    float g = lost == 0 ? 1f - (float)i / _in.Length : 0f;
+                    _in[i] = _last[i] * g;
+                    _in[i + 1] = _last[i + 1] * g;
+                }
+                _rs.Process(_in, Collect);
+                _fadeIn = true;
+            }
+
+            if (pcm.IsEmpty) Array.Clear(_in);
+            else
+                for (int i = 0; i < _in.Length; i++)
+                    _in[i] = BitConverter.ToInt16(pcm.Slice(i * 2, 2)) / 32768f;
+            if (_fadeIn)
+            {
+                for (int i = 0; i < 128; i += 2) { float g = i / 128f; _in[i] *= g; _in[i + 1] *= g; }
+                _fadeIn = false;
+            }
+            Array.Copy(_in, _last, _in.Length);
             _rs.Process(_in, Collect);
 
             lock (_gate)
@@ -92,6 +159,27 @@ namespace TailRemote
                     _count++;
                 }
             }
+        }
+
+        private void RecordJitter(double nowMs, double lateMs)
+        {
+            long sec = (long)(nowMs / 1000);
+            if (sec != _bucketSecond)
+            {
+                // Clear the buckets for the seconds that went by.
+                for (long s = Math.Max(_bucketSecond + 1, sec - JitterBuckets + 1); s <= sec; s++)
+                    _jitter[s % JitterBuckets] = 0;
+                _bucketSecond = sec;
+            }
+            int b = (int)(sec % JitterBuckets);
+            if (lateMs > _jitter[b]) _jitter[b] = Math.Min(lateMs, 400);
+        }
+
+        private void UpdateTarget()
+        {
+            double worst = 0;
+            foreach (double j in _jitter) worst = Math.Max(worst, j);
+            _targetMs = (float)(worst + _extraMs + PacketMs / 2 + MarginMs);
         }
 
         private void Collect(float l, float r)
@@ -130,16 +218,20 @@ namespace TailRemote
             var client = Wasapi.Activate(dev);
             client.GetMixFormat(out IntPtr fmtPtr);
             var fmt = Wasapi.ReadFormat(fmtPtr);
+            double periodMs;
             try
             {
                 // The smallest engine period the driver offers (often 2.7 ms or less).
                 client.GetSharedModeEnginePeriod(fmtPtr, out _, out _, out uint minFrames, out _);
                 client.InitializeSharedAudioStream(Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, minFrames, fmtPtr, IntPtr.Zero);
+                periodMs = minFrames * 1000.0 / fmt.Rate;
             }
             catch
             {
                 client = Wasapi.Activate(dev);
                 client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, fmtPtr, IntPtr.Zero);
+                client.GetDevicePeriod(out long def, out _);
+                periodMs = def / 10000.0;
             }
             Marshal.FreeCoTaskMem(fmtPtr);
 
@@ -152,10 +244,8 @@ namespace TailRemote
 
             lock (_gate)
             {
-                _targetFloats = (int)((long)fmt.Rate * _bufferMs / 1000) * 2;
-                // Allow two packets' worth of wobble above the target before trimming.
-                _maxFloats = _targetFloats + (int)((long)fmt.Rate * 12 / 1000) * 2;
-                _read = 0; _count = 0; _playing = false;
+                _read = 0; _count = 0; _playing = false; _starved = false;
+                _periodMs = periodMs;
             }
             _deviceRate = fmt.Rate;
 
@@ -198,15 +288,30 @@ namespace TailRemote
         {
             int ch = fmt.Channels;
             int cap = _ring.Length;
+            double floatsPerMs = fmt.Rate * 2 / 1000.0;
             lock (_gate)
             {
-                if (!_playing && _count >= _targetFloats) _playing = true;
-                if (_playing && _count > _maxFloats)
+                double target = _targetMs + _periodMs;
+                double levelMs = _count / floatsPerMs;
+                if (!_playing && levelMs >= target + PacketMs / 2) { _playing = true; _avgMs = levelMs; }
+
+                if (_playing)
                 {
-                    int drop = _count - _targetFloats;
-                    _read = (_read + drop) % cap;
-                    _count -= drop;
+                    _avgMs += 0.02 * (levelMs - _avgMs);
+                    // Steer toward the target: 10 ms off plays 0.5% fast or slow.
+                    double speed = Math.Clamp((_avgMs - target) * 0.0005, -0.005, 0.005);
+                    Volatile.Write(ref _speed, speed);
+
+                    // A pile-up after a stall: cut straight back to the target.
+                    if (levelMs > target + 80)
+                    {
+                        int drop = (int)((levelMs - target) * floatsPerMs) & ~1;
+                        _read = (_read + drop) % cap;
+                        _count -= drop;
+                        _avgMs = target;
+                    }
                 }
+
                 for (int f = 0; f < frames; f++)
                 {
                     float l = 0, r = 0;
@@ -218,7 +323,7 @@ namespace TailRemote
                             _read = (_read + 2) % cap;
                             _count -= 2;
                         }
-                        else _playing = false; // ran dry: wait for the buffer to refill
+                        else { _playing = false; _starved = true; } // ran dry: refill to the target
                     }
                     if (fmt.IsFloat && fmt.Bits == 32)
                     {

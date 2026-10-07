@@ -21,6 +21,8 @@ namespace TailRemote
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
         public int LastPingMs { get; private set; } = -1;
+        /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
+        public int AudioDelayMs => _player.DelayMs;
 
         private Client(TcpClient tcp, NetworkStream stream, UdpClient udp, byte[] token, Player player)
         {
@@ -28,7 +30,7 @@ namespace TailRemote
         }
 
         /// <summary>Connects and checks the password; throws with a readable message on failure.</summary>
-        public static Client Connect(string address, int port, string password, string? deviceId, int bufferMs, Action<string> status)
+        public static Client Connect(string address, int port, string password, string? deviceId, Action<string> status)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
             tcp.Client.DualMode = true;
@@ -48,7 +50,10 @@ namespace TailRemote
             {
                 byte[] hello = new byte[20];
                 Protocol.ReadExactly(stream, hello);
-                if (!hello.AsSpan(0, 4).SequenceEqual(Protocol.Magic)) throw new InvalidOperationException("That is not a TailRemote host.");
+                if (!hello.AsSpan(0, 4).SequenceEqual(Protocol.Magic))
+                    throw new InvalidOperationException(hello.AsSpan(0, 3).SequenceEqual("TRM"u8)
+                        ? "The other PC has a different TailRemote version. Update both to the latest."
+                        : "That is not a TailRemote host.");
                 byte[] answer = new byte[36];
                 Protocol.Magic.CopyTo(answer, 0);
                 Protocol.Proof(password, hello[4..]).CopyTo(answer, 4);
@@ -68,7 +73,7 @@ namespace TailRemote
                 Host.IgnoreUdpResets(udp.Client);
                 udp.Connect(hostEp.Address, port);
 
-                var player = new Player(deviceId, bufferMs, status);
+                var player = new Player(deviceId, status);
                 var c = new Client(tcp, stream, udp, token, player);
                 c.Status += status;
                 c.Start();
@@ -158,6 +163,8 @@ namespace TailRemote
                 catch { if (_closed) return; continue; }
                 if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio)
                     _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5));
+                else if (d.Length == 5 && d[0] == Protocol.UdpSilence)
+                    _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
             }
         }
 

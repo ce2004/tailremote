@@ -13,7 +13,6 @@ namespace TailRemote
         public string Address { get; set; } = "";
         public int Port { get; set; } = Protocol.DefaultPort;
         public string PasswordEnc { get; set; } = "";
-        public int BufferMs { get; set; } = 30;
         public string OutputDevice { get; set; } = "";
         public bool TailscaleOnly { get; set; } = true;
 

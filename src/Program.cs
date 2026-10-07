@@ -23,9 +23,16 @@ namespace TailRemote
 
             if (args.Length == 1 && args[0] == "--selftest") return SelfTest();
 
+            int after = Array.IndexOf(args, "--after-update");
+            if (after >= 0 && after + 1 < args.Length && int.TryParse(args[after + 1], out int oldPid))
+                Updater.FinishUpdate(oldPid);
+
             Speech.Init();
             ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm(autoHost: Array.IndexOf(args, "--host") >= 0));
+            Application.Run(new MainForm(
+                autoHost: Array.IndexOf(args, "--host") >= 0,
+                autoConnect: Array.IndexOf(args, "--connect") >= 0,
+                updated: after >= 0));
             return 0;
         }
 
@@ -51,9 +58,9 @@ namespace TailRemote
             var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
             string Dump() => string.Join(" | ", log);
             using var host = new Host(47999, "secret", true, log.Enqueue);
-            try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, 30, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
+            try { Client.Connect("127.0.0.1", 47999, "nope", Player.NoDevice, log.Enqueue).Dispose(); return Fail("wrong password accepted"); }
             catch (InvalidOperationException e) when (e.Message == "Wrong password.") { }
-            using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, 30, log.Enqueue);
+            using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, log.Enqueue);
             for (int i = 0; i < 40 && c.LastPingMs < 0; i++) System.Threading.Thread.Sleep(100);
             if (c.LastPingMs < 0) return Fail("no ping reply. " + Dump());
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump());

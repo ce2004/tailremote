@@ -14,14 +14,14 @@ namespace TailRemote
     /// in order. UDP carries the audio: a late audio packet is worthless, so it is
     /// never waited for or resent. Tailscale already encrypts both.
     ///
-    /// Handshake: host sends "TRM1" + 16-byte nonce. Client answers "TRM1" +
+    /// Handshake: host sends "TRM2" + 16-byte nonce. Client answers "TRM2" +
     /// HMAC-SHA256(password, nonce). Host answers 1 + 8-byte session token, or 0.
     /// After that both sides send frames of [type][payload].
     /// </summary>
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM1"u8.ToArray();
+        public static readonly byte[] Magic = "TRM2"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -34,6 +34,7 @@ namespace TailRemote
         // UDP
         public const byte UdpHello = 0xA0;  // token[8], client to host, every second
         public const byte UdpAudio = 0xA1;  // u32 sequence, 256 stereo int16 frames
+        public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
 
         public const int AudioRate = 44100;
         public const int PacketFrames = 256; // 5.8 ms; 1029 bytes, under Tailscale's 1280 MTU

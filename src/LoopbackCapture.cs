@@ -7,11 +7,11 @@ namespace TailRemote
     /// <summary>
     /// Records what the host plays (WASAPI loopback on the default output),
     /// converts it to 16-bit 44.1 kHz stereo and hands out 256-frame packets.
-    /// All-silent packets are counted but not sent, so a quiet PC costs nothing.
+    /// All-silent packets become 5-byte markers, then stop, so a quiet PC costs nothing.
     /// </summary>
     internal sealed class LoopbackCapture : IDisposable
     {
-        private readonly Action<uint, short[]> _onPacket;
+        private readonly Action<uint, short[]?> _onPacket;
         private readonly Action<string> _status;
         private volatile bool _stop;
         private readonly Thread _thread;
@@ -20,7 +20,7 @@ namespace TailRemote
         private int _fill;
         private uint _seq;
 
-        public LoopbackCapture(Action<uint, short[]> onPacket, Action<string> status)
+        public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status)
         {
             _onPacket = onPacket;
             _status = status;
@@ -124,9 +124,14 @@ namespace TailRemote
             uint seq = _seq++;
             foreach (short s in _packet)
             {
-                if (s != 0) { _onPacket(seq, _packet); return; }
+                if (s != 0) { _silentRun = 0; _onPacket(seq, _packet); return; }
             }
+            // Silence: a 5-byte marker for the first second, so the player can
+            // tell silence from a lost packet; after that, nothing at all.
+            if (_silentRun++ < 172) _onPacket(seq, null);
         }
+
+        private int _silentRun;
 
         private static short ToShort(float f)
         {

@@ -1,0 +1,7 @@
+1.0.0
+First release: control another Windows PC over Tailscale with your whole keyboard, and hear everything it plays in 16-bit 44.1 kHz.
+Control Shift Enter switches between the remote PC and this one.
+The audio buffer sets itself: it measures your connection and keeps the delay as low as it can without breaking up.
+A lost audio packet fades out smoothly instead of clicking.
+If the connection drops, TailRemote reconnects on its own.
+Check for updates downloads the new version and restarts where you left off.

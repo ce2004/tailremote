@@ -11,8 +11,8 @@ namespace TailRemote
         private const int Half = 16;
         private const int Phases = 512;
 
-        private readonly bool _passthrough;
-        private readonly double _step;
+        private readonly double _baseStep;
+        private double _step;
         private readonly float[] _table; // (Phases + 1) rows of 2 * Half taps
         private float[] _buf = new float[8192]; // interleaved stereo frames
         private int _frames;
@@ -20,8 +20,7 @@ namespace TailRemote
 
         public Resampler(int inRate, int outRate)
         {
-            _passthrough = inRate == outRate;
-            _step = (double)inRate / outRate;
+            _baseStep = _step = (double)inRate / outRate;
             double fc = Math.Min(1.0, (double)outRate / inRate) * 0.92;
             _table = new float[(Phases + 1) * 2 * Half];
             double i0b = BesselI0(8.0);
@@ -46,15 +45,16 @@ namespace TailRemote
             _pos = Half;
         }
 
+        /// <summary>
+        /// Plays slightly faster (positive) or slower (negative), as a fraction:
+        /// 0.005 is half a percent, which nobody hears. This is how the player
+        /// steers its buffer back to target without ever cutting audio.
+        /// </summary>
+        public void SetSpeed(double adjust) => _step = _baseStep * (1 + adjust);
+
         /// <summary>Feeds interleaved stereo frames; calls emit for each output frame.</summary>
         public void Process(ReadOnlySpan<float> stereo, Action<float, float> emit)
         {
-            if (_passthrough)
-            {
-                for (int i = 0; i + 1 < stereo.Length; i += 2) emit(stereo[i], stereo[i + 1]);
-                return;
-            }
-
             int add = stereo.Length / 2;
             if ((_frames + add) * 2 > _buf.Length) Array.Resize(ref _buf, (_frames + add) * 4);
             stereo.CopyTo(_buf.AsSpan(_frames * 2));
