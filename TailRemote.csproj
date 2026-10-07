@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>TailRemote</AssemblyName>
+    <RootNamespace>TailRemote</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>1.0.0</Version>
+    <!-- ARM64 by default; "dotnet publish -r win-x64" builds the x64 copy. -->
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- One self-contained file, so a fresh cloud PC needs no .NET install. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+  </ItemGroup>
+
+  <!-- The NVDA controller client must match this process's architecture. -->
+  <ItemGroup>
+    <None Include="native\win-arm64\nvdaControllerClientArm64.dll" Condition="'$(RuntimeIdentifier)' == 'win-arm64'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>nvdaControllerClientArm64.dll</Link>
+    </None>
+    <None Include="native\win-x64\nvdaControllerClient64.dll" Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>nvdaControllerClient64.dll</Link>
+    </None>
+    <EmbeddedResource Include="native\NVDA-controllerClient-LICENSE.txt">
+      <LogicalName>NVDA-controllerClient-LICENSE.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
