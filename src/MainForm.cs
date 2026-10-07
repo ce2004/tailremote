@@ -337,7 +337,7 @@ namespace TailRemote
                 if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
                 int audio = _client.AudioDelayMs;
                 if (audio >= 0) t += ", audio " + (audio + Math.Max(0, _client.LastPingMs) / 2) + " ms";
-                if (_client.AudioQuality > 0) t += ", " + (16 - _client.AudioQuality) + "-bit for a slow connection";
+                if (_client.ReducedSound is string reduced) t += ", sound at " + reduced + " for a slow connection";
             }
             else if (_reconnecting) t = "TailRemote - reconnecting";
             else t = _host != null ? "TailRemote - hosting" : "TailRemote";

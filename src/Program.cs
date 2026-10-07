@@ -154,6 +154,21 @@ namespace TailRemote
                             }
                         }
                 lossless += ", new coder " + (packed2 * 100 / rawBytes) + "%";
+
+                // Each lower rate: a voice-like tone survives (same pitch), exactly lossless at that rate.
+                for (int level = 1; level < Protocol.Rates.Length; level++)
+                {
+                    int rate = Protocol.Rates[level];
+                    int n = Protocol.PacketFrames * rate / Protocol.AudioRate;
+                    short[] low = new short[n * 2];
+                    for (int i = 0; i < n; i++) low[i * 2] = low[i * 2 + 1] = (short)(9000 * Math.Sin(2 * Math.PI * 440 * i / rate));
+                    int len = Lossless2.EncodeRate(low, n, level, packed);
+                    if (len <= 0 || !Lossless2.DecodeRate(packed.AsSpan(0, len), back, out int gotLevel, out int gotFrames) || gotLevel != level || gotFrames != n)
+                        return Fail("rate " + rate + ": did not round-trip");
+                    for (int i = 0; i < n * 2; i++)
+                        if (BitConverter.ToInt16(back, i * 2) != low[i]) return Fail("rate " + rate + ": sample changed");
+                    if (level == Protocol.Rates.Length - 1) lossless += ", 8 kHz " + (len * 100 / (Protocol.PacketFrames * 4)) + "%";
+                }
             }
 
             // Audio encryption: a sealed packet opens on the other side; a changed one does not.

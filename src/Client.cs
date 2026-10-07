@@ -31,7 +31,7 @@ namespace TailRemote
         private FileChannel? _files;
         private readonly byte[] _unpacked = new byte[Protocol.PacketFrames * 4];
 
-        /// <summary>0 = lossless; 1 to 4 = bits dropped while the connection struggles.</summary>
+        /// <summary>0 = full quality; above that, a lower sample rate (or, with a 1.5.0 host, fewer bits) while the connection struggles.</summary>
         public int AudioQuality { get; private set; }
         private int _cleanSeconds;
         private long _lastQualityChange;
@@ -185,6 +185,11 @@ namespace TailRemote
 
         public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
 
+        /// <summary>How the sound is reduced right now, for the title; null at full quality.</summary>
+        public string? ReducedSound => AudioQuality == 0 ? null
+            : (_peerFeatures & Protocol.FeatureRate) != 0 ? (Protocol.Rates[AudioQuality] / 1000.0).ToString("0.#") + " kHz"
+            : (16 - AudioQuality) + "-bit";
+
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
         public bool CanSecureAttention => !ListenOnly && (_peerFeatures & Protocol.FeatureSecureAttention) != 0;
@@ -251,6 +256,9 @@ namespace TailRemote
                     _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
                 else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence && _link.OpenAudio(d, d.Length))
                     _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
+                else if (d[0] == Protocol.UdpPackedRate && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
+                         && _link.OpenAudio(d, d.Length) && Lossless2.DecodeRate(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked, out int level, out int frames))
+                    _player.Push(BitConverter.ToUInt32(d, 1), _unpacked.AsSpan(0, frames * 4), frames, Protocol.Rates[level]);
                 else if (d[0] == Protocol.UdpPacked2 && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
                          && _link.OpenAudio(d, d.Length) && Lossless2.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
                     _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
@@ -276,7 +284,8 @@ namespace TailRemote
             if (struggling)
             {
                 _cleanSeconds = 0;
-                if (q < 4 && now - _lastQualityChange >= 2000) q++;
+                int lowest = (_peerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4;
+                if (q < lowest && now - _lastQualityChange >= 2000) q++;
             }
             else if (++_cleanSeconds >= 10 && q > 0) { q--; _cleanSeconds = 0; }
             if (q == AudioQuality) return;

@@ -406,7 +406,8 @@ namespace TailRemote
                         catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
-                        s.Quality = Math.Min((int)m[1], 4);
+                        // Sample-rate steps for PCs that understand them, bit steps for 1.5.0.
+                        s.Quality = Math.Min((int)m[1], (s.PeerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4);
                         break;
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
@@ -450,6 +451,43 @@ namespace TailRemote
         private readonly byte[][] _packed2 = { new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4], new byte[Protocol.PacketFrames * 4] };
         private readonly int[] _packed2Length = new int[5];
 
+        // Lower sample rates: one streaming downsampler per rate, so there is no seam between packets.
+        private readonly Resampler?[] _down = new Resampler?[Protocol.Rates.Length];
+        private readonly uint[] _downNext = new uint[Protocol.Rates.Length];
+        private readonly short[][] _downPcm = Array.ConvertAll(Protocol.Rates, _ => new short[Protocol.PacketFrames * 2 + 16]);
+        private readonly int[] _downFrames = new int[Protocol.Rates.Length];
+        private readonly byte[][] _rated = Array.ConvertAll(Protocol.Rates, _ => new byte[Protocol.PacketFrames * 4]);
+        private readonly int[] _ratedLength = new int[Protocol.Rates.Length];
+        private readonly float[] _downIn = new float[Protocol.PacketFrames * 2];
+        private int _downLevel;
+        private Action<float, float>? _downEmit;
+
+        private void DownEmit(float l, float r)
+        {
+            int f = _downFrames[_downLevel];
+            if (f >= Protocol.PacketFrames) return;
+            short[] d = _downPcm[_downLevel];
+            d[f * 2] = (short)Math.Clamp(MathF.Round(l * 32767f), -32768f, 32767f);
+            d[f * 2 + 1] = (short)Math.Clamp(MathF.Round(r * 32767f), -32768f, 32767f);
+            _downFrames[_downLevel] = f + 1;
+        }
+
+        /// <summary>This packet at a lower rate, packed once for everyone on that rate. -1 if it would not pack.</summary>
+        private int Rated(int level, uint seq, short[] pcm)
+        {
+            if (_ratedLength[level] != -2) return _ratedLength[level];
+            var rs = _down[level] ??= new Resampler(Protocol.AudioRate, Protocol.Rates[level]);
+            if (_downNext[level] != seq) rs.Reset(); // not used for a while: start clean
+            _downNext[level] = seq + 1;
+            for (int i = 0; i < _downIn.Length; i++) _downIn[i] = pcm[i] / 32768f;
+            _downLevel = level;
+            _downFrames[level] = 0;
+            rs.Process(_downIn, _downEmit ??= DownEmit);
+            int n = _downFrames[level];
+            _ratedLength[level] = Lossless2.EncodeRate(_downPcm[level].AsSpan(0, n * 2), n, level, _rated[level]);
+            return _ratedLength[level];
+        }
+
         private void SendAudio(uint seq, short[]? pcm)
         {
             var all = AllSessions();
@@ -458,6 +496,7 @@ namespace TailRemote
             int packedLength = pcm != null && Array.Exists(all, x => (x.PeerFeatures & (Protocol.FeatureLossless | Protocol.FeatureLossless2)) == Protocol.FeatureLossless)
                 ? Lossless.Encode(pcm, _packed) : -1;
             Array.Fill(_packed2Length, -2); // -2: not packed yet at that quality; each is packed once, for all who want it
+            Array.Fill(_ratedLength, -2);
             foreach (var s in all)
             {
                 var to = s.AudioTo;
@@ -465,15 +504,24 @@ namespace TailRemote
                 byte[] a = s.Audio; // each session seals its own copy with its own keys
                 BitConverter.TryWriteBytes(a.AsSpan(1), seq);
                 int payload;
+                bool byRate = (s.PeerFeatures & Protocol.FeatureRate) != 0;
                 int q = s.Quality;
-                if (pcm != null && (s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[q] == -2)
-                    _packed2Length[q] = Lossless2.Encode(pcm, q, _packed2[q]);
+                int bits = byRate ? 0 : Math.Min(q, 4); // a rate-capable PC steps by rate, never by bits
+                if (pcm != null && (s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[bits] == -2)
+                    _packed2Length[bits] = Lossless2.Encode(pcm, bits, _packed2[bits]);
+                int ratedLength = pcm != null && byRate && q > 0 ? Rated(q, seq, pcm) : -1;
                 if (pcm == null) { a[0] = Protocol.UdpSilence; payload = 0; }
-                else if ((s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[q] > 0)
+                else if (ratedLength > 0)
+                {
+                    a[0] = Protocol.UdpPackedRate;
+                    payload = ratedLength;
+                    _rated[q].AsSpan(0, payload).CopyTo(a.AsSpan(5));
+                }
+                else if ((s.PeerFeatures & Protocol.FeatureLossless2) != 0 && _packed2Length[bits] > 0)
                 {
                     a[0] = Protocol.UdpPacked2;
-                    payload = _packed2Length[q];
-                    _packed2[q].AsSpan(0, payload).CopyTo(a.AsSpan(5));
+                    payload = _packed2Length[bits];
+                    _packed2[bits].AsSpan(0, payload).CopyTo(a.AsSpan(5));
                 }
                 else if (packedLength > 0 && (s.PeerFeatures & Protocol.FeatureLossless) != 0)
                 {

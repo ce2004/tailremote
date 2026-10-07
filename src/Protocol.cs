@@ -56,6 +56,7 @@ namespace TailRemote
         public const byte UdpSilence = 0xA2; // u32 sequence: this packet was silent
         public const byte UdpPacked = 0xA3;  // u32 sequence, losslessly packed audio (Lossless.cs)
         public const byte UdpPacked2 = 0xA4; // u32 sequence, Lossless2 (smaller; carries its quality)
+        public const byte UdpPackedRate = 0xA5; // u32 sequence, Lossless2 at a lower sample rate (carries rate and length)
 
         // Roles
         public const byte RoleControl = 1, RoleListen = 2;
@@ -67,9 +68,16 @@ namespace TailRemote
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
         public const uint FeatureLossless2 = 32;
+        public const uint FeatureRate = 64; // understands the lower sample rates below
+
+        /// <summary>
+        /// The steps down for a struggling connection: every one is lossless at
+        /// its own rate, and each packet still covers the same 5.8 ms.
+        /// </summary>
+        public static readonly int[] Rates = { 44100, 32000, 24000, 16000, 11025, 8000 };
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart | FeatureLossless2;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureLossless | FeatureRestart | FeatureLossless2 | FeatureRate;
 
         public const int MaxClipboardChars = 1_000_000;
 

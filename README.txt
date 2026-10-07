@@ -39,7 +39,7 @@ Settings in the main window
 - Output device: where the remote PC's sound plays here.
 
 How it keeps delay down
-- Audio is 16-bit 44.1 kHz stereo, packed losslessly like FLAC: well under half of the 1.4 megabits per second raw sound would take, and on a struggling connection it drops the finest detail for a while instead of lagging, nothing when it is silent, and well under a millisecond of delay.
+- Audio is 16-bit 44.1 kHz stereo, packed losslessly like FLAC: well under half of the 1.4 megabits per second raw sound would take, and on a struggling connection it steps the sample rate down, as far as 8 kHz, instead of lagging, nothing when it is silent, and well under a millisecond of delay.
 - Audio goes over UDP in 5.8 millisecond packets and is never waited for or resent.
 - The buffer sets itself. TailRemote measures how late packets arrive and holds just enough audio to cover the worst of the last 15 seconds. When the network gets rough it grows at once; when it calms down it shrinks again.
 - The buffer is steered by playing up to half a percent faster or slower, which you cannot hear, so the audio is never cut to catch up. Only a pile-up after a long network stall is cut.

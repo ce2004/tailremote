@@ -65,6 +65,18 @@ namespace TailRemote
         private float[] _scratch = new float[8192];
         private int _scratchLen;
         private Action<float, float>? _collect; // made once, not per packet
+        private int _rsIn, _lastFrames;
+        private double _silenceCarry;
+
+        /// <summary>Frames in one 5.8 ms packet at this rate, carrying the fraction so time never drifts.</summary>
+        private int PacketAt(int inRate)
+        {
+            if (inRate == Protocol.AudioRate) return Protocol.PacketFrames;
+            double exact = Protocol.PacketFrames * (double)inRate / Protocol.AudioRate + _silenceCarry;
+            int n = (int)exact;
+            _silenceCarry = exact - n;
+            return n;
+        }
         private readonly float[] _in = new float[Protocol.PacketFrames * 2];
         private readonly float[] _last = new float[Protocol.PacketFrames * 2];
 
@@ -112,11 +124,25 @@ namespace TailRemote
         }
 
         /// <summary>Called from the network thread with one packet; empty means a silent one.</summary>
-        public void Push(uint seq, ReadOnlySpan<byte> pcm)
+        /// <summary>
+        /// One packet: always 5.8 ms of sound, at inRate (lower while the
+        /// connection struggles), straight to the device's rate in one step.
+        /// Empty pcm means a silent packet.
+        /// </summary>
+        public void Push(uint seq, ReadOnlySpan<byte> pcm, int frames = Protocol.PacketFrames, int inRate = Protocol.AudioRate)
         {
             int rate = _deviceRate;
             if (rate == 0) return;
-            if (_rs == null || _rsRate != rate) { _rs = new Resampler(Protocol.AudioRate, rate); _rsRate = rate; _haveSeq = false; }
+            if (_rs == null || _rsRate != rate || _rsIn != inRate)
+            {
+                bool rateChanged = _rs != null && _rsRate == rate;
+                _rs = new Resampler(inRate, rate);
+                _rsRate = rate;
+                _rsIn = inRate;
+                _lastFrames = 0; // the old rate's last packet cannot stand in for a lost one
+                if (!rateChanged) _haveSeq = false;
+                _fadeIn = true;
+            }
 
             double now = Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
             int diff = (int)(seq - _expect);
@@ -154,28 +180,34 @@ namespace TailRemote
             _scratchLen = 0;
             for (int lost = 0; lost < diff; lost++)
             {
-                // Lost: fade the last packet out over the first gap, then silence.
-                for (int i = 0; i < _in.Length; i += 2)
+                // Lost: fade the last packet out over the first gap, then silence,
+                // always one packet's worth of time at the current rate.
+                int n = lost == 0 && _lastFrames > 0 ? _lastFrames : PacketAt(inRate);
+                for (int i = 0; i < n * 2; i += 2)
                 {
-                    float g = lost == 0 ? 1f - (float)i / _in.Length : 0f;
+                    float g = lost == 0 && _lastFrames > 0 ? 1f - (float)i / (n * 2) : 0f;
                     _in[i] = _last[i] * g;
                     _in[i + 1] = _last[i + 1] * g;
                 }
-                _rs.Process(_in, _collect ??= Collect);
+                _rs.Process(_in.AsSpan(0, n * 2), _collect ??= Collect);
                 _fadeIn = true;
             }
 
-            if (pcm.IsEmpty) Array.Clear(_in);
+            if (pcm.IsEmpty) frames = PacketAt(inRate);
+            var block = _in.AsSpan(0, frames * 2);
+            if (pcm.IsEmpty) block.Clear();
             else
-                for (int i = 0; i < _in.Length; i++)
-                    _in[i] = BitConverter.ToInt16(pcm.Slice(i * 2, 2)) / 32768f;
+                for (int i = 0; i < block.Length; i++)
+                    block[i] = BitConverter.ToInt16(pcm.Slice(i * 2, 2)) / 32768f;
             if (_fadeIn)
             {
-                for (int i = 0; i < 128; i += 2) { float g = i / 128f; _in[i] *= g; _in[i + 1] *= g; }
+                int fade = Math.Min(block.Length, 128);
+                for (int i = 0; i < fade; i += 2) { float g = (float)i / fade; block[i] *= g; block[i + 1] *= g; }
                 _fadeIn = false;
             }
-            Array.Copy(_in, _last, _in.Length);
-            _rs.Process(_in, _collect ??= Collect);
+            block.CopyTo(_last);
+            _lastFrames = frames;
+            _rs.Process(block, _collect ??= Collect);
 
             lock (_gate)
             {

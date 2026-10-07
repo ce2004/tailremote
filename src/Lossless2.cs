@@ -19,17 +19,38 @@ namespace TailRemote
     internal static class Lossless2
     {
         private const int Frames = Protocol.PacketFrames;
-        private const int Parts = 8, PartLen = Frames / Parts;
+        /// <summary>Rice slices: 8 for a full packet, fewer for the short packets of a low sample rate.</summary>
+        private static int Parts(int n) => n >= 128 ? 8 : n >= 64 ? 4 : 2;
         private const int Escape = 24, EscapeBits = 22;
         private const int MaxLpc = 12, CoefBits = 13;
         private static readonly int[] LpcOrders = { 4, 8, 12 };
 
-        /// <summary>Packs one packet; returns the length, or -1 if it would not beat raw.</summary>
+        /// <summary>Packs one 44.1 kHz packet (the 1.5.0 format); returns the length, or -1 if it would not beat raw.</summary>
         public static int Encode(short[] pcm, int quality, Span<byte> dst)
         {
-            Span<int> l = stackalloc int[Frames], r = stackalloc int[Frames], m = stackalloc int[Frames], sd = stackalloc int[Frames];
+            var w = new BitWriter(dst[..Math.Min(dst.Length, Frames * 4 - 1)]);
+            w.Write((uint)quality, 3);
+            return Core(pcm, Frames, quality, ref w);
+        }
+
+        /// <summary>
+        /// Packs a packet at one of the lower sample rates (Protocol.Rates), any
+        /// length up to 256 frames: [rate level 3][frames 9] then the same coding.
+        /// </summary>
+        public static int EncodeRate(ReadOnlySpan<short> pcm, int frames, int rateLevel, Span<byte> dst)
+        {
+            var w = new BitWriter(dst[..Math.Min(dst.Length, frames * 4 - 1)]);
+            w.Write((uint)rateLevel, 3);
+            w.Write((uint)frames, 9);
+            return Core(pcm, frames, 0, ref w);
+        }
+
+        private static int Core(ReadOnlySpan<short> pcm, int n, int quality, ref BitWriter w)
+        {
+            if (n < 4) return -1;
+            Span<int> l = stackalloc int[n], r = stackalloc int[n], m = stackalloc int[n], sd = stackalloc int[n];
             int half = quality > 0 ? 1 << (quality - 1) : 0;
-            for (int i = 0; i < Frames; i++)
+            for (int i = 0; i < n; i++)
             {
                 l[i] = Math.Clamp((pcm[i * 2] + half) >> quality, short.MinValue >> quality, short.MaxValue >> quality);
                 r[i] = Math.Clamp((pcm[i * 2 + 1] + half) >> quality, short.MinValue >> quality, short.MaxValue >> quality);
@@ -37,17 +58,14 @@ namespace TailRemote
                 sd[i] = l[i] - r[i];
             }
 
-            Span<int> scratch = stackalloc int[Frames];
-            var pl = Plan(l, scratch); var pr = Plan(r, scratch); var pm = Plan(m, scratch); var ps = Plan(sd, scratch);
+            Span<int> scratch = stackalloc int[n];
+            var pl = Plan(l, scratch); var pr = Plan(r, scratch); var pm = Plan(m, scratch); var ps = Plan(sd, scratch); // scratch is n long
             long lr = pl.Bits + pr.Bits, ls = pl.Bits + ps.Bits, rs = pr.Bits + ps.Bits, ms = pm.Bits + ps.Bits;
             int mode = 0; long best = lr;
             if (ls < best) { best = ls; mode = 1; }
             if (rs < best) { best = rs; mode = 2; }
             if (ms < best) { best = ms; mode = 3; }
 
-            int limit = Math.Min(dst.Length, Frames * 4 - 1);
-            var w = new BitWriter(dst[..limit]);
-            w.Write((uint)quality, 3);
             w.Write((uint)mode, 2);
             switch (mode)
             {
@@ -62,11 +80,27 @@ namespace TailRemote
         /// <summary>Unpacks into raw 16-bit little-endian stereo; false if the data is not valid.</summary>
         public static bool Decode(ReadOnlySpan<byte> src, Span<byte> pcmBytes)
         {
-            Span<int> a = stackalloc int[Frames], b = stackalloc int[Frames];
             var rd = new BitReader(src);
-            int quality = (int)rd.Read(3), mode = (int)rd.Read(2);
-            if (quality > 4 || !ReadChannel(ref rd, a) || !ReadChannel(ref rd, b)) return false;
-            for (int i = 0; i < Frames; i++)
+            int quality = (int)rd.Read(3);
+            return quality <= 4 && DecodeCore(ref rd, Frames, quality, pcmBytes);
+        }
+
+        /// <summary>Unpacks a lower-rate packet: its rate level and frame count, and the 16-bit samples.</summary>
+        public static bool DecodeRate(ReadOnlySpan<byte> src, Span<byte> pcmBytes, out int rateLevel, out int frames)
+        {
+            var rd = new BitReader(src);
+            rateLevel = (int)rd.Read(3);
+            frames = (int)rd.Read(9);
+            if (rateLevel >= Protocol.Rates.Length || frames < 4 || frames > Frames || rd.Overrun) return false;
+            return DecodeCore(ref rd, frames, 0, pcmBytes);
+        }
+
+        private static bool DecodeCore(ref BitReader rd, int n, int quality, Span<byte> pcmBytes)
+        {
+            Span<int> a = stackalloc int[n], b = stackalloc int[n];
+            int mode = (int)rd.Read(2);
+            if (!ReadChannel(ref rd, a) || !ReadChannel(ref rd, b)) return false;
+            for (int i = 0; i < n; i++)
             {
                 int l, r;
                 switch (mode)
@@ -127,16 +161,17 @@ namespace TailRemote
 
         private static void Autocorrelate(ReadOnlySpan<int> x, Span<double> ac)
         {
-            Span<double> wx = stackalloc double[Frames];
-            for (int i = 0; i < Frames; i++)
+            int len = x.Length;
+            Span<double> wx = stackalloc double[len];
+            for (int i = 0; i < len; i++)
             {
-                double t = (2.0 * i - (Frames - 1)) / (Frames - 1);
+                double t = (2.0 * i - (len - 1)) / (len - 1);
                 wx[i] = x[i] * (1 - t * t); // Welch window
             }
             for (int lag = 0; lag <= MaxLpc; lag++)
             {
                 double sum = 0;
-                for (int i = lag; i < Frames; i++) sum += wx[i] * wx[i - lag];
+                for (int i = lag; i < len; i++) sum += wx[i] * wx[i - lag];
                 ac[lag] = sum;
             }
             ac[0] *= 1.0 + 1e-9; // keeps Levinson stable on pure tones
@@ -195,7 +230,7 @@ namespace TailRemote
 
         private static bool Residuals(ReadOnlySpan<int> x, in Choice c, Span<int> res)
         {
-            for (int n = 0; n < Frames; n++)
+            for (int n = 0; n < x.Length; n++)
             {
                 long e = x[n] - Predict(x, n, c);
                 if (e >= 1 << 20 || e <= -(1 << 20)) return false;
@@ -230,9 +265,11 @@ namespace TailRemote
         private static long RiceBits(ReadOnlySpan<int> res)
         {
             long total = 0;
-            for (int p = 0; p < Parts; p++)
+            int parts = Parts(res.Length);
+            for (int p = 0; p < parts; p++)
             {
-                BestK(res.Slice(p * PartLen, PartLen), out long b);
+                int from = p * res.Length / parts, to = (p + 1) * res.Length / parts;
+                BestK(res[from..to], out long b);
                 total += 5 + b;
             }
             return total;
@@ -251,9 +288,10 @@ namespace TailRemote
                 w.Write((uint)c.Shift, 4);
                 foreach (int q in c.Coefs) w.Write((uint)q, CoefBits);
             }
-            for (int p = 0; p < Parts; p++)
+            int parts = Parts(res.Length);
+            for (int p = 0; p < parts; p++)
             {
-                var part = res.Slice(p * PartLen, PartLen);
+                var part = res[(p * res.Length / parts)..((p + 1) * res.Length / parts)];
                 int k = BestK(part, out _);
                 w.Write((uint)k, 5);
                 foreach (int e in part)
@@ -294,13 +332,14 @@ namespace TailRemote
                     c.Coefs[j] = (int)(v << (32 - CoefBits)) >> (32 - CoefBits); // sign-extend
                 }
             }
-            for (int p = 0; p < Parts; p++)
+            int parts = Parts(x.Length);
+            for (int p = 0; p < parts; p++)
             {
                 int k = (int)r.Read(5);
                 if (k > 21) return false;
-                for (int i = 0; i < PartLen; i++)
+                int from = p * x.Length / parts, to = (p + 1) * x.Length / parts;
+                for (int n = from; n < to; n++)
                 {
-                    int n = p * PartLen + i;
                     int q = 0;
                     while (q < Escape && r.Read(1) == 1) q++;
                     uint u = q == Escape ? r.Read(EscapeBits) : ((uint)q << k) | (k > 0 ? r.Read(k) : 0);
