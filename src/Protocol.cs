@@ -48,8 +48,11 @@ namespace TailRemote
         public const int AudioPacketBytes = 5 + PacketFrames * 4 + SecureLink.TagSize; // 1045, under Tailscale's 1280
         public const int SilencePacketBytes = 5 + SecureLink.TagSize;
 
-        public static byte[] DeriveKey(string password) =>
-            Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Keys = new();
+
+        /// <summary>Slow on purpose (200,000 rounds), so it is worked out once per password and kept.</summary>
+        public static byte[] DeriveKey(string password) => Keys.GetOrAdd(password, p =>
+            Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(p), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32));
 
         public static byte[] Proof(byte[] key, char side, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
         {

@@ -1,23 +1,29 @@
-# Builds TailRemote into bin\arm64 and bin\x64, even while it is running.
+# Builds TailRemote into bin\<arch>, even while it is running.
+#
+#   build.bat              quick: ARM64 only, no ReadyToRun or compression (seconds)
+#   build.bat x64          quick, x64
+#   build.bat full         both architectures, exactly as a release is built
 #
 # A running exe cannot be overwritten, but it can be moved: the running copy is
-# moved to %LOCALAPPDATA%\TailRemote\old (emptied by the next start), the new
-# one is copied into its place, the old copy is closed (it saves whether it was
+# moved to %LOCALAPPDATA%\TailRemote\old (emptied right after), the new one is
+# copied into its place, the old copy is closed (it saves whether it was
 # hosting or connected) and the new one starts with --resume to carry on.
-#
-#   powershell -ExecutionPolicy Bypass -File build.ps1            both
-#   powershell -ExecutionPolicy Bypass -File build.ps1 arm64      one
-param([string[]]$Arch = @('arm64', 'x64'))
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args2)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
+
+$full = $Args2 -contains 'full'
+$Arch = @($Args2 | Where-Object { $_ -in 'arm64', 'x64' })
+if ($Arch.Count -eq 0) { $Arch = if ($full) { @('arm64', 'x64') } else { @('arm64') } }
 
 $dotnet = Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe'
 if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
 $oldDir = Join-Path $env:LOCALAPPDATA 'TailRemote\old'
+$quick = if ($full) { @() } else { @('-p:PublishReadyToRun=false', '-p:EnableCompressionInSingleFile=false') }
 
 foreach ($a in $Arch) {
     $pub = "obj\publish\$a"
-    & $dotnet publish TailRemote.csproj -c Release -r "win-$a" -o $pub -p:BaseOutputPath=obj\pubout\ --nologo -v:q
+    & $dotnet publish TailRemote.csproj -c Release -r "win-$a" -o $pub -p:BaseOutputPath=obj\pubout\ --nologo -v:q @quick
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
     $dest = Join-Path $PSScriptRoot "bin\$a"
@@ -41,7 +47,7 @@ foreach ($a in $Arch) {
     }
     else { "$a built and installed: $exe" }
 
-    # The replaced copy has exited by now: delete it, and the folder once empty.
+    # The replaced copy has exited by now: delete it, and the folders once empty.
     if (Test-Path $oldDir) {
         Get-ChildItem $oldDir -File | ForEach-Object { try { Remove-Item $_.FullName -Force } catch { } }
         if (-not (Get-ChildItem $oldDir)) { Remove-Item $oldDir -Force }

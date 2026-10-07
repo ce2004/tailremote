@@ -55,7 +55,7 @@ About the audio device
 - If Windows needs a restart after installing it, restart and start hosting: TailRemote finishes the setup by itself.
 
 Building
-- build.bat builds bin\arm64 and bin\x64. If TailRemote is running from there, the new build replaces it, closes the old copy and restarts, still hosting or connected.
-- build.bat arm64 or build.bat x64 builds one.
+- build.bat builds bin\arm64 quickly, in seconds, without the release optimisations. build.bat x64 does the same for x64. build.bat full builds both exactly as a release is built.
+- If TailRemote is running from bin, the new build replaces it, closes the old copy and restarts it, still hosting or connected.
 - TailRemote.exe --selftest runs a host and client on this PC and writes the result to tailremote-selftest.txt in the temp folder.
 - TailRemote.exe --licence writes the NVDA controller client licence beside the exe.

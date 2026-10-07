@@ -117,6 +117,7 @@ namespace TailRemote
                 if (clientLink.OpenAudio(bad, bad.Length)) return Fail("a tampered audio packet was accepted");
             }
 
+            Host.WrongPasswordDelayMs = 0;
             var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
             string Dump() => string.Join(" | ", log);
             using var host = new Host(47999, "secret", log.Enqueue);

@@ -14,6 +14,8 @@ namespace TailRemote
     internal sealed class Host : IDisposable
     {
         private readonly byte[] _key;
+        /// <summary>The pause before answering a wrong password. The self-test sets it to 0.</summary>
+        public static int WrongPasswordDelayMs = 2000;
         private readonly Action<string> _status;
         private readonly TcpListener _listener;
         private readonly UdpClient _udp;
@@ -118,7 +120,7 @@ namespace TailRemote
                           CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_key, 'C', nonce, clientNonce));
                 if (!ok)
                 {
-                    Thread.Sleep(2000); // slows down anyone guessing passwords
+                    Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
                     stream.Write(new byte[] { 0 });
                     _status("Refused " + remote + ": wrong password.");
                     tcp.Dispose();
