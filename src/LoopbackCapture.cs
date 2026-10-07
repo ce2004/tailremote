@@ -21,8 +21,12 @@ namespace TailRemote
         private readonly Action<float, float> _emit; // made once: a new one per packet was garbage every 5.8 ms
         private uint _seq;
 
-        public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status)
+        private readonly string? _deviceId;
+
+        /// <summary>deviceId: the output to record, or null for Windows' default (followed when it changes).</summary>
+        public LoopbackCapture(Action<uint, short[]?> onPacket, Action<string> status, string? deviceId = null)
         {
+            _deviceId = string.IsNullOrEmpty(deviceId) ? null : deviceId;
             _onPacket = onPacket;
             _emit = Emit;
             _status = status;
@@ -61,8 +65,10 @@ namespace TailRemote
         private void CaptureUntilDeviceChanges()
         {
             var enumerator = Wasapi.Enumerator();
-            enumerator.GetDefaultAudioEndpoint(Wasapi.eRender, Wasapi.eConsole, out var dev);
+            // The chosen output, or Windows' default when none is chosen or it has gone.
+            var dev = Wasapi.OutputDevice(_deviceId);
             dev.GetId(out string devId);
+            bool followDefault = _deviceId == null || devId != _deviceId;
             var client = Wasapi.Activate(dev);
             client.GetMixFormat(out IntPtr fmtPtr);
             var fmt = Wasapi.ReadFormat(fmtPtr);
@@ -133,9 +139,11 @@ namespace TailRemote
                     if (now - lastDeviceCheck > 1000)
                     {
                         lastDeviceCheck = now;
-                        enumerator.GetDefaultAudioEndpoint(Wasapi.eRender, Wasapi.eConsole, out var cur);
-                        cur.GetId(out string curId);
-                        if (curId != devId) return; // default output changed: reopen on the new one
+                        // Reopen when the default output changes (if following it), or when
+                        // the chosen output that was missing comes back.
+                        var want = Wasapi.OutputDevice(_deviceId);
+                        want.GetId(out string curId);
+                        if (curId != devId && (followDefault || curId == _deviceId)) return;
                     }
                 }
             }

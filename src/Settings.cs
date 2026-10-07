@@ -23,6 +23,8 @@ namespace TailRemote
         public int Port { get; set; } = Protocol.DefaultPort;
         public string PasswordEnc { get; set; } = "";
         public string OutputDevice { get; set; } = "";
+        /// <summary>Host: the output whose sound is sent ("" = Windows' default).</summary>
+        public string CaptureDevice { get; set; } = "";
         public string ListenPasswordEnc { get; set; } = "";
         public bool ShareClipboard { get; set; } = true;
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();

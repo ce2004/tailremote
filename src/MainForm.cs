@@ -14,6 +14,8 @@ namespace TailRemote
         private readonly TextBox _port = new();
         private readonly TextBox _password = new() { UseSystemPasswordChar = true };
         private readonly ComboBox _device = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private readonly ComboBox _captureFrom = new() { DropDownStyle = ComboBoxStyle.DropDownList };
+        private bool _fillingCapture;
         private readonly ComboBox _saved = new() { DropDownStyle = ComboBoxStyle.DropDownList };
         private readonly Button _savePc = new() { Text = "Save t&his PC", AutoSize = true };
         private readonly Button _forgetPc = new() { Text = "&Forget saved PC", AutoSize = true };
@@ -34,7 +36,7 @@ namespace TailRemote
         private bool _expectRestart; // the remote PC was asked to restart: say when it is back
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
-        private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel;
+        private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel, _captureLabel;
         private readonly FlowLayoutPanel _savedButtons = new() { AutoSize = true };
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
@@ -77,6 +79,7 @@ namespace TailRemote
             AddRow(table, "Pass&word", _password);
             _listenLabel = AddRow(table, "Listen-&only password (optional: lets someone hear, not control)", _listenPassword);
             _deviceLabel = AddRow(table, "&Output device", _device);
+            _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
             table.Controls.Add(_service); table.SetColumnSpan(_service, 2);
@@ -113,6 +116,12 @@ namespace TailRemote
             foreach (var d in Wasapi.OutputDevices()) { _devices.Add(d); _device.Items.Add(d.Name); }
             int sel = _devices.FindIndex(d => d.Id == _settings.OutputDevice);
             _device.SelectedIndex = sel < 0 ? 0 : sel;
+            _fillingCapture = true;
+            foreach (var d in _devices) _captureFrom.Items.Add(d.Name);
+            int cap = _devices.FindIndex(d => d.Id == _settings.CaptureDevice);
+            _captureFrom.SelectedIndex = cap < 0 ? 0 : cap;
+            _fillingCapture = false;
+            _captureFrom.SelectedIndexChanged += (_, _) => CaptureChanged();
 
             _mode.SelectedIndexChanged += (_, _) => UpdateMode();
             _saved.SelectedIndexChanged += (_, _) => UseSaved();
@@ -158,6 +167,7 @@ namespace TailRemote
             _deviceLabel.Visible = _device.Visible = !host;
             _savedLabel.Visible = _saved.Visible = _savedButtons.Visible = !host;
             _listenLabel.Visible = _listenPassword.Visible = host;
+            _captureLabel.Visible = _captureFrom.Visible = host;
             _toggle.Visible = !host;
             _restart.Visible = !host;
             _startup.Visible = host;
@@ -216,6 +226,18 @@ namespace TailRemote
                 try { Clipboard.SetText(text); return; }
                 catch { System.Threading.Thread.Sleep(20); }
             }
+        }
+
+        // ---- Which output the host sends ----
+
+        private void CaptureChanged()
+        {
+            if (_fillingCapture) return;
+            SaveSettings();
+            string id = _settings.CaptureDevice;
+            _host?.SetCaptureDevice(id.Length == 0 ? null : id);
+            if (_service.Checked) Say("Press Apply settings to the service to use this there too.");
+            else if (_host != null) Say("Now sending " + _devices[Math.Max(0, _captureFrom.SelectedIndex)].Name + ".");
         }
 
         // ---- Restart ----
@@ -351,6 +373,7 @@ namespace TailRemote
             if (int.TryParse(_port.Text.Trim(), out int port)) _settings.Port = port;
             _settings.Password = _password.Text;
             _settings.OutputDevice = _devices[Math.Max(0, _device.SelectedIndex)].Id;
+            _settings.CaptureDevice = _devices[Math.Max(0, _captureFrom.SelectedIndex)].Id;
             _settings.ListenPassword = _listenPassword.Text;
             _settings.ShareClipboard = _shareClipboard.Checked;
             _settings.Save();
@@ -384,7 +407,8 @@ namespace TailRemote
             PortEditorForm.Remember(_settings, port);
             try
             {
-                _host = new Host(port, _password.Text, listen, msg => Later(() => Log(msg)));
+                _host = new Host(port, _password.Text, listen, msg => Later(() => Log(msg)),
+                    _settings.CaptureDevice.Length == 0 ? null : _settings.CaptureDevice);
                 _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 _host.FileMessage += msg => Later(() => Say(msg));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));

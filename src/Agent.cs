@@ -35,7 +35,8 @@ namespace TailRemote
             _folderTimer.Start();
 
             AudioSetup.FinishQuietly();
-            _host = new Host(cfg.Port, ServiceHost.Config.Open(cfg.PasswordEnc), ServiceHost.Config.Open(cfg.ListenPasswordEnc), ServiceHost.Log)
+            _host = new Host(cfg.Port, ServiceHost.Config.Open(cfg.PasswordEnc), ServiceHost.Config.Open(cfg.ListenPasswordEnc), ServiceHost.Log,
+                string.IsNullOrEmpty(cfg.CaptureDevice) ? null : cfg.CaptureDevice)
             {
                 SecureAttention = ServiceHost.RequestSas,
             };

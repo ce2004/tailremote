@@ -1,3 +1,8 @@
+1.7.0
+Works with 1.6, 1.5 and 1.4, so the two PCs can update one at a time.
+Changed: the sound reacts to the connection much faster. It steps down within a fifth of a second of trouble, two steps at once when it is bad, and climbs back after a second and a half of clean sound, one step a second. If climbing back brings the trouble straight back, it waits longer before trying again.
+New feature: in Host mode, Capture sound from (Alt A) chooses which output the other PCs hear, or Windows default. Changing it while hosting switches straight away. The service uses it too after Apply settings to the service.
+
 1.6.0
 Works with 1.5 and 1.4, so the two PCs can update one at a time.
 Changed: on a slow or struggling connection, the sound now steps down in sample rate instead of detail: 32, 24, 16, 11 and finally 8 kHz, which is phone quality and still perfectly clear for speech. Every step is lossless at its own rate. At 8 kHz it uses a small fraction of the data. It climbs back to full quality after 10 good seconds, and the window title says when the sound is reduced.

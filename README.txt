@@ -36,6 +36,7 @@ Running the host as a Windows service
 - Uncheck Run as a Windows service to remove it completely.
 
 Settings in the main window
+- Capture sound from (Host mode, Alt A): which output's sound the other PCs hear. Windows default follows whatever the default output is.
 - Output device: where the remote PC's sound plays here.
 
 How it keeps delay down

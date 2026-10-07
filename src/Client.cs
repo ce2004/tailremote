@@ -33,8 +33,6 @@ namespace TailRemote
 
         /// <summary>0 = full quality; above that, a lower sample rate (or, with a 1.5.0 host, fewer bits) while the connection struggles.</summary>
         public int AudioQuality { get; private set; }
-        private int _cleanSeconds;
-        private long _lastQualityChange;
         private uint _peerFeatures;
         public int LastPingMs { get; private set; } = -1;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
@@ -156,6 +154,7 @@ namespace TailRemote
             new Thread(TcpLoop) { IsBackground = true, Name = "TailRemote tcp" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote udp", Priority = ThreadPriority.Highest }.Start();
             new Thread(Heartbeat) { IsBackground = true, Name = "TailRemote heartbeat" }.Start();
+            new Thread(QualityLoop) { IsBackground = true, Name = "TailRemote quality" }.Start();
         }
 
         public void Dispose() => Close(null);
@@ -268,29 +267,58 @@ namespace TailRemote
             }
         }
 
+        private const int QualityTickMs = 200;
+        private int _cleanTicks;
+        private int _upAfterTicks = 8; // 1.6 s of clean sound before the first step back up
+        private long _lastUpAt;
+
+        private void QualityLoop()
+        {
+            while (!_closed)
+            {
+                Thread.Sleep(QualityTickMs);
+                try { AdaptQuality(); } catch { }
+            }
+        }
+
         /// <summary>
-        /// Once a second: if packets are getting lost or late, ask the host to drop
-        /// one more bit (never more than 4, never faster than every 2 seconds);
-        /// after 10 clean seconds, ask for one bit back, up to lossless. Smaller
-        /// packets instead of a bigger buffer, so the delay never grows.
+        /// Five times a second. Trouble (2 or more lost or late packets in 0.2 s,
+        /// or the buffer running dry) steps the sound down at once, two steps when
+        /// it is heavy. After 1.6 clean seconds it steps back up, then one more
+        /// step every clean second. If stepping up brings trouble straight back,
+        /// the wait before the next try doubles, up to 8 seconds, and resets once
+        /// full quality has held for 10 seconds. Smaller packets instead of a
+        /// bigger buffer, so the delay never grows.
         /// </summary>
         private void AdaptQuality()
         {
             var (packets, lost, late, starved) = _player.TakeStats();
-            if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return;
-            bool struggling = starved > 0 || (lost + late >= 2 && (lost + late) * 100 > packets);
+            if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return; // silence: nothing to judge
+            int bad = lost + late;
+            bool struggling = starved > 0 || bad >= 2;
+            bool heavy = starved > 1 || bad >= 6;
+            int lowest = (_peerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4;
             long now = Environment.TickCount64;
             int q = AudioQuality;
             if (struggling)
             {
-                _cleanSeconds = 0;
-                int lowest = (_peerFeatures & Protocol.FeatureRate) != 0 ? Protocol.Rates.Length - 1 : 4;
-                if (q < lowest && now - _lastQualityChange >= 2000) q++;
+                _cleanTicks = 0;
+                if (now - _lastUpAt < 2000) _upAfterTicks = Math.Min(_upAfterTicks * 2, 40); // the last step up was too soon
+                q = Math.Min(lowest, q + (heavy ? 2 : 1));
             }
-            else if (++_cleanSeconds >= 10 && q > 0) { q--; _cleanSeconds = 0; }
+            else
+            {
+                _cleanTicks++;
+                if (q > 0 && _cleanTicks >= _upAfterTicks)
+                {
+                    q--;
+                    _lastUpAt = now;
+                    _cleanTicks = Math.Max(0, _upAfterTicks - 1000 / QualityTickMs); // next step after one more clean second
+                }
+                else if (q == 0 && _cleanTicks >= 10_000 / QualityTickMs) _upAfterTicks = 8;
+            }
             if (q == AudioQuality) return;
             AudioQuality = q;
-            _lastQualityChange = now;
             Write(stackalloc byte[] { Protocol.AudioQuality, (byte)q });
         }
 
@@ -306,7 +334,6 @@ namespace TailRemote
             {
                 if (Environment.TickCount64 - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
                 try { _udp.Send(hello, hello.Length); } catch { }
-                AdaptQuality();
                 if (tick++ % 2 == 0)
                 {
                     ping[0] = Protocol.Ping;

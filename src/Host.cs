@@ -58,8 +58,12 @@ namespace TailRemote
             public readonly byte[] Audio = new byte[Protocol.AudioPacketBytes];
         }
 
-        public Host(int port, string password, string? listenPassword, Action<string> status)
+        private string? _captureDevice;
+
+        /// <summary>captureDevice: the output whose sound is sent, or null for Windows' default.</summary>
+        public Host(int port, string password, string? listenPassword, Action<string> status, string? captureDevice = null)
         {
+            _captureDevice = captureDevice;
             _key = Protocol.DeriveKey(password);
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword);
             _status = status;
@@ -203,6 +207,20 @@ namespace TailRemote
             }
         }
 
+        /// <summary>Switches to recording another output (null: Windows' default) without stopping hosting.</summary>
+        public void SetCaptureDevice(string? id)
+        {
+            lock (_gate)
+            {
+                if (_captureDevice == id || _stop) return;
+                _captureDevice = id;
+                var old = _capture;
+                _capture = null;
+                if (old != null) ThreadPool.QueueUserWorkItem(_ => old.Dispose());
+                UpdateCapture();
+            }
+        }
+
         /// <summary>One capture serves everyone; it runs only while someone is connected. Call under _gate.</summary>
         private void UpdateCapture()
         {
@@ -210,7 +228,7 @@ namespace TailRemote
             // start or stop audio capture. With nobody connected it sends nothing.
             bool anyone = !_stop;
             if (anyone && _capture == null)
-                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); });
+                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice);
             else if (!anyone && _capture != null)
             {
                 var c = _capture;
