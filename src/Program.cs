@@ -13,6 +13,15 @@ namespace TailRemote
             if (args.Length == 2 && args[0] == "--startup")
                 return Startup.Apply(args[1] == "on");
 
+            if (args.Length == 1 && args[0] == "--setup-audio")
+            {
+                Speech.Init();
+                ApplicationConfiguration.Initialize();
+                var setup = new SetupForm();
+                Application.Run(setup);
+                return setup.Result;
+            }
+
             if (args.Length == 1 && args[0] == "--licence")
             {
                 using var s = typeof(Program).Assembly.GetManifestResourceStream("NVDA-controllerClient-LICENSE.txt")!;
@@ -27,13 +36,31 @@ namespace TailRemote
             if (after >= 0 && after + 1 < args.Length && int.TryParse(args[after + 1], out int oldPid))
                 Updater.FinishUpdate(oldPid);
 
+            ClearOldCopies();
+
+            // --resume (used by build.ps1 after swapping in a new build): carry on
+            // hosting or connected, whichever was running when the old copy closed.
+            string resume = Array.IndexOf(args, "--resume") >= 0 ? Settings.Load().ResumeState : "";
+
             Speech.Init();
             ApplicationConfiguration.Initialize();
             Application.Run(new MainForm(
-                autoHost: Array.IndexOf(args, "--host") >= 0,
-                autoConnect: Array.IndexOf(args, "--connect") >= 0,
+                autoHost: Array.IndexOf(args, "--host") >= 0 || resume == "host",
+                autoConnect: Array.IndexOf(args, "--connect") >= 0 || resume == "connect",
                 updated: after >= 0));
             return 0;
+        }
+
+        /// <summary>Copies that build.ps1 moved aside while they were running; gone once they have exited.</summary>
+        private static void ClearOldCopies()
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TailRemote", "old");
+                if (!Directory.Exists(dir)) return;
+                foreach (string f in Directory.GetFiles(dir)) { try { File.Delete(f); } catch { } }
+            }
+            catch { }
         }
 
         /// <summary>Host and client on this PC: handshake, wrong password, ping. No audio is played.</summary>
@@ -63,8 +90,21 @@ namespace TailRemote
             using var c = Client.Connect("127.0.0.1", 47999, "secret", Player.NoDevice, log.Enqueue);
             for (int i = 0; i < 40 && c.LastPingMs < 0; i++) System.Threading.Thread.Sleep(100);
             if (c.LastPingMs < 0) return Fail("no ping reply. " + Dump());
-            File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump());
+            File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + CableReport());
             return 0;
+
+            // Read-only: which virtual cable output setup would rename.
+            static string CableReport()
+            {
+                var d = AudioSetup.FindCable();
+                string name = "none";
+                if (d != null) { d.GetId(out string id); name = id; }
+                string sig = "";
+                // TAILREMOTE_VBCHECK: a real VB-Cable installer, and something that is not one.
+                if (Environment.GetEnvironmentVariable("TAILREMOTE_VBCHECK") is string vb && File.Exists(vb))
+                    sig = ", VB-Audio signature: genuine " + AudioSetup.SignedByVbAudio(vb) + ", other exe " + AudioSetup.SignedByVbAudio(Environment.ProcessPath!);
+                return " | cable output: " + name + sig;
+            }
 
             int Fail(string why)
             {

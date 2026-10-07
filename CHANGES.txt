@@ -1,3 +1,8 @@
+1.1.0
+New feature: Set up audio device, in Host mode, gives a PC with no sound card an output called TailRemote and makes it the default, so you can hear it. A progress window downloads VB-Cable, a free virtual audio device, checks it is genuine and opens its installer: press Install Driver and the rest happens by itself.
+New feature: hosting on a PC with no sound output starts the audio device setup by itself.
+New feature: if connecting fails, TailRemote says why: Tailscale is not signed in on this PC, the name was not found, the other PC is not hosting, or it is not answering.
+
 1.0.0
 First release: control another Windows PC over Tailscale with your whole keyboard, and hear everything it plays in 16-bit 44.1 kHz.
 Control Shift Enter switches between the remote PC and this one.

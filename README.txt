@@ -7,8 +7,8 @@ Files
 
 On the PC you want to control (the host)
 1. Install Tailscale and sign in to the same tailnet.
-2. It needs a sound output. A cloud PC usually has none: install a virtual audio device such as VB-Cable and make it the default output.
-3. Run TailRemote, choose Mode: Host, type a password, press Start hosting.
+2. Run TailRemote, choose Mode: Host, type a password, press Start hosting.
+3. A cloud PC usually has no sound card. TailRemote notices and sets up an audio device called TailRemote: approve the administrator prompt, then press Install Driver in VB-Cable's window. A progress bar shows the rest. You can also press Set up audio device (Alt A) at any time.
 4. Check Start hosting when Windows starts. It asks for administrator once, then starts hosting at every sign-in as administrator, so keys also reach administrator windows. It also adds the firewall rule.
 
 On your PC
@@ -45,8 +45,12 @@ Releasing
 - Add a section to CHANGES.txt: the version number on its own line, then one change per line.
 - Push a tag such as v1.0.1. GitHub builds both versions and publishes the release.
 
+About the audio device
+- It is VB-Cable by VB-Audio, free donationware: www.vb-cable.com. Its licence does not allow other programs to install it silently, so you press its Install Driver button yourself. TailRemote downloads it from vb-audio.com, checks it is signed by VB-Audio, then names it TailRemote and makes it the default output.
+- If Windows needs a restart after installing it, restart and start hosting: TailRemote finishes the setup by itself.
+
 Building
-- dotnet publish -c Release -r win-arm64 -o bin\arm64 -p:BaseOutputPath=obj\pubout\
-- dotnet publish -c Release -r win-x64 -o bin\x64 -p:BaseOutputPath=obj\pubout\
+- build.bat builds bin\arm64 and bin\x64. If TailRemote is running from there, the new build replaces it, closes the old copy and restarts, still hosting or connected.
+- build.bat arm64 or build.bat x64 builds one.
 - TailRemote.exe --selftest runs a host and client on this PC and writes the result to tailremote-selftest.txt in the temp folder.
 - TailRemote.exe --licence writes the NVDA controller client licence beside the exe.

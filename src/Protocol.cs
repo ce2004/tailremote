@@ -67,6 +67,22 @@ namespace TailRemote
             lock (writeLock) s.Write(f);
         }
 
+        /// <summary>Whether this PC has a Tailscale address, i.e. Tailscale is up and signed in.</summary>
+        public static bool LocalTailscaleUp()
+        {
+            try
+            {
+                foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    foreach (var a in nic.GetIPProperties().UnicastAddresses)
+                        if (!IPAddress.IsLoopback(a.Address) && IsTailscale(a.Address)) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>True for Tailscale's 100.64.0.0/10 and fd7a:115c:a1e0::/48, and loopback.</summary>
         public static bool IsTailscale(IPAddress a)
         {

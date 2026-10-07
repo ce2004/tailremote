@@ -19,6 +19,7 @@ namespace TailRemote
         private readonly Button _go = new() { AutoSize = true };
         private readonly Button _toggle = new() { Text = "Control &remote PC (Ctrl+Shift+Enter)", AutoSize = true };
         private readonly Button _update = new() { Text = "Check for &updates", AutoSize = true };
+        private readonly Button _audioSetup = new() { Text = "Set up &audio device", AutoSize = true };
         private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Height = 160 };
 
         private readonly Label _addressLabel, _deviceLabel;
@@ -59,6 +60,7 @@ namespace TailRemote
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
+            buttons.Controls.Add(_audioSetup);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
             AddRow(table, "Status &log", _log);
@@ -83,6 +85,7 @@ namespace TailRemote
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
+            _audioSetup.Click += (_, _) => SetUpAudio();
             _startup.CheckedChanged += (_, _) => StartupChanged();
             _titleTimer.Tick += (_, _) => UpdateTitle();
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
@@ -107,6 +110,7 @@ namespace TailRemote
             _addressLabel.Visible = _address.Visible = !host;
             _deviceLabel.Visible = _device.Visible = !host;
             _toggle.Visible = !host;
+            _audioSetup.Visible = host;
             _tailscaleOnly.Visible = _startup.Visible = host;
             UpdateButtons();
         }
@@ -193,6 +197,13 @@ namespace TailRemote
             {
                 _host = new Host((int)_port.Value, _password.Text, _tailscaleOnly.Checked, msg => BeginInvoke(() => Log(msg)));
                 Say("Hosting on port " + _port.Value + ". Waiting for a connection.");
+                if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
+                else if (Wasapi.OutputDevices().Count == 0)
+                {
+                    // No sound output: nothing could be heard. Set one up straight away.
+                    Log("This PC has no sound output, so setting up the TailRemote audio device.");
+                    SetUpAudio();
+                }
                 if (!Startup.IsElevated()) Log("Not running as administrator, so keys cannot reach administrator windows. Start hosting when Windows starts runs it as administrator.");
             }
             catch (Exception e) { Say("Could not start hosting: " + e.Message); }
@@ -304,6 +315,16 @@ namespace TailRemote
             finally { if (!IsDisposed) _update.Enabled = true; }
         }
 
+        private async void SetUpAudio()
+        {
+            if (AudioSetup.IsReady()) { Say("The TailRemote audio device is already set up."); return; }
+            _audioSetup.Enabled = false;
+            Say("Setting up the TailRemote audio device. Windows asks for administrator permission first.");
+            bool ok = await AudioSetup.RunElevatedAsync();
+            Log(ok ? "The TailRemote audio device is set up." : "Audio device setup did not finish.");
+            _audioSetup.Enabled = true;
+        }
+
         private void StartupChanged()
         {
             bool want = _startup.Checked;
@@ -332,6 +353,7 @@ namespace TailRemote
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            _settings.ResumeState = _host != null ? "host" : _client != null || _reconnecting ? "connect" : "";
             SaveSettings();
             _retryTimer.Stop();
             _keys?.SetClient(null);

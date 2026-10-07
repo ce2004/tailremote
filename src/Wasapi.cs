@@ -52,6 +52,32 @@ namespace TailRemote
             void GetCount(out uint count);
             void GetAt(uint index, out PropertyKey key);
             void GetValue(ref PropertyKey key, out PropVariant value);
+            void SetValue(ref PropertyKey key, ref PropVariant value);
+            void Commit();
+        }
+
+        public static string? ReadString(IMMDevice dev, Guid fmtid, uint pid)
+        {
+            try
+            {
+                dev.OpenPropertyStore(0, out var store);
+                var key = new PropertyKey { fmtid = fmtid, pid = pid };
+                store.GetValue(ref key, out var pv);
+                string? s = pv.vt == 31 ? Marshal.PtrToStringUni(pv.ptr) : null;
+                PropVariantClear(ref pv);
+                return s;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Writes a string property. Needs administrator rights for endpoint names.</summary>
+        public static void WriteString(IMMDevice dev, Guid fmtid, uint pid, string value)
+        {
+            dev.OpenPropertyStore(2 /* STGM_READWRITE */, out var store);
+            var key = new PropertyKey { fmtid = fmtid, pid = pid };
+            var pv = new PropVariant { vt = 31, ptr = Marshal.StringToCoTaskMemUni(value) };
+            try { store.SetValue(ref key, ref pv); store.Commit(); }
+            finally { PropVariantClear(ref pv); }
         }
 
         [StructLayout(LayoutKind.Sequential)]

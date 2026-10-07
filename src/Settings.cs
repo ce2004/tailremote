@@ -15,6 +15,8 @@ namespace TailRemote
         public string PasswordEnc { get; set; } = "";
         public string OutputDevice { get; set; } = "";
         public bool TailscaleOnly { get; set; } = true;
+        /// <summary>What was running when TailRemote last closed: "host", "connect" or "". Used by --resume.</summary>
+        public string ResumeState { get; set; } = "";
 
         private static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
         private static string FilePath => Path.Combine(Dir, "settings.json");

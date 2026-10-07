@@ -36,10 +36,23 @@ namespace TailRemote
             tcp.Client.DualMode = true;
             try
             {
-                var addrs = Dns.GetHostAddresses(address);
-                if (addrs.Length == 0) throw new InvalidOperationException("Could not find " + address + ".");
-                if (!tcp.ConnectAsync(addrs, port).Wait(8000))
-                    throw new TimeoutException("No answer from " + address + ". Is the host running and on Tailscale?");
+                IPAddress[] addrs;
+                try { addrs = Dns.GetHostAddresses(address); }
+                catch (SocketException) { addrs = Array.Empty<IPAddress>(); }
+                if (addrs.Length == 0)
+                    throw new InvalidOperationException(Protocol.LocalTailscaleUp()
+                        ? "Could not find " + address + ". Check the name in the Tailscale app, or use its 100 address."
+                        : "Tailscale is not connected on this PC. Open Tailscale and sign in.");
+                bool done;
+                try { done = tcp.ConnectAsync(addrs, port).Wait(8000); }
+                catch (AggregateException e) when (e.InnerException is SocketException se && se.SocketErrorCode == SocketError.ConnectionRefused)
+                {
+                    throw new InvalidOperationException(address + " is on, but TailRemote is not hosting there. Start hosting on that PC.");
+                }
+                if (!done)
+                    throw new TimeoutException(!Protocol.LocalTailscaleUp()
+                        ? "Tailscale is not connected on this PC. Open Tailscale and sign in."
+                        : "No answer from " + address + ". It may be off, or its Tailscale is not connected.");
             }
             catch (AggregateException e) { tcp.Dispose(); throw new InvalidOperationException(e.InnerException?.Message ?? e.Message); }
             catch { tcp.Dispose(); throw; }
