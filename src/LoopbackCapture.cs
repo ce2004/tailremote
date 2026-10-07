@@ -30,7 +30,11 @@ namespace TailRemote
         /// which arrive at the other PC as a burst its buffer has to cover.
         /// </summary>
         public event Action<int>? Burst;
-        private int _burstWindow, _burstReported;
+
+        /// <summary>Test only (--audiotest): silence inserted for timestamp gaps, and packet-count skips.</summary>
+        public static int TestGapFills, TestGapFillMs, TestSeqSkips, TestChunkMax;
+        private int _burstReported, _burstPrevious, _burstWindows;
+        private readonly System.Collections.Generic.List<int> _chunks = new(512);
         private long _burstCheckedAt;
 
         /// <summary>deviceId: the output to record, or null for Windows' default (followed when it changes).</summary>
@@ -75,6 +79,10 @@ namespace TailRemote
         private void CaptureUntilDeviceChanges()
         {
             var enumerator = Wasapi.Enumerator();
+            _burstWindows = 0;
+            _burstPrevious = 0;
+            _chunks.Clear();
+            _burstCheckedAt = Environment.TickCount64; // windows count from the moment the device opens
             // The chosen output, or Windows' default when none is chosen or it has gone.
             var dev = Wasapi.OutputDevice(_deviceId);
             dev.GetId(out string devId);
@@ -125,10 +133,13 @@ namespace TailRemote
                                 // count on, so the player starts fresh.
                                 while (_fill > 0) Emit(0, 0);
                                 _seq += (uint)(gapFrames / Protocol.PacketFrames);
+                                Interlocked.Increment(ref TestSeqSkips);
                             }
                             else if (gap100ns > 20_000) // over 2 ms of real silence: keep the timing exact
                             {
                                 int n = Math.Min((int)(gap100ns * fmt.Rate / 10_000_000), silence.Length / 2);
+                                Interlocked.Increment(ref TestGapFills);
+                                Interlocked.Add(ref TestGapFillMs, n * 1000 / fmt.Rate);
                                 rs.Process(silence.AsSpan(0, n * 2), _emit);
                             }
                         }
@@ -142,16 +153,29 @@ namespace TailRemote
                     }
 
                     long now = Environment.TickCount64;
-                    if (drained > 0) _burstWindow = Math.Max(_burstWindow, drained * 1000 / fmt.Rate);
+                    if (drained > 0)
+                    {
+                        int ms = drained * 1000 / fmt.Rate;
+                        if (_chunks.Count < 2000) _chunks.Add(ms);
+                        if (ms > TestChunkMax) TestChunkMax = ms;
+                    }
                     if (now - _burstCheckedAt >= 2000)
                     {
                         _burstCheckedAt = now;
-                        if (_burstWindow > 0 && Math.Abs(_burstWindow - _burstReported) >= 2)
+                        // The typical chunk (the median), not the biggest: one odd chunk must not
+                        // move the other PC's buffer. Over the last two 2-second windows, from the
+                        // second window after the device opens (its first moments come in big
+                        // start-up chunks), and only a change of 3 ms or more.
+                        int median = 0;
+                        if (_chunks.Count > 0) { _chunks.Sort(); median = _chunks[_chunks.Count / 2]; }
+                        _chunks.Clear();
+                        int steady = Math.Max(median, _burstPrevious);
+                        _burstPrevious = median;
+                        if (++_burstWindows >= 2 && steady > 0 && Math.Abs(steady - _burstReported) >= 3)
                         {
-                            _burstReported = _burstWindow;
-                            try { Burst?.Invoke(_burstWindow); } catch { }
+                            _burstReported = steady;
+                            try { Burst?.Invoke(steady); } catch { }
                         }
-                        _burstWindow = 0;
                     }
                     // The tail of a sound: after a real stop, send the part-filled packet
                     // rather than hold it. Not sooner: late audio is not the end of a sound.

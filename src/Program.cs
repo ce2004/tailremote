@@ -10,6 +10,7 @@ namespace TailRemote
         [STAThread]
         private static int Main(string[] args)
         {
+            Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
             if (args.Length == 2 && args[0] == "--startup")
                 return Startup.Apply(args[1] == "on");
 
@@ -52,6 +53,11 @@ namespace TailRemote
             }
 
             if (args.Length == 1 && args[0] == "--selftest") return SelfTest();
+            if (args.Length >= 1 && args[0] == "--audiotest")
+            {
+                if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;
+                return AudioTest(args.Length > 1 ? args[1] : null);
+            }
 
             int after = Array.IndexOf(args, "--after-update");
             if (after >= 0 && after + 1 < args.Length && int.TryParse(args[after + 1], out int oldPid))
@@ -85,6 +91,109 @@ namespace TailRemote
                 if (Directory.GetFileSystemEntries(parent).Length == 0) Directory.Delete(parent);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// The whole audio path on this PC, measured: a 440 Hz tone is played into
+        /// one output (default: the first one that is not the default output), a
+        /// host captures it, a client receives it and plays it, muted, through the
+        /// default output with real device timing. Once a second it writes how
+        /// often the buffer ran dry or skipped, and how full it was, to
+        /// %TEMP%\tailremote-audiotest.txt.
+        /// </summary>
+        private static int AudioTest(string? captureName)
+        {
+            string report = Path.Combine(Path.GetTempPath(), "tailremote-audiotest.txt");
+            var lines = new System.Collections.Generic.List<string>();
+            void Say(string s) { lines.Add(s); File.WriteAllLines(report, lines); }
+            try
+            {
+                var outputs = Wasapi.OutputDevices();
+                Wasapi.Enumerator().GetDefaultAudioEndpoint(Wasapi.eRender, Wasapi.eConsole, out var def);
+                def.GetId(out string defId);
+                var src = captureName != null
+                    ? outputs.Find(d => d.Name.Contains(captureName, StringComparison.OrdinalIgnoreCase))
+                    : outputs.Find(d => d.Id != defId);
+                if (src.Id == null) { Say("No output to play the test tone into."); return 1; }
+                Say("tone into: " + src.Name + "; playing (muted) through the default output; simulated network delay 0 to " + Client.TestJitterMs + " ms per packet");
+                timeBeginPeriod(1);
+
+                // Into the default output (speakers), quiet enough not to hear: loopback records it before the volume.
+                using var tone = new ToneSource(src.Id, src.Id == defId ? 0.0003 : 0.3);
+                Host.WrongPasswordDelayMs = 0;
+                using var host = new Host(47998, "audiotest", null, _ => { }, src.Id);
+                using var player = new Player("", s => Say("player: " + s)) { Mute = true };
+                using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s));
+                System.Threading.Thread.Sleep(1500);
+                player.Diagnose();
+                for (int i = 1; i <= 15; i++)
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    int fills = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFills, 0);
+                    int fillMs = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
+                    int seqSkips = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestSeqSkips, 0);
+                    int chunk = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestChunkMax, 0);
+                    Say($"{i,2}s  {player.Diagnose()}, quality step {c.AudioQuality} | host: biggest chunk {chunk} ms, silence added {fills}x ({fillMs} ms), count skips {seqSkips}");
+                }
+                return 0;
+            }
+            catch (Exception e) { Say("failed: " + e); return 1; }
+        }
+
+        [System.Runtime.InteropServices.DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
+
+        /// <summary>Test only: plays a steady 440 Hz tone into one output.</summary>
+        private sealed unsafe class ToneSource : IDisposable
+        {
+            private volatile bool _stop;
+            private readonly System.Threading.Thread _t;
+
+            private readonly double _amplitude;
+
+            public ToneSource(string deviceId, double amplitude)
+            {
+                _amplitude = amplitude;
+                _t = new System.Threading.Thread(() => Run(deviceId)) { IsBackground = true };
+                _t.Start();
+            }
+
+            public void Dispose() { _stop = true; _t.Join(2000); }
+
+            private void Run(string id)
+            {
+                var dev = Wasapi.OutputDevice(id);
+                var client = Wasapi.Activate(dev);
+                client.GetMixFormat(out IntPtr fmtPtr);
+                var fmt = Wasapi.ReadFormat(fmtPtr);
+                client.Initialize(0, Wasapi.AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, fmtPtr, IntPtr.Zero);
+                using var ev = new System.Threading.AutoResetEvent(false);
+                client.SetEventHandle(ev.SafeWaitHandle.DangerousGetHandle());
+                client.GetBufferSize(out uint buf);
+                var iid = Wasapi.IID_IAudioRenderClient;
+                client.GetService(ref iid, out object o);
+                var render = (Wasapi.IAudioRenderClient)o;
+                client.Start();
+                double phase = 0, step = 2 * Math.PI * 440 / fmt.Rate;
+                while (!_stop)
+                {
+                    ev.WaitOne(50);
+                    client.GetCurrentPadding(out uint pad);
+                    uint n = buf - pad;
+                    if (n == 0 || render.GetBuffer(n, out IntPtr data) < 0) continue;
+                    for (int f = 0; f < n; f++)
+                    {
+                        float v = (float)(_amplitude * Math.Sin(phase));
+                        phase += step;
+                        for (int ch = 0; ch < fmt.Channels; ch++)
+                        {
+                            if (fmt.IsFloat) ((float*)data)[f * fmt.Channels + ch] = v;
+                            else ((short*)data)[f * fmt.Channels + ch] = (short)(v * 32767);
+                        }
+                    }
+                    render.ReleaseBuffer(n, 0);
+                }
+                client.Stop();
+            }
         }
 
         /// <summary>Host and client on this PC: handshake, wrong password, ping. No audio is played.</summary>

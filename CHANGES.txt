@@ -1,3 +1,9 @@
+1.7.4
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: the sound kept buffering and catching up, and the delay drifted. TailRemote was cutting the sound at normal small swings and moving its buffer whenever the capture device handed over one odd chunk. Now the delay stays fixed, about 30 ms on a good connection, and only a real pile-up after a network bump is cut.
+Bug fixed: when two audio packets arrived swapped, which networks do, one was lost and made a tiny gap, and the sound wrongly dropped to 8 kHz. Swapped packets are now put back in order, and the quality only drops for packets that really never arrive.
+Bug fixed: on some PCs Windows ran TailRemote on its slow power-saving cores, which made the sound run dry. TailRemote now asks to run at full speed.
+
 1.7.3
 Works with 1.7 and older, so the two PCs can update one at a time.
 Changed: the TailRemote service no longer checks for updates by itself. It only updates when you update TailRemote on that PC with Check for updates, and then it follows straight away to the same version, with no questions and no administrator prompt.

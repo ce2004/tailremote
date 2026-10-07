@@ -118,6 +118,28 @@ namespace TailRemote
         }
 
         /// <summary>Audio delay right now: what is buffered plus the device, in ms. -1 when idle.</summary>
+        /// <summary>Test only: play silence, with all the timing of the real thing.</summary>
+        public bool Mute;
+        private int _diagDry, _diagSkips, _diagLost, _diagLate, _diagSpurts;
+        private readonly uint[] _diagSeqs = new uint[16];
+        private int _diagSeqAt;
+        private string? _diagOrder;
+        private double _diagSkippedMs, _diagLevelMin = double.MaxValue, _diagLevelMax;
+
+        /// <summary>Test only: what happened since the last call.</summary>
+        public string Diagnose()
+        {
+            lock (_gate)
+            {
+                string s = $"lost {_diagLost}, late {_diagLate}, restarts {_diagSpurts}, dry {_diagDry}, skips {_diagSkips} ({_diagSkippedMs:0} ms), buffer {(_diagLevelMin == double.MaxValue ? 0 : _diagLevelMin):0.0}-{_diagLevelMax:0.0} ms, target {_targetMs + _periodMs:0.0} ms, device period {_periodMs:0.0} ms, delay {DelayMsUnlocked()} ms";
+                if (_diagOrder != null) { s += " | arrival order: " + _diagOrder; _diagOrder = null; }
+                _diagDry = 0; _diagSkips = 0; _diagLost = 0; _diagLate = 0; _diagSpurts = 0; _diagSkippedMs = 0; _diagLevelMin = double.MaxValue; _diagLevelMax = 0;
+                return s;
+            }
+        }
+
+        private int DelayMsUnlocked() => _playing ? (int)Math.Round(_avgMs + _periodMs) : -1;
+
         public int DelayMs
         {
             get { lock (_gate) return _playing ? (int)Math.Round(_avgMs + _periodMs) : -1; }
@@ -149,6 +171,7 @@ namespace TailRemote
             bool newSpurt = !_haveSeq || diff > 8 || diff < -200;
             if (newSpurt)
             {
+                _diagSpurts++;
                 _spurtSeq = seq;
                 _ref = now;
                 diff = 0;
@@ -171,8 +194,15 @@ namespace TailRemote
             UpdateTarget();
 
             Interlocked.Increment(ref _statPackets);
-            if (diff < 0) { Interlocked.Increment(ref _statLate); return; } // late; its moment has passed
-            if (diff > 0) Interlocked.Add(ref _statLost, diff);
+            _diagSeqs[_diagSeqAt++ & 15] = seq;
+            if (diff < 0 && _diagOrder == null)
+            {
+                var order = new System.Text.StringBuilder();
+                for (int i = 0; i < 16; i++) order.Append(_diagSeqs[(_diagSeqAt + i) & 15] % 1000).Append(' ');
+                _diagOrder = order.ToString();
+            }
+            if (diff < 0) { Interlocked.Increment(ref _statLate); _diagLate++; return; } // late; its moment has passed
+            if (diff > 0) { Interlocked.Add(ref _statLost, diff); _diagLost += diff; }
             _haveSeq = true;
             _expect = seq + 1;
 
@@ -354,24 +384,30 @@ namespace TailRemote
             {
                 double target = _targetMs + _periodMs;
                 double levelMs = _count / floatsPerMs;
+                _diagLevelMin = Math.Min(_diagLevelMin, levelMs);
+                _diagLevelMax = Math.Max(_diagLevelMax, levelMs);
                 if (!_playing && levelMs >= target + PacketMs / 2) { _playing = true; _avgMs = levelMs; }
 
                 if (_playing)
                 {
                     _avgMs += 0.02 * (levelMs - _avgMs);
                     // Steer toward the target: 10 ms off plays 0.5% fast or slow.
-                    double speed = Math.Clamp((_avgMs - target) * 0.0005, -0.005, 0.005);
+                    // Steer back to the target by playing up to 1% fast or slow (10 ms off = 1%),
+                    // which nobody hears. Normal swings are smoothed out this way, never cut.
+                    double speed = Math.Clamp((_avgMs - target) * 0.001, -0.01, 0.01);
                     Volatile.Write(ref _speed, speed);
 
-                    // Anything more than a packet over the target is late audio: skip it,
-                    // so the delay never grows.
-                    if (levelMs > target + PacketMs + MarginMs)
+                    // A pile-up after a network bump (20 ms over) is cut back at once, so the
+                    // delay never grows. Normal swings on a clean line stay under 15 ms.
+                    if (levelMs > target + 20)
                     {
                         int drop = (int)((levelMs - target) * floatsPerMs) & ~1;
                         _read = (_read + drop) % cap;
                         _count -= drop;
                         _avgMs = target;
                         _gain = 0; // fade in after the jump rather than click
+                        _diagSkips++;
+                        _diagSkippedMs += drop / floatsPerMs;
                     }
                 }
 
@@ -387,6 +423,7 @@ namespace TailRemote
                         _starved = true;
                         _fadeOut = fadeLen;
                         _gain = 0;
+                        _diagDry++;
                     }
                     if (_playing)
                     {
@@ -402,6 +439,7 @@ namespace TailRemote
                         l = _lastL * g; r = _lastR * g;
                         _fadeOut--;
                     }
+                    if (Mute) { l = 0; r = 0; }
                     if (fmt.IsFloat && fmt.Bits == 32)
                     {
                         float* p = (float*)data + f * ch;

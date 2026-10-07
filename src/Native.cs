@@ -10,6 +10,29 @@ namespace TailRemote
         [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr AvSetMmThreadCharacteristicsW(string task, ref uint index);
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_POWER_THROTTLING_STATE { public uint Version, ControlMask, StateMask; }
+        [DllImport("kernel32.dll")]
+        private static extern bool SetProcessInformation(IntPtr process, int infoClass, ref PROCESS_POWER_THROTTLING_STATE info, int size);
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
+
+        /// <summary>
+        /// Opts this process out of Windows' power throttling (EcoQoS), which would
+        /// otherwise put its audio and network threads on slow, power-saving cores
+        /// and make the sound run dry. Also asks for 1 ms timer precision.
+        /// </summary>
+        public static void FullSpeed()
+        {
+            try
+            {
+                var s = new PROCESS_POWER_THROTTLING_STATE { Version = 1, ControlMask = 1 /* EXECUTION_SPEED */, StateMask = 0 /* off */ };
+                SetProcessInformation(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, ref s, Marshal.SizeOf<PROCESS_POWER_THROTTLING_STATE>());
+                timeBeginPeriod(1);
+            }
+            catch { }
+        }
+
         /// <summary>Puts the calling thread in the "Pro Audio" scheduling class.</summary>
         public static void ProAudioThread()
         {

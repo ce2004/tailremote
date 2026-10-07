@@ -244,27 +244,99 @@ namespace TailRemote
             }
         }
 
+        /// <summary>Test only (--audiotest): delay each audio packet by a random 0 to N ms, like a bumpy network.</summary>
+        public static int TestJitterMs;
+        private readonly SortedList<(long Due, long N), byte[]> _jitterQueue = new();
+        private long _jitterN;
+
+        private void JitterLoop()
+        {
+            var sw = Stopwatch.StartNew();
+            while (!_closed)
+            {
+                byte[]? next = null;
+                lock (_jitterQueue)
+                {
+                    if (_jitterQueue.Count > 0 && _jitterQueue.Keys[0].Due <= sw.ElapsedMilliseconds)
+                    {
+                        next = _jitterQueue.Values[0];
+                        _jitterQueue.RemoveAt(0);
+                    }
+                }
+                if (next != null) HandlePacket(next); else Thread.Sleep(1);
+            }
+        }
+
+        private readonly Stopwatch _jitterClock = Stopwatch.StartNew();
+
         private void UdpLoop()
         {
+            if (TestJitterMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_closed) return; continue; }
+                if (TestJitterMs > 0)
+                {
+                    lock (_jitterQueue) _jitterQueue.Add((_jitterClock.ElapsedMilliseconds + Random.Shared.Next(TestJitterMs + 1), _jitterN++), d);
+                    continue;
+                }
+                HandlePacket(d);
+            }
+        }
+
+        // ---- Putting swapped packets back in order ----
+        // Networks (and Windows' own loopback) sometimes deliver two neighbouring
+        // packets swapped. Played as they come, that is a lost packet (a fade-out
+        // gap) followed by a late one (thrown away), and it made the quality steps
+        // think the line was bad. So a packet that arrives one ahead is held until
+        // the next arrival: if that is the missing one, both play in order; if not,
+        // the missing one really was lost. Only a gap costs a packet's wait.
+
+        private byte[]? _held;
+        private uint _lastSeq;
+        private bool _haveLastSeq;
+
+        private void HandlePacket(byte[] d)
+        {
+            if (d.Length < Protocol.SilencePacketBytes || d[0] < Protocol.UdpAudio || d[0] > Protocol.UdpPackedRate || !_link.OpenAudio(d, d.Length)) return;
+            uint seq = BitConverter.ToUInt32(d, 1);
+            int ahead = _haveLastSeq ? (int)(seq - _lastSeq) : 1;
+            if (_held == null)
+            {
+                if (ahead == 2) { _held = d; return; } // one missing: give it one arrival to turn up
+            }
+            else
+            {
+                var held = _held;
+                _held = null;
+                if (ahead == 1) { Deliver(d); Deliver(held); return; } // it turned up: both in order
+                Deliver(held);                                         // it really was lost
+            }
+            Deliver(d);
+        }
+
+        /// <summary>Plays one packet that has already been opened (decrypted).</summary>
+        private void Deliver(byte[] d)
+        {
+            uint seq = BitConverter.ToUInt32(d, 1);
+            if (!_haveLastSeq || (int)(seq - _lastSeq) > 0) { _lastSeq = seq; _haveLastSeq = true; }
+            {
                 // Forged or damaged packets fail to open and are dropped.
-                if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio && _link.OpenAudio(d, d.Length))
+                if (d.Length == Protocol.AudioPacketBytes && d[0] == Protocol.UdpAudio)
                     _player.Push(BitConverter.ToUInt32(d, 1), d.AsSpan(5, Protocol.PacketFrames * 4));
-                else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence && _link.OpenAudio(d, d.Length))
+                else if (d.Length == Protocol.SilencePacketBytes && d[0] == Protocol.UdpSilence)
                     _player.Push(BitConverter.ToUInt32(d, 1), ReadOnlySpan<byte>.Empty);
                 else if (d[0] == Protocol.UdpPackedRate && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && _link.OpenAudio(d, d.Length) && Lossless2.DecodeRate(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked, out int level, out int frames))
+                         && Lossless2.DecodeRate(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked, out int level, out int frames))
                     _player.Push(BitConverter.ToUInt32(d, 1), _unpacked.AsSpan(0, frames * 4), frames, Protocol.Rates[level]);
                 else if (d[0] == Protocol.UdpPacked2 && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && _link.OpenAudio(d, d.Length) && Lossless2.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
+                         && Lossless2.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
                     _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
                 else if (d[0] == Protocol.UdpPacked && d.Length > Protocol.SilencePacketBytes && d.Length < Protocol.AudioPacketBytes
-                         && _link.OpenAudio(d, d.Length) && Lossless.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
+                         && Lossless.Decode(d.AsSpan(5, d.Length - Protocol.SilencePacketBytes), _unpacked))
                     _player.Push(BitConverter.ToUInt32(d, 1), _unpacked);
             }
         }
@@ -296,7 +368,9 @@ namespace TailRemote
         {
             var (packets, lost, late, starved) = _player.TakeStats();
             if ((_peerFeatures & Protocol.FeatureLossless2) == 0 || packets == 0) return; // silence: nothing to judge
-            int bad = lost + late;
+            // Only packets that never came: one that arrived late was counted lost first,
+            // then late, and lateness is not a bandwidth problem a lower rate could fix.
+            int bad = Math.Max(0, lost - late);
             // Only lost or late packets count. With a fixed, tiny buffer the player runs
             // dry on any jitter by design, and that alone must not lower the sound.
             bool struggling = bad >= 2;
