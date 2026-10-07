@@ -1,3 +1,7 @@
+1.7.7
+Works with 1.7 and older, so the two PCs can update one at a time.
+Bug fixed: the sound chopped over Wi-Fi even though every packet arrived. Packets never arrive evenly over Wi-Fi, and the tiny fixed buffer kept running dry and throwing sound away, about a tenth of a second every second. The buffer now sizes itself to how unevenly packets really arrive and then holds steady, so the delay stays the same while the sound stays smooth. Expect about 30 ms on a wired connection and somewhat more over Wi-Fi.
+
 1.7.6
 Works with 1.7 and older, so the two PCs can update one at a time.
 Bug fixed: hosting from some virtual audio devices, such as Virtual Audio Cable, made the sound choppy. TailRemote mistook uneven timing information from the device for gaps and added about a third more sound than there was, which the other PC then had to cut away. Only real gaps count now.

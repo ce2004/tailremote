@@ -187,6 +187,9 @@ namespace TailRemote
             double raw = now - (int)(seq - _spurtSeq) * PacketMs;
             _ref = Math.Min(raw, _ref + PacketMs * 0.0002);
             RecordJitter(now, raw - _ref);
+            // Every packet's lateness, for the last 10 seconds.
+            _late[_lateAt++ % _late.Length] = (float)Math.Min(raw - _ref, 400);
+            if (_lateCount < _late.Length) _lateCount++;
 
             lock (_gate)
             {
@@ -268,13 +271,35 @@ namespace TailRemote
             if (lateMs > _jitter[b]) _jitter[b] = Math.Min(lateMs, 400);
         }
 
+        // Lateness of the last 1720 packets (10 seconds), and the target worked out from it.
+        private readonly float[] _late = new float[1720];
+        private readonly float[] _lateSorted = new float[1720];
+        private int _lateAt, _lateCount, _sinceTarget;
+        private float _coverMs;
+
         /// <summary>
-        /// The buffer is fixed: one packet plus a 2 ms margin, never more, whatever
-        /// the network does. Late audio is skipped rather than waited for, so the
-        /// delay always stays the same. (Jitter is still measured, for nothing but
-        /// interest; it no longer moves the target.)
+        /// Sized to the connection, then held steady. Packets never arrive evenly
+        /// over Wi-Fi and Tailscale (20 to 50 ms of bunching is normal), and a
+        /// buffer smaller than that runs dry and overflows over and over: the
+        /// chopping in Brock's 1.7.6 log, with 172 packets a second all arriving.
+        /// So the buffer covers 98% of how late packets were over the last 10
+        /// seconds, worked out every half second. A rare spike (a Wi-Fi scan)
+        /// costs one short gap instead of raising the delay for everyone. It rises
+        /// at once when needed and comes down a little at a time, and the player
+        /// reaches it by playing up to 1% fast or slow, never by cutting.
         /// </summary>
-        private void UpdateTarget() => _targetMs = (float)(PacketMs + MarginMs + Math.Max(0, HostBurstMs - 11));
+        private void UpdateTarget()
+        {
+            if (++_sinceTarget >= 86 && _lateCount >= 86) // about every half second
+            {
+                _sinceTarget = 0;
+                Array.Copy(_late, _lateSorted, _lateCount);
+                Array.Sort(_lateSorted, 0, _lateCount);
+                float p98 = _lateSorted[(int)(_lateCount * 0.98) - 1];
+                _coverMs = p98 > _coverMs ? p98 : _coverMs + (p98 - _coverMs) * 0.2f; // up at once, down gently
+            }
+            _targetMs = (float)(PacketMs + MarginMs + _coverMs + Math.Max(0, HostBurstMs - 11));
+        }
 
         /// <summary>
         /// The largest chunk the host's capture device hands over at once (ms),
@@ -403,9 +428,9 @@ namespace TailRemote
                     double speed = Math.Clamp((_avgMs - target) * 0.001, -0.01, 0.01);
                     Volatile.Write(ref _speed, speed);
 
-                    // A pile-up after a network bump (20 ms over) is cut back at once, so the
-                    // delay never grows. Normal swings on a clean line stay under 15 ms.
-                    if (levelMs > target + 20)
+                    // Only a real pile-up (60 ms over, after a network stall) is cut back at
+                    // once. Cutting at 20 ms threw away about 100 ms of sound a second on Wi-Fi.
+                    if (levelMs > target + 60)
                     {
                         int drop = (int)((levelMs - target) * floatsPerMs) & ~1;
                         _read = (_read + drop) % cap;
