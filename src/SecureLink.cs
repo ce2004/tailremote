@@ -68,6 +68,26 @@ namespace TailRemote
             }
         }
 
+        /// <summary>
+        /// Encrypts one message into a ready-to-send frame, without sending it. The
+        /// frames must then be written in the order they were sealed, and Send must
+        /// not be used on this link at the same time. (Files: one thread seals while
+        /// another writes, so the network never waits for the encryption.)
+        /// </summary>
+        public byte[] Seal(ReadOnlySpan<byte> message)
+        {
+            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
+            byte[] frame = new byte[4 + message.Length + TagSize];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);
+            Span<byte> nonce = stackalloc byte[12];
+            lock (_sendLock)
+            {
+                CounterNonce(nonce, _sendCounter++);
+                _send.Encrypt(nonce, message, frame.AsSpan(4, message.Length), frame.AsSpan(4 + message.Length, TagSize));
+            }
+            return frame;
+        }
+
         /// <summary>Reads and decrypts one message. Only one thread may receive.</summary>
         public byte[] Receive(Stream s)
         {

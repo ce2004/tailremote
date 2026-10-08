@@ -52,7 +52,8 @@ namespace TailRemote
         // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
 
         // UDP
-        public const byte UdpHello = 0xA0;  // token[8], client to host, every second
+        public const byte UdpHello = 0xA0;  // token[8] stamp[8], client to host, every second
+        public const byte UdpPong = 0xA8;   // stamp[8], host to client: the hello's stamp straight back, so the audio path's own ping is measured
         // 0xA1 to 0xA5 were the lossless formats (up to 1.7): never reuse them
         public const byte UdpOpus = 0xA6; // u32 sequence (5 ms ticks), then sealed: u8 ticks, Opus packet
 

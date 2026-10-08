@@ -1,3 +1,9 @@
+1.8.4
+Bug fixed: Send files could close TailRemote, for example if you closed the progress window while files were still going. Closing it now simply cancels the sending, and nothing about sending files can close the app any more.
+Changed: files send as fast as your connection allows. Reading, encrypting and sending now all happen at the same time instead of taking turns, on both PCs. On this PC's own connection a 128 MB file went at over 600 megabytes a second, so your network is the only limit. When a transfer finishes, NVDA says how fast it went.
+Bug fixed: if the PC receiving files could not save one (a full disk, for example), the transfer could freeze. Now that file is dropped with a message and the rest carry on.
+Changed: the audio delay is now worked out from a ping on the sound's own path, not the keyboard connection's, so it stays right even while a file transfer is busy.
+
 1.8.3
 Changed: joining on a terrible connection, even dial-up, finds a bitrate that fits within a few seconds instead of trying over and over for 20. It now notices when the sound is arriving slower than real time, which is how a modem or a full connection behaves (it queues the sound rather than losing it), and goes straight for the bitrate the connection can really carry.
 Changed: any change of bitrate takes about 3 seconds however far it goes, so a big drop no longer crawls one step at a time, and a small one is still gentle.

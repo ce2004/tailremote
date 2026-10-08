@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
@@ -17,7 +18,7 @@ namespace TailRemote
     internal sealed class FileChannel : IDisposable
     {
         private const byte Start = 0x50, Data = 0x51, End = 0x52, Cancel = 0x53;
-        private const int ChunkSize = 256 * 1024;
+        private const int ChunkSize = 1024 * 1024; // 1 MB a frame: fewer, bigger writes
 
         private readonly TcpClient _tcp;
         private readonly NetworkStream _stream;
@@ -49,54 +50,129 @@ namespace TailRemote
             try { _tcp.Dispose(); } catch { }
         }
 
-        /// <summary>Sends files one after another. Blocking: run it off the window's thread.</summary>
+        /// <summary>
+        /// Sends files one after another. Blocking: run it off the window's thread.
+        /// Two stages run at once so the connection never waits: one reads the file,
+        /// fingerprints it and encrypts it, the other only sends. report gets a
+        /// sentence and a percentage at most ten times a second.
+        /// </summary>
         public string Send(IReadOnlyList<string> paths, Action<string, int> report, CancellationToken ct)
         {
             lock (_sendGate)
             {
-                long total = 0, done = 0;
+                long total = 0;
                 foreach (string p in paths) total += new FileInfo(p).Length;
-                int n = 0;
-                foreach (string p in paths)
+                var frames = new BlockingCollection<byte[]>(8); // 8 MB in flight at most
+                using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                Exception? failed = null;
+                var producer = new Thread(() =>
                 {
-                    string name = Path.GetFileName(p);
-                    n++;
-                    using var f = File.OpenRead(p);
-                    byte[] start = new byte[9 + Encoding.UTF8.GetByteCount(name)];
-                    start[0] = Start;
-                    BitConverter.TryWriteBytes(start.AsSpan(1), f.Length);
-                    Encoding.UTF8.GetBytes(name, start.AsSpan(9));
-                    _link.Send(_stream, start);
+                    try { Produce(paths, frames, stop.Token); }
+                    catch (Exception e) { failed = e; }
+                    finally { try { frames.CompleteAdding(); } catch { } }
+                }) { IsBackground = true, Name = "TailRemote files out" };
+                producer.Start();
 
-                    using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                    byte[] buf = new byte[1 + ChunkSize];
-                    buf[0] = Data;
-                    int read;
-                    while ((read = f.Read(buf, 1, ChunkSize)) > 0)
+                long sent = 0, lastReport = 0;
+                // A steady sentence (NVDA reads it once) and the bar; the speed is said at the end.
+                string sending = "Sending " + (paths.Count == 1 ? Path.GetFileName(paths[0]) : paths.Count + " files") + ".";
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    foreach (var frame in frames.GetConsumingEnumerable())
                     {
-                        if (ct.IsCancellationRequested)
+                        _stream.Write(frame);
+                        sent += frame.Length;
+                        if (clock.ElapsedMilliseconds - lastReport >= 100)
                         {
-                            _link.Send(_stream, new[] { Cancel });
-                            throw new OperationCanceledException();
+                            lastReport = clock.ElapsedMilliseconds;
+                            report(sending, total == 0 ? 100 : (int)Math.Min(100, sent * 100 / Math.Max(1, total)));
                         }
-                        sha.AppendData(buf, 1, read);
-                        _link.Send(_stream, buf.AsSpan(0, 1 + read));
-                        done += read;
-                        report("Sending " + name + (paths.Count > 1 ? ", file " + n + " of " + paths.Count : "") + ".",
-                            total == 0 ? 100 : (int)(done * 100 / total));
                     }
-                    byte[] end = new byte[33];
-                    end[0] = End;
-                    sha.GetHashAndReset().CopyTo(end, 1);
-                    _link.Send(_stream, end);
                 }
+                catch
+                {
+                    // The connection failed: stop the reading side too, cleanly.
+                    stop.Cancel();
+                    producer.Join();
+                    throw;
+                }
+                producer.Join();
+                if (failed != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+                double secs = Math.Max(0.001, clock.Elapsed.TotalSeconds);
+                string speed = ", at " + (total / 1048576.0 / secs).ToString("0.0") + " megabytes a second";
                 return paths.Count == 1
-                    ? "Sent " + Path.GetFileName(paths[0]) + ". It is in Downloads, TailRemote, on the other PC."
-                    : "Sent " + paths.Count + " files. They are in Downloads, TailRemote, on the other PC.";
+                    ? "Sent " + Path.GetFileName(paths[0]) + speed + ". It is in Downloads, TailRemote, on the other PC."
+                    : "Sent " + paths.Count + " files" + speed + ". They are in Downloads, TailRemote, on the other PC.";
             }
         }
 
+        /// <summary>Reads, fingerprints and encrypts every file into frames, in order.</summary>
+        private void Produce(IReadOnlyList<string> paths, BlockingCollection<byte[]> frames, CancellationToken ct)
+        {
+            byte[] buf = new byte[1 + ChunkSize];
+            buf[0] = Data;
+            foreach (string p in paths)
+            {
+                string name = Path.GetFileName(p);
+                using var f = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
+                byte[] start = new byte[9 + Encoding.UTF8.GetByteCount(name)];
+                start[0] = Start;
+                BitConverter.TryWriteBytes(start.AsSpan(1), f.Length);
+                Encoding.UTF8.GetBytes(name, start.AsSpan(9));
+                frames.Add(_link.Seal(start), ct);
+
+                using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                int read;
+                try
+                {
+                    while ((read = f.Read(buf, 1, ChunkSize)) > 0)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        sha.AppendData(buf, 1, read);
+                        frames.Add(_link.Seal(buf.AsSpan(0, 1 + read)), ct);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Tell the other PC to throw away the part it has (if the connection still works).
+                    try { frames.TryAdd(_link.Seal(new[] { Cancel }), 2000); } catch { }
+                    throw;
+                }
+                byte[] end = new byte[33];
+                end[0] = End;
+                sha.GetHashAndReset().CopyTo(end, 1);
+                frames.Add(_link.Seal(end), ct);
+            }
+        }
+
+        /// <summary>
+        /// Two stages here too: this thread only takes messages off the network and
+        /// decrypts them; another writes them to disk and fingerprints them, so a slow
+        /// disk moment never stops the network.
+        /// </summary>
         private void ReceiveLoop()
+        {
+            using var queue = new BlockingCollection<byte[]>(8);
+            var writer = new Thread(() => WriteLoop(queue)) { IsBackground = true, Name = "TailRemote files in" };
+            writer.Start();
+            try
+            {
+                while (!_closed)
+                {
+                    byte[] m = _link.Receive(_stream);
+                    if (m.Length > 0) queue.Add(m);
+                }
+            }
+            catch { }
+            finally
+            {
+                queue.CompleteAdding();
+                writer.Join();
+            }
+        }
+
+        private void WriteLoop(BlockingCollection<byte[]> queue)
         {
             FileStream? file = null;
             string? path = null, name = null;
@@ -107,12 +183,10 @@ namespace TailRemote
                 try { file?.Dispose(); if (path != null) File.Delete(path); } catch { }
                 file = null; path = null; sha?.Dispose(); sha = null;
             }
-            try
+            foreach (byte[] m in queue.GetConsumingEnumerable())
             {
-                while (!_closed)
+                try
                 {
-                    byte[] m = _link.Receive(_stream);
-                    if (m.Length == 0) continue;
                     switch (m[0])
                     {
                         case Start when m.Length >= 9:
@@ -121,7 +195,7 @@ namespace TailRemote
                             name = SafeName(Encoding.UTF8.GetString(m, 9, m.Length - 9));
                             Directory.CreateDirectory(Folder);
                             path = UniquePath(Folder, name);
-                            file = new FileStream(path, FileMode.CreateNew, FileAccess.Write);
+                            file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
                             sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                             break;
                         case Data when file != null:
@@ -149,12 +223,17 @@ namespace TailRemote
                             break;
                     }
                 }
+                catch (Exception e)
+                {
+                    // A full disk, a folder that cannot be written: say so, drop this file, and
+                    // keep reading, so the network side never waits on a queue nobody empties.
+                    try { _announce("Could not save " + name + ": " + e.Message); } catch { }
+                    Discard();
+                }
             }
-            catch
-            {
-                if (file != null && !_closed) _announce("The connection dropped while receiving " + name + ", so the part that arrived was deleted.");
-            }
-            finally { Discard(); }
+            // The network side ended (the connection closed) in the middle of a file.
+            if (file != null && !_closed) { try { _announce("The connection dropped while receiving " + name + ", so the part that arrived was deleted."); } catch { } }
+            Discard();
         }
 
         private static string SafeName(string name)

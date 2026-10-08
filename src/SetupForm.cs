@@ -42,6 +42,8 @@ namespace TailRemote
             Controls.Add(panel);
             CancelButton = _button;
             _button.Click += (_, _) => { if (_done) Close(); else _cancel.Cancel(); };
+            // Closing the window while the work is going cancels it.
+            FormClosing += (_, _) => { if (!_done) _cancel.Cancel(); };
         }
 
         protected override async void OnShown(EventArgs e)
@@ -51,13 +53,15 @@ namespace TailRemote
             try
             {
                 string finished = await _work(Report, _cancel.Token);
+                if (IsDisposed) { Speech.Speak(finished); return; } // closed while it worked
                 _bar.Style = ProgressBarStyle.Blocks;
                 _bar.Value = 100;
                 Say(finished);
                 Result = 0;
             }
-            catch (OperationCanceledException) { Say("Cancelled."); }
-            catch (Exception ex) { Say(ex.Message); }
+            catch (OperationCanceledException) { if (IsDisposed) return; Say("Cancelled."); }
+            catch (Exception ex) { if (IsDisposed) { Speech.Speak(ex.Message); return; } Say(ex.Message); }
+            if (IsDisposed) return;
             _done = true;
             _button.Text = "Close";
         }
@@ -65,7 +69,15 @@ namespace TailRemote
         /// <summary>Status text, and a percentage (or -1 for "working, no percentage").</summary>
         private void Report(string text, int percent)
         {
-            if (InvokeRequired) { BeginInvoke(() => Report(text, percent)); return; }
+            // Called from the work's own thread. Once the window is closed this must do
+            // nothing: reaching for a closed window from a background thread closed the
+            // whole app (sending files, closing the progress window while it was going).
+            if (IsDisposed || !IsHandleCreated) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(() => Report(text, percent)); } catch { }
+                return;
+            }
             if (percent < 0) _bar.Style = ProgressBarStyle.Marquee;
             else { _bar.Style = ProgressBarStyle.Blocks; _bar.Value = Math.Clamp(percent, 0, 100); }
             if (text != _status.Text) Say(text);

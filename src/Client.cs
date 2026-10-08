@@ -36,6 +36,10 @@ namespace TailRemote
         /// <summary>0 = full quality; above that, a lower sample rate while the connection struggles.</summary>
         public int AudioQuality { get; private set; }
         public int LastPingMs { get; private set; } = -1;
+        /// <summary>Round trip on the audio path itself (UDP), which the sound's delay is worked out from. -1 until measured.</summary>
+        public int AudioPingMs { get; private set; } = -1;
+        /// <summary>The ping the audio delay should use: the audio path's own, or the TCP one until that is measured.</summary>
+        public int PingForAudio => AudioPingMs >= 0 ? AudioPingMs : Math.Max(0, LastPingMs);
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
 
@@ -398,6 +402,13 @@ namespace TailRemote
 
         private void HandlePacket(byte[] d)
         {
+            if (d.Length == 9 && d[0] == Protocol.UdpPong)
+            {
+                long sent = BitConverter.ToInt64(d, 1);
+                long ms = (Stopwatch.GetTimestamp() - sent) * 1000 / Stopwatch.Frequency;
+                if (ms >= 0 && ms < 10_000) AudioPingMs = (int)ms;
+                return;
+            }
             if (d.Length < Protocol.MinAudioPacketBytes || d[0] != Protocol.UdpOpus) return;
             if (!_link.OpenAudio(d, d.Length)) { Interlocked.Increment(ref _rxDamaged); return; } // changed on the way (or not for us): counts as lost
             Interlocked.Increment(ref _qPackets);
@@ -635,7 +646,7 @@ namespace TailRemote
         {
             int packets = Interlocked.Exchange(ref _rxPackets, 0), bytes = Interlocked.Exchange(ref _rxBytes, 0), keys = Interlocked.Exchange(ref _keysSent, 0);
             int damaged = Interlocked.Exchange(ref _rxDamaged, 0);
-            DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, bitrate step " + AudioQuality +
+            DiagLog.Write("client: " + _player.Diagnose() + ", ping " + LastPingMs + " ms, audio ping " + AudioPingMs + " ms, bitrate step " + AudioQuality +
                 " (" + Protocol.OpusSteps[AudioQuality].Kbps + " kbit/s" + (LockedStep >= 0 ? ", locked" : "") + ")" +
                 ", received " + packets + " packets, " + (bytes * 8 / 1000) + " kbit/s, damaged " + damaged +
                 ", keys sent " + keys + ", playing on " + _player.DeviceInfo);
@@ -643,7 +654,7 @@ namespace TailRemote
 
         private void Heartbeat()
         {
-            byte[] hello = new byte[9];
+            byte[] hello = new byte[17];
             hello[0] = Protocol.UdpHello;
             _token.CopyTo(hello, 1);
             byte[] ping = new byte[9];
@@ -652,6 +663,7 @@ namespace TailRemote
             while (!_closed)
             {
                 if (Environment.TickCount64 - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
+                BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
                 try { _udp.Send(hello, hello.Length); } catch { }
                 if (tick++ % 2 == 0)
                 {

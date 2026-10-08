@@ -374,6 +374,25 @@ namespace TailRemote
             string a1 = Path.Combine(FileChannel.Folder, "test file.bin"), a2 = Path.Combine(FileChannel.Folder, "test file (2).bin");
             if (got.Count < 2 || !File.Exists(a2) || !File.ReadAllBytes(a1).AsSpan().SequenceEqual(content) || !File.ReadAllBytes(a2).AsSpan().SequenceEqual(content))
                 return Fail("files: " + string.Join(" / ", got));
+
+            // Speed: 128 MB over this PC's own connection, checked byte for byte.
+            byte[] big = new byte[128 << 20];
+            new Random(9).NextBytes(big);
+            string bigSrc = Path.Combine(dir, "big.bin");
+            File.WriteAllBytes(bigSrc, big);
+            got.Clear();
+            var bigClock = System.Diagnostics.Stopwatch.StartNew();
+            c.SendFiles(new[] { bigSrc }, (_, _) => { }, default);
+            for (int i = 0; i < 600 && got.IsEmpty; i++) System.Threading.Thread.Sleep(20);
+            double bigSecs = bigClock.Elapsed.TotalSeconds;
+            if (got.IsEmpty || !File.ReadAllBytes(Path.Combine(FileChannel.Folder, "big.bin")).AsSpan().SequenceEqual(big))
+                return Fail("128 MB file: " + string.Join(" / ", got));
+            lossless += " | files: 128 MB at " + (128 / bigSecs).ToString("0") + " MB/s";
+
+            // The audio path's own ping (UDP hello and pong) gets measured.
+            for (int i = 0; i < 60 && c.AudioPingMs < 0; i++) System.Threading.Thread.Sleep(50);
+            if (c.AudioPingMs < 0) return Fail("the audio ping was never measured");
+            lossless += " | audio ping " + c.AudioPingMs + " ms";
             Directory.Delete(dir, true);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + lossless + CableReport());
             return 0;

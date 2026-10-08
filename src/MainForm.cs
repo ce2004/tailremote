@@ -313,14 +313,27 @@ namespace TailRemote
         {
             if (_client == null && _host == null) { Say("Connect or start hosting first."); return; }
             if (_client?.ListenOnly == true) { Say("Listeners cannot send files."); return; }
-            using var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
-            if (pick.ShowDialog(this) != DialogResult.OK) return;
-            string[] paths = pick.FileNames;
-            var client = _client;
-            var host = _host;
-            using var progress = new SetupForm("Sending files", (report, ct) => System.Threading.Tasks.Task.Run(() =>
-                client != null ? client.SendFiles(paths, report, ct) : host!.SendFiles(paths, report, ct), ct));
-            progress.ShowDialog(this);
+            try
+            {
+                string[] paths;
+                using (var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" })
+                {
+                    if (pick.ShowDialog(this) != DialogResult.OK) return;
+                    paths = pick.FileNames;
+                }
+                var client = _client;
+                var host = _host;
+                if (client == null && host == null) { Say("The connection closed. Connect again, then send the files."); return; }
+                using var progress = new SetupForm("Sending files", (report, ct) => System.Threading.Tasks.Task.Run(() =>
+                    client != null ? client.SendFiles(paths, report, ct) : host!.SendFiles(paths, report, ct), ct));
+                progress.ShowDialog(this);
+            }
+            catch (Exception e)
+            {
+                // Sending files must never be able to close TailRemote.
+                DiagLog.Write("send files: " + e);
+                Say("Could not send the files: " + e.Message);
+            }
         }
 
         // ---- Saved PCs ----
@@ -410,7 +423,7 @@ namespace TailRemote
                 t = "TailRemote - " + (_client.ListenOnly ? "listening" : _keys?.Remote == true ? "controlling remote" : "connected");
                 if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
                 int audio = _client.AudioDelayMs;
-                if (audio >= 0) t += ", audio " + (audio + Math.Max(0, _client.LastPingMs) / 2) + " ms";
+                if (audio >= 0) t += ", audio " + (audio + _client.PingForAudio / 2) + " ms";
                 if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
             }
             else if (_reconnecting) t = "TailRemote - reconnecting";
@@ -420,7 +433,7 @@ namespace TailRemote
             string st = _client == null ? (_reconnecting ? "Not connected: trying again every 3 seconds" : "Not connected")
                 : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
                   (_client.LockedStep >= 0 ? ", locked" : ", variable") +
-                  (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + Math.Max(0, _client.LastPingMs) / 2) + " ms" : "");
+                  (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "");
             if (_streaming.Text != st) _streaming.Text = st;
         }
 

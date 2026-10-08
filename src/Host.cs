@@ -561,14 +561,20 @@ namespace TailRemote
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_stop) return; continue; }
-                if (d.Length != 9 || d[0] != Protocol.UdpHello) continue;
+                if ((d.Length != 9 && d.Length != 17) || d[0] != Protocol.UdpHello) continue;
                 Session? s;
-                s = Array.Find(AllSessions(), x => d.AsSpan(1).SequenceEqual(x.Token));
+                s = Array.Find(AllSessions(), x => d.AsSpan(1, 8).SequenceEqual(x.Token));
                 if (s == null) continue;
                 var from = any.Address.IsIPv4MappedToIPv6 ? any.Address.MapToIPv4() : any.Address;
                 if (!from.Equals(s.Address)) continue;
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);
                 Volatile.Write(ref s.HeardAt, Environment.TickCount64);
+                if (d.Length == 17)
+                {
+                    // Straight back, on the same path the sound takes: the client's audio ping.
+                    d[8] = Protocol.UdpPong;
+                    try { _udp.Send(d.AsSpan(8, 9), s.AudioTo); } catch { }
+                }
             }
         }
     }
