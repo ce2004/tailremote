@@ -141,23 +141,20 @@ namespace TailRemote
         private static readonly Dictionary<Tone, string> Last = new();
 
         /// <summary>
-        /// What an event plays this time. Default: its own pattern (rising for connecting,
-        /// a sigh for an error...) on a random instrument; Random sound: anything at all.
-        /// Never the same instrument (or sound) twice in a row, so it does not get samey.
+        /// What an event plays this time. Default: always the same, its own tune on the piano
+        /// (rising for connecting, a sigh for an error...), so each event sounds like itself.
+        /// (It used to pick a new instrument every time, which just sounded wrong.) Random
+        /// sound: anything at all, never the same twice in a row; only if you choose it.
         /// </summary>
         public static string Resolve(Tone t, string choice)
         {
-            if (choice != DefaultName && choice != RandomName) return choice;
+            if (choice == DefaultName) return Default(t);
+            if (choice != RandomName) return choice;
             lock (Last)
             {
                 Last.TryGetValue(t, out var before);
                 string pick;
-                do
-                {
-                    pick = choice == DefaultName
-                        ? Instruments[Rng.Next(Instruments.Length)].Name + ", " + Default(t)["Piano, ".Length..]
-                        : All[Rng.Next(1, All.Count)];
-                }
+                do pick = All[Rng.Next(1, All.Count)];
                 while (pick == before && All.Count > 2);
                 Last[t] = pick;
                 return pick;

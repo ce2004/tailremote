@@ -7,7 +7,7 @@ namespace TailRemote
 {
     /// <summary>
     /// Sounds: which sound each event makes. One list per event: Default (the
-    /// event's own tune on a different instrument each time), Random sound, None,
+    /// event's own tune on the piano, always the same), Random sound, None,
     /// then every sound (Sounds.All). Moving through a list plays each as you reach it.
     /// </summary>
     internal sealed class SoundsForm : Form
@@ -46,7 +46,7 @@ namespace TailRemote
             {
                 var label = new Label { Text = Sounds.Label(t), AutoSize = true, Anchor = AnchorStyles.Left };
                 var list = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, AccessibleName = Sounds.Label(t).Replace("&", "") };
-                // Default first (this event's own tune on a different instrument each time), then
+                // Default first (this event's own tune on the piano, always the same), then
                 // Random sound (anything, each time), then None and every sound.
                 list.Items.Add(Sounds.DefaultName);
                 list.Items.Add(Sounds.RandomName);

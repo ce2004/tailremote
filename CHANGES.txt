@@ -1,3 +1,6 @@
+1.8.11
+Bug fixed: each event's sound played on a different instrument every time. Default now always sounds the same: each event's own tune on the piano. Choose Random sound for an event in Sounds (Alt L) if you want it to change.
+
 1.8.10
 Changed: nothing is shared by itself any more. Both PCs have two buttons. Send the clipboard (Alt B) sends what is on your clipboard (text, or files and folders you copied) to the other PC's clipboard, ready to paste with Control V. Send files (Alt I) sends files you choose to Downloads, TailRemote on the other PC, never over anything already there. The Share clipboard box is gone.
 Bug fixed: the wrong sound could play for an event. Clipboard text played a file sound, and stopping or replacing a transfer on purpose played the error sound. Now the clipboard has its own sounds, files have theirs, and the error sound is only for real failures.
