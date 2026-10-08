@@ -1,3 +1,7 @@
+1.8.14
+Bug fixed: connecting by a LAN address could give keys but no sound, if the remote PC answered from another of its addresses on that network. Sound is now accepted from any of the remote PC's addresses (every packet is still encrypted and checked).
+New feature: if the sound cannot get through at all (UDP blocked by a firewall or the network) while keys still work, TailRemote says so within a few seconds, on both PCs, and the Streaming line says NO SOUND with what to do: open the port with Port editor on the remote PC, or check its firewall.
+
 1.8.13
 Bug fixed: files sent with Send the clipboard took up twice their space once you pasted them, because pasting copied them out of TailRemote's holding folder. Pasting now moves them instead. On the same drive that is instant and they only ever exist once; onto another drive they move one file at a time, so at most one extra file exists for a moment.
 New feature: Send a folder and everything in it (Alt T) sends a whole folder to Downloads, TailRemote on the other PC.

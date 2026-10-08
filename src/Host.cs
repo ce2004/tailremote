@@ -55,6 +55,8 @@ namespace TailRemote
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
             public volatile IPEndPoint? AudioTo;
             public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
+            public readonly long Since = Environment.TickCount64;
+            public bool WarnedNoUdp;
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
             public readonly byte[] Audio = new byte[5 + 1 + Protocol.MaxOpusBytes + SecureLink.TagSize];
             public uint SentUntil; // the tick after the last audio sent
@@ -310,6 +312,14 @@ namespace TailRemote
             while (!_stop)
             {
                 Thread.Sleep(1000);
+                // Connected, but its UDP hello never came: this PC cannot send it any sound. Said once.
+                foreach (var s in AllSessions())
+                    if (s.AudioTo == null && !s.WarnedNoUdp && Environment.TickCount64 - s.Since > 5000)
+                    {
+                        s.WarnedNoUdp = true;
+                        _status("No sound can reach " + s.Address + ": nothing from it arrives here over UDP port " + ((IPEndPoint)_listener.LocalEndpoint).Port +
+                            ", though its keys do. Open the port with Port editor on this PC, or check the firewall and the network.");
+                    }
                 if (!DiagLog.Enabled) continue;
                 int fills = Interlocked.Exchange(ref LoopbackCapture.TestGapFills, 0);
                 int fillMs = Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);

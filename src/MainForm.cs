@@ -646,7 +646,8 @@ namespace TailRemote
             string st = _client == null ? (_reconnecting ? "Not connected: trying again every 3 seconds" : "Not connected")
                 : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
                   (_client.LockedStep >= 0 ? ", locked" : ", variable") +
-                  (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "");
+                  (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "") +
+                  (_client.UdpBlocked ? ". NO SOUND: UDP port " + _client.Port + " is blocked between the PCs. On the remote PC, open it with Port editor, or check its firewall" : "");
             if (_streaming.Text != st) _streaming.Text = st;
         }
 

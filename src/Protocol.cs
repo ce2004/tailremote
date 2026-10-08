@@ -43,14 +43,12 @@ namespace TailRemote
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
         public const byte FilePace = 7;      // u32 KB/s: how fast the host may send files (the client sets it from the audio ping)
-        public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)
-        // Either way
+        public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)        // Either way
         public const byte Features = 0x40;   // u32 flags
         // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
-        public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
-        // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
+        public const byte Message = 0x82; // UTF-8 text (the frame gives the length)        // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8] stamp[8], client to host, every second

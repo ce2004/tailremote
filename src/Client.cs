@@ -39,6 +39,12 @@ namespace TailRemote
         public int AudioPingMs { get; private set; } = -1;
         /// <summary>The ping the audio delay should use: the audio path's own, or the TCP one until that is measured.</summary>
         public int PingForAudio => AudioPingMs >= 0 ? AudioPingMs : Math.Max(0, LastPingMs);
+        /// <summary>UDP gets no answer while the connection works (a firewall, usually): no sound can come.</summary>
+        public bool UdpBlocked => _udpBlocked;
+        public int Port => _hostUdp.Port;
+        private volatile bool _udpBlocked;
+        private long _lastUdpPong;
+        private IPEndPoint _hostUdp = null!;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
 
@@ -118,12 +124,15 @@ namespace TailRemote
                 udp.Client.DualMode = true;
                 udp.Client.ReceiveBufferSize = 1 << 20;
                 Host.IgnoreUdpResets(udp.Client);
-                udp.Connect(hostEp.Address, port);
+                // Not connected to one address: a host with more than one address on a network
+                // can answer from another, and a connected socket silently threw that sound away.
+                // Every audio packet is encrypted and checked, so nothing false gets in.
 
                 player.Reset();
                 var c = new Client(tcp, stream, udp, token, player, new SecureLink(key, hostNonce, myNonce, isHost: false))
                 {
                     ListenOnly = role[0] == Protocol.RoleListen,
+                    _hostUdp = new IPEndPoint(hostEp.Address, port),
                 };
                 if (lockedStep >= 0)
                 {
@@ -478,6 +487,7 @@ namespace TailRemote
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_closed) return; continue; }
+                if (any.Port != _hostUdp.Port) continue; // only TailRemote's port (any of the host's addresses)
                 Interlocked.Increment(ref _rxPackets);
                 Interlocked.Add(ref _rxBytes, d.Length);
                 if (TestDropPercent > 0 && Random.Shared.Next(100) < TestDropPercent) continue;
@@ -540,7 +550,10 @@ namespace TailRemote
             {
                 long sent = BitConverter.ToInt64(d, 1);
                 long ms = (Stopwatch.GetTimestamp() - sent) * 1000 / Stopwatch.Frequency;
-                if (ms >= 0 && ms < 10_000) { AudioPingMs = (int)ms; PaceFrom((int)ms); }
+                if (ms < 0 || ms >= 10_000) return;
+                Volatile.Write(ref _lastUdpPong, Environment.TickCount64);
+                AudioPingMs = (int)ms;
+                PaceFrom((int)ms);
                 return;
             }
             if (d.Length < Protocol.MinAudioPacketBytes || d[0] != Protocol.UdpOpus) return;
@@ -794,17 +807,29 @@ namespace TailRemote
             byte[] ping = new byte[9];
             long lastHello = 0, lastPing = 0;
             _lastPong = Environment.TickCount64;
+            Volatile.Write(ref _lastUdpPong, _lastPong);
             while (!_closed)
             {
                 long now = Environment.TickCount64;
                 if (now - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
+                // The connection works but UDP gets no answer: no sound can come. Said once, plainly,
+                // with what to do (and once more when it gets through again).
+                bool blocked = now - Volatile.Read(ref _lastUdpPong) > 4000;
+                if (blocked != _udpBlocked)
+                {
+                    _udpBlocked = blocked;
+                    DiagLog.Write("client: UDP " + (blocked ? "gets no answer" : "answers again"));
+                    Status?.Invoke(blocked
+                        ? "No sound: UDP port " + _hostUdp.Port + " is blocked between the PCs, though keys still work. On the remote PC, open the port with Port editor, or check its firewall and the network's."
+                        : "Sound is getting through again.");
+                }
                 // The UDP hello (and its pong, the audio ping): once a second, or ten times a second
                 // while files are going either way, so the pacing sees queueing at once.
                 if (now - lastHello >= (_files?.Busy == true ? 100 : 1000))
                 {
                     lastHello = now;
                     BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
-                    try { _udp.Send(hello, hello.Length); } catch { }
+                    try { _udp.Send(hello, hello.Length, _hostUdp); } catch { }
                 }
                 if (now - lastPing >= 2000)
                 {
