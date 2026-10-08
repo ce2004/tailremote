@@ -625,7 +625,8 @@ namespace TailRemote
             t.Finished = true;
             t.Waiting = false;
             t.Files = Array.Empty<(string, long, long)>();
-            if (o.Outcome == EndedWell) t.Result = "Sent " + o.What + ", at " + Speed(t.BytesPerSecond) + ".";
+            if (o.Outcome == EndedWell)
+                t.Result = "Sent " + o.What + (o.Kind == KindText ? "" : Summary(o.Entries.Select(e => (e.Rel, e.Length)))) + ", at " + Speed(t.BytesPerSecond) + ".";
             else { t.Failed = true; t.Cancelled = o.Outcome == EndedStopped; t.Result = o.Why; }
             DiagLog.Write("files: " + o.What + ": " + t.Result);
             Progress?.Invoke(t);
@@ -1026,9 +1027,9 @@ namespace TailRemote
             if (b.Kind == KindFiles)
             {
                 paths = b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray();
-                t.Result = "The other PC sent " + t.What + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
+                t.Result = "The other PC sent " + t.What + Summary(b.Entries.Select(e => e!.Value)) + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
             }
-            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + ", at " + Speed(t.BytesPerSecond) + ". It is in Downloads, TailRemote.";
+            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + ", at " + Speed(t.BytesPerSecond) + ". It is in Downloads, TailRemote.";
             else
             {
                 text = Encoding.UTF8.GetString(b.Text!);
@@ -1145,6 +1146,25 @@ namespace TailRemote
                     try { old.Delete(true); } catch { }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// " (2.3 GB, 152 files and 12 folders)" for what a batch held, or " (2.0 MB)" for one file.
+        /// The folders chosen themselves are not counted, only what is in them.
+        /// </summary>
+        private static string Summary(IEnumerable<(string Rel, long Length)> entries)
+        {
+            long bytes = 0;
+            int files = 0, folders = 0, tops = 0;
+            foreach (var (rel, length) in entries)
+            {
+                if (length >= 0) { files++; bytes += length; }
+                else if (rel.IndexOfAny(new[] { '\\', '/' }) < 0) tops++;
+                else folders++;
+            }
+            if (files == 1 && folders == 0 && tops == 0) return " (" + Size(bytes) + ")";
+            string what = files + (files == 1 ? " file" : " files") + (folders > 0 ? " and " + folders + (folders == 1 ? " folder" : " folders") : "");
+            return " (" + Size(bytes) + ", " + what + ")";
         }
 
         public static string Speed(double bytesPerSecond) =>

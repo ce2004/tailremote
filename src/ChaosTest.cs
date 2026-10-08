@@ -187,9 +187,14 @@ namespace TailRemote
                     }
                     Directory.CreateDirectory(Path.Combine(src, "empty folder"));
                     string[]? landed = null;
+                    string? said = null;
                     host.ClipboardFilesReceived += p => landed = p;
+                    Action<FileChannel.Transfer> note = t => { if (t.Finished && t.What == "Mess") said = t.Result; };
+                    host.TransferProgress += note;
                     ctrl.Files!.SendFiles(new[] { src });
                     for (int i = 0; i < 1000 && landed == null; i++) Thread.Sleep(20);
+                    host.TransferProgress -= note;
+                    Console.WriteLine("the receiving PC said: " + said);
                     if (landed == null) return "FAIL: nothing arrived";
                     var got = Directory.EnumerateFiles(landed[0], "*", SearchOption.AllDirectories).ToList();
                     long gotBytes = got.Sum(f => new FileInfo(f).Length);
