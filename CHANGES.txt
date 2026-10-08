@@ -1,5 +1,9 @@
+1.8.18
+Bug fixed: connecting a second controlling PC kicked the first one off; it reconnected and kicked the second, and the two kept connecting and disconnecting for ever. Now the same password lets many PCs control at once (up to 100), each with its own keys, sound and file transfers. Send the clipboard and Send files on the host go to all of them.
+Bug fixed: the 1.8.17 notes showed a made-up folder name, Album, as an example. TailRemote always says the real name of what you sent.
+
 1.8.17
-Changed: when a transfer finishes, both PCs say how big it was and what was in it, such as: Sent Album (2.3 GB, 152 files and 12 folders), at 80 megabytes a second. A single file just gets its size.
+Changed: when a transfer finishes, both PCs say how big it was and how many files and folders were in it, after the name of what you sent. A single file just gets its size.
 
 1.8.16
 Bug fixed: while the TailRemote service hosted, Send the clipboard, Send files and Send a folder did nothing, and what the controlling PC sent could not be pasted. The TailRemote window now does all of that through the service, exactly as when it hosts itself: same buttons, same Files line and progress bars, and what arrives goes onto your clipboard. The service opens the files you send as you, so nothing you could not open yourself can be sent.

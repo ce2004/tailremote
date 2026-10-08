@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -34,8 +35,11 @@ namespace TailRemote
         public Func<bool>? SecureAttention { get; init; }
 
         private readonly object _gate = new();
-        private Session? _controller;
-        private FileChannel? _kept; // the last controller's file channel, for its next connection; under _gate
+        // Any number of controllers up to MaxControllers, all at once: a second one used to replace
+        // the first, which reconnected and replaced the second, back and forth for ever.
+        private readonly List<Session> _controllers = new();
+        public const int MaxControllers = 100; // the same password lets many PCs control at once; this only stops a runaway
+        private readonly List<FileChannel> _kept = new(); // file channels of controllers that dropped, for their next connection; under _gate
         private readonly List<Session> _listeners = new();
         private LoopbackCapture? _capture;
 
@@ -112,9 +116,9 @@ namespace TailRemote
             lock (_gate)
             {
                 foreach (var s in AllSessions()) End(s, null);
-                _kept?.Dispose();
-                _kept = null;
-                _controller = null;
+                foreach (var k in _kept) k.Dispose();
+                _kept.Clear();
+                _controllers.Clear();
                 _listeners.Clear();
                 Rebuild();
                 c = _capture;
@@ -134,51 +138,47 @@ namespace TailRemote
             try { s.IOControl(SIO_UDP_CONNRESET, new byte[4], null); } catch { }
         }
 
-        /// <summary>Sends clipboard text to the controller's clipboard. Never waits.</summary>
+        /// <summary>Every controller's file channel (each controlling PC gets what this PC sends).</summary>
+        private FileChannel[] ControllerChannels()
+        {
+            lock (_gate) return _controllers.Select(c => c.Files).OfType<FileChannel>().ToArray();
+        }
+
+        /// <summary>Sends clipboard text to every controller's clipboard. Never waits.</summary>
         public void SendClipboard(string text)
         {
-            Session? c;
-            lock (_gate) c = _controller;
-            var files = c?.Files;
-            if (files == null) return;
             // Over the file lanes: confirmed on arrival, and sent again if a connection breaks on the way.
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
+            foreach (var files in ControllerChannels())
+                ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
         }
 
-        /// <summary>Copied files from here to the controller's clipboard. Never waits.</summary>
+        /// <summary>Copied files from here to every controller's clipboard. Never waits.</summary>
         public void SendClipboardFiles(IReadOnlyList<string> paths, System.Security.Principal.WindowsIdentity? asUser = null)
         {
-            Session? c;
-            lock (_gate) c = _controller;
-            var files = c?.Files;
-            if (files == null) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true, asUser); } catch { } });
+            foreach (var files in ControllerChannels())
+                ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true, asUser); } catch { } });
         }
 
-        /// <summary>Send files: into the controller's Downloads\TailRemote. Never waits.</summary>
-        /// <summary>asUser: the service's agent opens the files as the window's user, never as SYSTEM.</summary>
+        /// <summary>Send files: into every controller's Downloads\TailRemote. Never waits. asUser: the service's agent opens the files as the window's user, never as SYSTEM.</summary>
         public void SendFiles(IReadOnlyList<string> paths, System.Security.Principal.WindowsIdentity? asUser = null)
         {
-            Session? c;
-            lock (_gate) c = _controller;
-            var files = c?.Files;
-            if (files == null) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false, asUser); } catch { } });
+            foreach (var files in ControllerChannels())
+                ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false, asUser); } catch { } });
         }
 
-        /// <summary>True while someone is controlling this PC (the only one files and the clipboard can go to).</summary>
-        public bool HasController { get { lock (_gate) return _controller?.Files != null; } }
+        /// <summary>True while someone is controlling this PC (the only ones files and the clipboard can go to).</summary>
+        public bool HasController => ControllerChannels().Length > 0;
 
-        /// <summary>Stops what is going to or coming from the controller (also while it is reconnecting).</summary>
+        /// <summary>Stops what is going to or coming from the controllers (also while one is reconnecting).</summary>
         public void CancelTransfer()
         {
-            FileChannel? files;
-            lock (_gate) files = _controller?.Files ?? _kept;
-            files?.CancelSending();
+            FileChannel[] all;
+            lock (_gate) all = ControllerChannels().Concat(_kept).ToArray();
+            foreach (var files in all) files.CancelSending();
         }
 
-        /// <summary>Test only: the controller's file channel.</summary>
-        internal FileChannel? ControllerFiles { get { lock (_gate) return _controller?.Files; } }
+        /// <summary>Test only: the newest controller's file channel.</summary>
+        internal FileChannel? ControllerFiles { get { lock (_gate) return _controllers.LastOrDefault()?.Files; } }
 
         /// <summary>Files from the controller's clipboard, in the holding folder. Raised on a network thread.</summary>
         public event Action<string[]>? ClipboardFilesReceived;
@@ -197,7 +197,7 @@ namespace TailRemote
         private void Rebuild()
         {
             var all = new List<Session>(_listeners);
-            if (_controller != null) all.Add(_controller);
+            all.AddRange(_controllers);
             _everyone = all.ToArray();
         }
 
@@ -389,13 +389,13 @@ namespace TailRemote
                     Session? owner = null;
                     for (int i = 0; i < 40 && owner == null; i++)
                     {
-                        lock (_gate) owner = _controller != null && _controller.Token.AsSpan().SequenceEqual(answer.AsSpan(4, 8)) && _controller.Address.Equals(remote) ? _controller : null;
+                        lock (_gate) owner = _controllers.Find(c => c.Token.AsSpan().SequenceEqual(answer.AsSpan(4, 8)) && c.Address.Equals(remote));
                         if (owner == null) Thread.Sleep(50);
                     }
                     if (owner == null) { tcp.Dispose(); return; }
                     // One more lane for the controller's channel. A channel this PC already has
-                    // (the controller's main connection dropped and came back) carries on with
-                    // what it was doing; a new one replaces any other.
+                    // (the controller's main connection dropped and came back: kept, or still on
+                    // its old session that has not timed out yet) carries on with what it was doing.
                     byte[] channel = answer[12..28];
                     FileChannel files;
                     lock (_gate)
@@ -403,10 +403,13 @@ namespace TailRemote
                         if (owner.Files is FileChannel mine && !mine.Gone && mine.Id.AsSpan().SequenceEqual(channel)) files = mine;
                         else
                         {
-                            if (_kept != null && !_kept.Gone && _kept.Id.AsSpan().SequenceEqual(channel)) files = _kept;
+                            bool Same(FileChannel f) => !f.Gone && f.Id.AsSpan().SequenceEqual(channel);
+                            var stale = _controllers.Find(c => c != owner && c.Files is FileChannel f && Same(f));
+                            var kept = _kept.Find(Same);
+                            if (stale != null) { files = stale.Files!; stale.Files = null; }
+                            else if (kept != null) { files = kept; _kept.Remove(kept); }
                             else
                             {
-                                _kept?.Dispose();
                                 files = new FileChannel(channel)
                                 {
                                     TextReceived = text => ClipboardReceived?.Invoke(text),
@@ -414,7 +417,6 @@ namespace TailRemote
                                     Progress = t => TransferProgress?.Invoke(t),
                                 };
                             }
-                            _kept = null;
                             if (owner.Files != files) owner.Files?.Dispose();
                             owner.Files = files;
                             var o = owner;
@@ -473,8 +475,13 @@ namespace TailRemote
                     if (_stop) { End(s, null); return; }
                     if (role == Protocol.RoleControl)
                     {
-                        if (_controller != null) End(_controller, "Replaced by a new connection.");
-                        _controller = s;
+                        if (_controllers.Count >= MaxControllers)
+                        {
+                            End(s, "There are already " + MaxControllers + " PCs controlling this one.");
+                            s = null;
+                            return;
+                        }
+                        _controllers.Add(s);
                     }
                     else
                     {
@@ -505,8 +512,7 @@ namespace TailRemote
                     bool was = false;
                     lock (_gate)
                     {
-                        if (_controller == s) { _controller = null; was = true; }
-                        else if (_listeners.Remove(s)) was = true;
+                        if (_controllers.Remove(s) || _listeners.Remove(s)) was = true;
                         if (was) { End(s, null); Rebuild(); }
                     }
                     if (was) _status((s.Role == Protocol.RoleControl ? "Disconnected: " : "Stopped listening: ") + remote + ".");
@@ -516,6 +522,8 @@ namespace TailRemote
                 Native.LeaveDesktop();
             }
         }
+
+        private bool IsController(Session s) { lock (_gate) return _controllers.Contains(s); }
 
         private void ReadLoop(Session s)
         {
@@ -531,9 +539,9 @@ namespace TailRemote
                         bool up = (m[5] & 1) != 0, ext = (m[5] & 2) != 0;
                         lock (_gate)
                         {
-                            // Only the current controller types. A replaced or closed session
-                            // must not press anything after its keys were released.
-                            if (_controller != s) break;
+                            // Only connected controllers type. A closed session must not press
+                            // anything after its keys were released.
+                            if (!_controllers.Contains(s)) break;
                             lock (s.Held) { if (up) s.Held.Remove((vk, ext)); else s.Held.Add((vk, ext)); }
                             Native.SendKey(vk, scan, up, ext);
                         }
@@ -545,11 +553,11 @@ namespace TailRemote
                     case Protocol.ReleaseAll:
                         ReleaseHeld(s);
                         break;
-                    case Protocol.SecureAttention when _controller == s:
+                    case Protocol.SecureAttention when IsController(s):
                         if (SecureAttention == null) Protocol.SendMessage(s.Link, s.Stream, "Control Alt Delete needs the TailRemote service on the remote PC.");
                         else if (!SecureAttention()) Protocol.SendMessage(s.Link, s.Stream, "The remote PC could not send Control Alt Delete.");
                         break;
-                    case Protocol.RestartPc when _controller == s:
+                    case Protocol.RestartPc when IsController(s):
                         _status("Restarting this PC, as the controlling PC asked.");
                         Broadcast("The remote PC is restarting.");
                         // A normal restart: programs can still ask to save their work.
@@ -592,13 +600,14 @@ namespace TailRemote
             if (s.Files is FileChannel f)
             {
                 // Kept for the controller's next connection (a dropped one comes straight back),
-                // so its transfers carry on; stopping hosting ends them.
-                if (_stop) f.Dispose();
+                // so its transfers carry on; stopping hosting ends them. With nothing going there
+                // is nothing to carry on: closed at once (it would otherwise hold two threads for a minute).
+                if (_stop || !f.Busy) f.Dispose();
                 else
                 {
                     f.Detach();
-                    if (_kept != f) _kept?.Dispose();
-                    _kept = f;
+                    if (!_kept.Contains(f)) _kept.Add(f);
+                    while (_kept.Count > MaxControllers) { _kept[0].Dispose(); _kept.RemoveAt(0); }
                 }
             }
             if (why == null) { try { s.Tcp.Dispose(); } catch { } return; }

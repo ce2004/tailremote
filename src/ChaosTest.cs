@@ -88,24 +88,15 @@ namespace TailRemote
                 return "sessions left: " + host.TestSessions + "; " + Healthy(host, "after the storm");
             });
 
-            Scenario("two controllers kicking each other off, 20 times", 60, () =>
+            Scenario("20 controllers with the same password, all at once: nobody is kicked off", 60, () =>
             {
-                int kicked = 0;
-                Client? previous = null;
-                for (int i = 0; i < 20; i++)
-                {
-                    var c = Connect(Password);
-                    if (previous != null)
-                    {
-                        var p = previous;
-                        for (int w = 0; w < 40 && !p.TestClosed; w++) Thread.Sleep(25);
-                        if (p.TestClosed) kicked++;
-                        p.Dispose();
-                    }
-                    previous = c;
-                }
-                previous?.Dispose();
-                return kicked == 19 ? "every old controller was told it was replaced" : "FAIL: only " + kicked + " of 19 replaced controllers noticed";
+                var all = Enumerable.Range(0, 20).Select(_ => Connect(Password)).ToList();
+                Thread.Sleep(2500);
+                int up = all.Count(c => !c.TestClosed);
+                int sessions = host.TestSessions;
+                foreach (var c in all) c.Dispose();
+                Thread.Sleep(1500);
+                return up == 20 && sessions == 20 ? "all 20 stayed connected together" : "FAIL: " + up + " of 20 still connected, " + sessions + " sessions";
             });
 
             Scenario("100 listeners at once, plus one too many", 120, () =>
