@@ -23,7 +23,8 @@ namespace TailRemote
         private readonly AesGcm _send, _recv, _audio;
         private readonly object _sendLock = new();
         private ulong _sendCounter, _recvCounter;
-        private readonly byte[] _recvHead = new byte[4];
+        private readonly byte[] _recvHead = new byte[8];
+        private const int HeadBytes = 8; // u32 length, then the length with every bit flipped
 
         /// <summary>purpose keeps a second connection (files) on keys of its own.</summary>
         public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "")
@@ -56,14 +57,12 @@ namespace TailRemote
         /// <summary>Sends one message as [u32 length][ciphertext][tag]. Safe from any thread.</summary>
         public void Send(Stream s, ReadOnlySpan<byte> message)
         {
-            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
-            byte[] frame = new byte[4 + message.Length + TagSize];
-            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);
+            byte[] frame = Frame(message.Length);
             Span<byte> nonce = stackalloc byte[12];
             lock (_sendLock)
             {
                 CounterNonce(nonce, _sendCounter++);
-                _send.Encrypt(nonce, message, frame.AsSpan(4, message.Length), frame.AsSpan(4 + message.Length, TagSize));
+                _send.Encrypt(nonce, message, frame.AsSpan(HeadBytes, message.Length), frame.AsSpan(HeadBytes + message.Length, TagSize));
                 s.Write(frame);
             }
         }
@@ -76,15 +75,22 @@ namespace TailRemote
         /// </summary>
         public byte[] Seal(ReadOnlySpan<byte> message)
         {
-            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
-            byte[] frame = new byte[4 + message.Length + TagSize];
-            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);
+            byte[] frame = Frame(message.Length);
             Span<byte> nonce = stackalloc byte[12];
             lock (_sendLock)
             {
                 CounterNonce(nonce, _sendCounter++);
-                _send.Encrypt(nonce, message, frame.AsSpan(4, message.Length), frame.AsSpan(4 + message.Length, TagSize));
+                _send.Encrypt(nonce, message, frame.AsSpan(HeadBytes, message.Length), frame.AsSpan(HeadBytes + message.Length, TagSize));
             }
+            return frame;
+        }
+
+        private static byte[] Frame(int length)
+        {
+            if (length > MaxMessage) throw new ArgumentException("Message too large.");
+            byte[] frame = new byte[HeadBytes + length + TagSize];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), length);
+            BitConverter.TryWriteBytes(frame.AsSpan(4, 4), ~length);
             return frame;
         }
 
@@ -93,14 +99,15 @@ namespace TailRemote
         {
             Protocol.ReadExactly(s, _recvHead);
             int len = BitConverter.ToInt32(_recvHead);
-            if (len < 0 || len > MaxMessage) throw new InvalidOperationException("The connection sent something too large.");
+            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > MaxMessage)
+                throw new InvalidOperationException("The connection damaged data on the way, so it reconnected.");
             byte[] body = new byte[len + TagSize];
             Protocol.ReadExactly(s, body);
             byte[] message = new byte[len];
             Span<byte> nonce = stackalloc byte[12];
             CounterNonce(nonce, _recvCounter++);
             try { _recv.Decrypt(nonce, body.AsSpan(0, len), body.AsSpan(len, TagSize), message); }
-            catch (CryptographicException) { throw new InvalidOperationException("The connection was tampered with, so it was closed."); }
+            catch (CryptographicException) { throw new InvalidOperationException("The connection damaged data on the way, so it reconnected."); }
             return message;
         }
 

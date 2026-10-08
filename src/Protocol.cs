@@ -32,9 +32,9 @@ namespace TailRemote
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM6"u8.ToArray(); // 6: Opus audio (1.8)
+        public static readonly byte[] Magic = "TRM7"u8.ToArray(); // 7: login messages carry a check (1.8.5); 6 was Opus audio
         /// <summary>A client's second connection, for files: "TRF6" + session token (8), padded to 52 bytes.</summary>
-        public static readonly byte[] FileMagic = "TRF6"u8.ToArray();
+        public static readonly byte[] FileMagic = "TRF7"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -90,6 +90,35 @@ namespace TailRemote
         public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart;
 
         public const int MaxClipboardChars = 1_000_000;
+
+        // ---- The login, damage-proof ----
+        // Before the keys exist nothing is encrypted, so a damaged byte (Clumsy's tamper,
+        // a bad link) used to look exactly like a wrong password: the client gave up and
+        // the host counted it toward blocking the address. Every login message now ends
+        // with a 4-byte check of the rest. A wrong check means damage: never counted as a
+        // wrong password, and the client simply tries again.
+        public const int HelloBytes = 24;  // magic 4, host nonce 16, check 4
+        public const int AnswerBytes = 56; // magic 4, client nonce 16, proof 32, check 4 (files: magic, token 8, zeros)
+        public const int ReplyBytes = 46;  // ok 1, role 1, token 8, host proof 32, check 4 (a refusal is the same size)
+
+        /// <summary>Fills the last 4 bytes with a check of everything before them.</summary>
+        public static void AddCheck(byte[] message)
+        {
+            Span<byte> h = stackalloc byte[32];
+            SHA256.HashData(message.AsSpan(0, message.Length - 4), h);
+            h[..4].CopyTo(message.AsSpan(message.Length - 4));
+        }
+
+        /// <summary>True if the last 4 bytes match the rest: the message was not damaged on the way.</summary>
+        public static bool CheckOk(byte[] message)
+        {
+            Span<byte> h = stackalloc byte[32];
+            SHA256.HashData(message.AsSpan(0, message.Length - 4), h);
+            return h[..4].SequenceEqual(message.AsSpan(message.Length - 4));
+        }
+
+        /// <summary>The message a client gets when its login was damaged on the way: it tries again.</summary>
+        public const string DamagedLogin = "The connection damaged the login on the way.";
 
         public static byte[] FeaturesMessage(uint extra = 0)
         {

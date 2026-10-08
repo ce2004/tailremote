@@ -116,7 +116,8 @@ namespace TailRemote
                 c = _capture;
                 _capture = null;
             }
-            c?.Dispose();
+            // Stopping the capture waits for its thread (up to 2 seconds): never on the caller's (window's) thread.
+            if (c != null) ThreadPool.QueueUserWorkItem(_ => c.Dispose());
         }
 
         /// <summary>
@@ -314,13 +315,17 @@ namespace TailRemote
                 stream.ReadTimeout = 5_000; // a login that says nothing is dropped after 5 seconds
 
                 byte[] nonce = RandomNumberGenerator.GetBytes(16);
-                byte[] hello = new byte[20];
+                byte[] hello = new byte[Protocol.HelloBytes];
                 Protocol.Magic.CopyTo(hello, 0);
                 nonce.CopyTo(hello, 4);
+                Protocol.AddCheck(hello);
                 stream.Write(hello);
 
-                byte[] answer = new byte[52];
+                byte[] answer = new byte[Protocol.AnswerBytes];
                 Protocol.ReadExactly(stream, answer);
+                // Damaged on the way (or junk): hang up. Never counted as a wrong password, so
+                // a bad link cannot get a PC blocked, and the client simply tries again.
+                if (!Protocol.CheckOk(answer)) { tcp.Dispose(); return; }
                 if (answer.AsSpan(0, 4).SequenceEqual(Protocol.FileMagic))
                 {
                     // The controller's second connection, for files.
@@ -343,9 +348,9 @@ namespace TailRemote
                 byte[]? key = null;
                 if (answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic))
                 {
-                    if (CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_key, 'C', nonce, clientNonce)))
+                    if (CryptographicOperations.FixedTimeEquals(answer.AsSpan(20, 32), Protocol.Proof(_key, 'C', nonce, clientNonce)))
                     { role = Protocol.RoleControl; key = _key; }
-                    else if (_listenKey != null && CryptographicOperations.FixedTimeEquals(answer.AsSpan(20), Protocol.Proof(_listenKey, 'C', nonce, clientNonce)))
+                    else if (_listenKey != null && CryptographicOperations.FixedTimeEquals(answer.AsSpan(20, 32), Protocol.Proof(_listenKey, 'C', nonce, clientNonce)))
                     { role = Protocol.RoleListen; key = _listenKey; }
                 }
                 if (key == null)
@@ -353,17 +358,20 @@ namespace TailRemote
                     string? note = WrongPassword(remote);
                     if (note != null) _status(note);
                     Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
-                    stream.Write(new byte[] { 0 });
+                    byte[] refuse = new byte[Protocol.ReplyBytes]; // the same size as an acceptance
+                    Protocol.AddCheck(refuse);
+                    stream.Write(refuse);
                     tcp.Dispose();
                     return;
                 }
 
                 byte[] token = RandomNumberGenerator.GetBytes(8);
-                byte[] accept = new byte[42];
+                byte[] accept = new byte[Protocol.ReplyBytes];
                 accept[0] = 1;
                 accept[1] = role;
                 token.CopyTo(accept, 2);
                 Protocol.Proof(key, 'H', clientNonce, nonce).CopyTo(accept, 10);
+                Protocol.AddCheck(accept);
                 stream.Write(accept);
                 // The client pings every 2 seconds; 10 silent seconds means it is gone,
                 // and ending the session lets go of any keys it was holding.

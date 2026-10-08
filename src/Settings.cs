@@ -30,6 +30,10 @@ namespace TailRemote
         public bool Logging { get; set; }
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
         public bool CatchUpBySpeed { get; set; }
+        /// <summary>Piano tones for connecting, clipboard, files and the rest (Sounds.cs).</summary>
+        public bool Sounds { get; set; } = true;
+        /// <summary>Which sound each event makes (event name to sound name); events not here get the piano.</summary>
+        public System.Collections.Generic.Dictionary<string, string> SoundChoices { get; set; } = new();
         /// <summary>Sound quality: -1 follows the connection (Variable); otherwise the bitrate step it is locked to.</summary>
         public int SoundQuality { get; set; } = -1;
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();

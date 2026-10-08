@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -24,6 +25,7 @@ namespace TailRemote
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
         private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
         private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
+        private readonly Button _sounds = new() { Text = "Sounds for connecting, clipboard and fi&les", AutoSize = true };
         private readonly CheckBox _speedUp = new() { Text = "Catch up b&y fast-forwarding the sound at 2x or 4x, same pitch (otherwise it skips ahead)", AutoSize = true, MaximumSize = new Size(560, 0) };
         private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
@@ -90,6 +92,8 @@ namespace TailRemote
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
             table.Controls.Add(_speedUp); table.SetColumnSpan(_speedUp, 2);
+            table.Controls.Add(_sounds); table.SetColumnSpan(_sounds, 2);
+            _sounds.Anchor = AnchorStyles.Left;
             table.Controls.Add(_startup); table.SetColumnSpan(_startup, 2);
             table.Controls.Add(_service); table.SetColumnSpan(_service, 2);
 
@@ -114,6 +118,14 @@ namespace TailRemote
             _shareClipboard.Checked = _settings.ShareClipboard;
             _logging.Checked = _settings.Logging;
             _speedUp.Checked = _settings.CatchUpBySpeed;
+            Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && Sounds.All.Contains(s) ? s : Sounds.Default(t);
+            _sounds.Click += (_, _) =>
+            {
+                Doing("choosing sounds");
+                using var f = new SoundsForm(_settings);
+                f.ShowDialog(this);
+            };
+            Sounds.Warm();
             _quality.Items.Add("Variable: follows the connection");
             foreach (var (kbps, _) in Protocol.OpusSteps) _quality.Items.Add("Locked at " + kbps + " kbit/s");
             _quality.SelectedIndex = Math.Clamp(_settings.SoundQuality + 1, 0, _quality.Items.Count - 1);
@@ -195,6 +207,7 @@ namespace TailRemote
             _listenLabel.Visible = _listenPassword.Visible = host;
             _captureLabel.Visible = _captureFrom.Visible = host;
             _speedUp.Visible = !host; // it is about how this PC plays the sound
+            _sounds.Visible = !host; // a host's sounds would go out with its own sound
             _qualityLabel.Visible = _quality.Visible = !host; // the host always sends the best unless asked for less
             _streamingLabel.Visible = _streaming.Visible = !host;
             _toggle.Visible = !host;
@@ -252,36 +265,68 @@ namespace TailRemote
 
         // ---- Clipboard sharing: text only, both ways, never echoed back ----
 
+        // The clipboard is read and written on a thread of its own. Windows' clipboard calls
+        // wait (and retry for a second or more) whenever another program has it open; on the
+        // window's thread that froze TailRemote long enough for Windows to close it (1.8.4).
+        private static readonly System.Collections.Concurrent.BlockingCollection<Action> ClipboardJobs = StartClipboardThread();
+
+        private static System.Collections.Concurrent.BlockingCollection<Action> StartClipboardThread()
+        {
+            var jobs = new System.Collections.Concurrent.BlockingCollection<Action>(16);
+            var t = new System.Threading.Thread(() => { foreach (var job in jobs.GetConsumingEnumerable()) try { job(); } catch { } })
+                { IsBackground = true, Name = "TailRemote clipboard" };
+            t.SetApartmentState(System.Threading.ApartmentState.STA); // the clipboard needs it
+            t.Start();
+            return jobs;
+        }
+
         private void ClipboardChanged()
         {
             if (!_shareClipboard.Checked || (_client == null && _host == null)) return;
-            string? text = null;
-            for (int i = 0; i < 5 && text == null; i++)
+            ClipboardJobs.TryAdd(() =>
             {
-                try { text = Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
-                catch { System.Threading.Thread.Sleep(20); } // another program has it open
-            }
+                string? text = null;
+                for (int i = 0; i < 5 && text == null; i++)
+                {
+                    try { text = Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
+                    catch { System.Threading.Thread.Sleep(50); } // another program has it open
+                }
+                if (text != null) Later(() => ClipboardRead(text));
+            });
+        }
+
+        private void ClipboardRead(string text)
+        {
+            Doing("sharing the clipboard");
+            if (!_shareClipboard.Checked || (_client == null && _host == null)) return;
             if (string.IsNullOrEmpty(text) || text == _lastClipboardIn || text.Length > Protocol.MaxClipboardChars) return;
             _lastClipboardIn = null;
+            if (_client != null && !_client.ListenOnly) Tone(Sounds.Tone.ClipboardSent);
             _client?.SendClipboard(text);
             _host?.SendClipboard(text);
         }
 
         private void ClipboardArrived(string text)
         {
+            Doing("receiving the clipboard");
             if (!_shareClipboard.Checked || text.Length == 0) return;
             _lastClipboardIn = text;
-            for (int i = 0; i < 5; i++)
+            Tone(Sounds.Tone.ClipboardReceived);
+            ClipboardJobs.TryAdd(() =>
             {
-                try { Clipboard.SetText(text); return; }
-                catch { System.Threading.Thread.Sleep(20); }
-            }
+                for (int i = 0; i < 5; i++)
+                {
+                    try { Clipboard.SetDataObject(text, true, 2, 50); return; }
+                    catch { System.Threading.Thread.Sleep(100); }
+                }
+            });
         }
 
         // ---- Which output the host sends ----
 
         private void CaptureChanged()
         {
+            Doing("changing the capture device");
             if (_fillingCapture) return;
             SaveSettings();
             string id = _settings.CaptureDevice;
@@ -309,24 +354,51 @@ namespace TailRemote
 
         // ---- Files ----
 
-        private void SendFiles()
+        private bool _picking;
+
+        /// <summary>
+        /// The Windows file picker, on a thread of its own. It looks through every drive
+        /// and shell add-on as it opens (network and cloud drives, phones), and one that
+        /// is slow or stuck hung it; on the window's thread that froze TailRemote until
+        /// Windows closed it (1.8.4, Brock). Now only the picker waits. Null: nothing chosen.
+        /// </summary>
+        private static System.Threading.Tasks.Task<string[]?> PickFiles()
         {
+            var done = new System.Threading.Tasks.TaskCompletionSource<string[]?>();
+            var t = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    using var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
+                    done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? pick.FileNames : null);
+                }
+                catch (Exception e) { done.TrySetException(e); }
+            }) { IsBackground = true, Name = "TailRemote file picker" };
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.Start();
+            return done.Task;
+        }
+
+        private async void SendFiles()
+        {
+            Doing("sending files");
             if (_client == null && _host == null) { Say("Connect or start hosting first."); return; }
             if (_client?.ListenOnly == true) { Say("Listeners cannot send files."); return; }
+            if (_picking) { Say("The file picker is already open."); return; }
             try
             {
-                string[] paths;
-                using (var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" })
-                {
-                    if (pick.ShowDialog(this) != DialogResult.OK) return;
-                    paths = pick.FileNames;
-                }
+                _picking = true;
+                string[]? paths;
+                try { paths = await PickFiles(); }
+                finally { _picking = false; }
+                if (paths == null || paths.Length == 0) return;
                 var client = _client;
                 var host = _host;
                 if (client == null && host == null) { Say("The connection closed. Connect again, then send the files."); return; }
                 using var progress = new SetupForm("Sending files", (report, ct) => System.Threading.Tasks.Task.Run(() =>
                     client != null ? client.SendFiles(paths, report, ct) : host!.SendFiles(paths, report, ct), ct));
                 progress.ShowDialog(this);
+                Tone(progress.Result == 0 ? Sounds.Tone.FileSent : Sounds.Tone.Error);
             }
             catch (Exception e)
             {
@@ -391,6 +463,7 @@ namespace TailRemote
         {
             base.OnShown(e);
             _shown = true;
+            StartWatchdog();
             _keys = new KeyCapture(() => _handle);
             _keys.ModeChanged += remote => Later(() => ModeChanged(remote));
             _keys.NotConnected += () => Later(() => Say("Not connected."));
@@ -411,7 +484,7 @@ namespace TailRemote
         {
             _toggle.Text = remote ? "Control &this PC (Ctrl+Shift+Enter)" : "Control &remote PC (Ctrl+Shift+Enter)";
             if (_quietModeChange) _quietModeChange = false; // the reconnect message says it
-            else Say(remote ? "Controlling remote PC." : "Controlling this PC.");
+            else { Say(remote ? "Controlling remote PC." : "Controlling this PC."); Tone(remote ? Sounds.Tone.ControlRemote : Sounds.Tone.ControlLocal); }
             UpdateTitle();
         }
 
@@ -453,8 +526,38 @@ namespace TailRemote
             _settings.Save();
         }
 
+        // ---- Hang watchdog ----
+        // Once a second a background thread asks the window to answer. If it has not for
+        // 3 seconds, what it was doing goes to TailRemote-crash.txt, so a freeze can be found.
+        private static volatile string _doing = "starting";
+        private long _answeredAt = Environment.TickCount64;
+
+        /// <summary>Notes what the window is doing, for the hang watchdog.</summary>
+        private static void Doing(string what) => _doing = what;
+
+        private void StartWatchdog()
+        {
+            new System.Threading.Thread(() =>
+            {
+                bool reported = false;
+                while (!IsDisposed)
+                {
+                    System.Threading.Thread.Sleep(1000);
+                    try { if (IsHandleCreated) BeginInvoke(() => _answeredAt = Environment.TickCount64); } catch { return; }
+                    long stuck = Environment.TickCount64 - System.Threading.Interlocked.Read(ref _answeredAt);
+                    if (stuck > 3000 && !reported)
+                    {
+                        reported = true;
+                        Program.CrashNote("the window stopped responding for " + stuck / 1000 + " seconds while " + _doing);
+                    }
+                    else if (stuck < 1500) reported = false;
+                }
+            }) { IsBackground = true, Name = "TailRemote watchdog" }.Start();
+        }
+
         private void Go()
         {
+            Doing("pressing " + _go.Text.Replace("&", ""));
             if (_connecting && !_reconnecting) return; // a second press while connecting would start a second connection
             SaveSettings();
             if (HostMode && _service.Checked) ApplyService();
@@ -466,6 +569,7 @@ namespace TailRemote
 
         private async void StartHost()
         {
+            Doing("starting hosting");
             if (ServiceHost.IsInstalled()) { Say("The TailRemote service is hosting this PC. Use Apply settings to the service instead."); return; }
             if (!CheckPassword()) return;
             string listen = _listenPassword.Text;
@@ -544,6 +648,7 @@ namespace TailRemote
 
         private void StopHost()
         {
+            Doing("stopping hosting");
             _host?.Dispose();
             _host = null;
             Say("Stopped hosting.");
@@ -585,7 +690,7 @@ namespace TailRemote
                 }
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
-                c.FileMessage += msg => Later(() => Say(msg));
+                c.FileMessage += msg => Later(() => { Say(msg); FileTone(msg); });
                 _client = c;
                 if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys
                 bool wasReconnecting = _reconnecting;
@@ -600,6 +705,7 @@ namespace TailRemote
                     _quietModeChange = true;
                     _keys?.Toggle(); // straight back to controlling the remote PC
                 }
+                Tone(Sounds.Tone.Connected);
                 Say(c.ListenOnly ? start + " Listen only: you hear the remote PC, but cannot control it."
                     : resume ? start + " Controlling the remote PC."
                     : start + " Press Control Shift Enter to control the remote PC.");
@@ -608,12 +714,15 @@ namespace TailRemote
             {
                 // Keeps trying every 3 seconds until Disconnect, except when trying again
                 // cannot help (and a wrong password tried again gets this PC blocked).
-                bool hopeless = e.Message.StartsWith("Wrong password") || e.Message.Contains("different TailRemote version");
+                // Only a wrong password stops it: the login is checked for damage, so that is real. A
+                // "different version" can also be a damaged first message, so it keeps trying.
+                bool hopeless = e.Message.StartsWith("Wrong password");
                 if (hopeless) { if (_reconnecting) StopReconnecting("Stopped trying: " + e.Message); else Say("Could not connect: " + e.Message); }
                 else if (!_reconnecting)
                 {
                     _reconnecting = true;
                     _retryTimer.Start();
+                    Tone(Sounds.Tone.Error);
                     Say("Could not connect: " + e.Message + " Trying again every 3 seconds until you press Disconnect.");
                 }
             }
@@ -630,6 +739,7 @@ namespace TailRemote
 
         private void Disconnect(string why, bool byUser)
         {
+            Doing("disconnecting");
             if (_client == null) return;
             // Keys come back to this PC while the connection is down, so nothing is
             // typed into nowhere; remote control resumes by itself on reconnecting.
@@ -638,6 +748,7 @@ namespace TailRemote
             _keys?.SetClient(null);
             _client.Dispose();
             _client = null;
+            Tone(Sounds.Tone.Disconnected);
             if (byUser) { _expectRestart = false; Say(why); }
             else if (_expectRestart)
             {
@@ -658,8 +769,21 @@ namespace TailRemote
             UpdateTitle();
         }
 
+        /// <summary>A piano tone for an event, on the controlling PC only (a host's would be sent along with its sound).</summary>
+        private void Tone(Sounds.Tone t)
+        {
+            if (!HostMode) Sounds.Play(t);
+        }
+
+        private void FileTone(string msg)
+        {
+            if (msg.StartsWith("Received")) Tone(Sounds.Tone.FileReceived);
+            else if (msg.Contains("damaged") || msg.Contains("dropped") || msg.StartsWith("Could not")) Tone(Sounds.Tone.Error);
+        }
+
         private void StopReconnecting(string why)
         {
+            Tone(why.StartsWith("Disconnected") ? Sounds.Tone.Disconnected : Sounds.Tone.Error);
             _resumeRemote = false;
             _attempt++;
             _reconnecting = false;
@@ -671,6 +795,7 @@ namespace TailRemote
 
         private async void CheckForUpdates()
         {
+            Doing("checking for updates");
             _update.Enabled = false;
             Say("Checking for updates.");
             string args = "";

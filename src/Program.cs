@@ -9,13 +9,16 @@ namespace TailRemote
     {
         [STAThread]
         /// <summary>Writes an unexpected error to TailRemote-crash.txt next to the exe (and the log, if on).</summary>
-        private static void Crash(Exception? e)
+        internal static void Crash(Exception? e) => CrashNote(e?.ToString() ?? "unknown error");
+
+        /// <summary>Writes a line to TailRemote-crash.txt next to the exe (and the log, if on).</summary>
+        internal static void CrashNote(string what)
         {
             try
             {
-                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  TailRemote " + Updater.Current + ": " + e + Environment.NewLine;
+                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  TailRemote " + Updater.Current + ": " + what + Environment.NewLine;
                 System.IO.File.AppendAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TailRemote-crash.txt"), text);
-                DiagLog.Write("unexpected error: " + e);
+                DiagLog.Write("problem: " + what);
             }
             catch { }
         }
@@ -73,6 +76,27 @@ namespace TailRemote
                 return 0;
             }
 
+            if (args.Length >= 1 && args[0] == "--sampler")
+            {
+                // One pattern on every instrument: TailRemote.exe --sampler [pattern], "rising" if none given.
+                string pattern = args.Length > 1 ? args[1] : "rising";
+                foreach (string instrument in Sounds.Instruments)
+                {
+                    Sounds.PlayNamedAndWait(instrument + ", " + pattern);
+                    System.Threading.Thread.Sleep(400);
+                }
+                return 0;
+            }
+            if (args.Length == 1 && args[0] == "--tones")
+            {
+                // Every event tone in turn, to hear them: TailRemote.exe --tones
+                foreach (Sounds.Tone t in Enum.GetValues<Sounds.Tone>())
+                {
+                    Sounds.PlayAndWait(t);
+                    System.Threading.Thread.Sleep(500);
+                }
+                return 0;
+            }
             if (args.Length == 1 && args[0] == "--selftest") return SelfTest();
             if (args.Length >= 1 && args[0] == "--audiotest")
             {
@@ -356,6 +380,20 @@ namespace TailRemote
                 lossless += " | login flood: session answered in " + clipMs + " ms";
             }
 
+            // A damaged login (one byte flipped by a relay, like Clumsy's tamper) is reported as
+            // damage, never as a wrong password, and never counts toward blocking this PC.
+            {
+                var helloHit = TamperedLogin(47999, toClient: true, at: 10);
+                if (helloHit?.Message != Protocol.DamagedLogin) return Fail("damaged hello: " + (helloHit?.Message ?? "connected"));
+                for (int i = 0; i < 6; i++)
+                {
+                    var answerHit = TamperedLogin(47999, toClient: false, at: 30);
+                    if (answerHit?.Message != Protocol.DamagedLogin) return Fail("damaged answer: " + (answerHit?.Message ?? "connected"));
+                }
+                using var clean = Client.Connect("127.0.0.1", 47999, "listen", new Player(Player.NoDevice, _ => { }), _ => { }); // as a listener, so the test controller stays connected
+                lossless += " | damaged logins: retried, never blocked";
+            }
+
             // Files both ways, into a temporary folder, checked byte for byte.
             string dir = Path.Combine(Path.GetTempPath(), "tailremote-selftest-files");
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
@@ -396,6 +434,54 @@ namespace TailRemote
             Directory.Delete(dir, true);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + lossless + CableReport());
             return 0;
+
+            // Connects through a relay that flips one byte at 'at' in one direction; the error, or null.
+            static Exception? TamperedLogin(int port, bool toClient, int at)
+            {
+                var relay = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                relay.Start();
+                int relayPort = ((System.Net.IPEndPoint)relay.LocalEndpoint).Port;
+                new System.Threading.Thread(() =>
+                {
+                    try
+                    {
+                        using var a = relay.AcceptTcpClient();
+                        using var b = new System.Net.Sockets.TcpClient("127.0.0.1", port);
+                        var sa = a.GetStream();
+                        var sb = b.GetStream();
+                        void Pump(Stream from, Stream to, bool flip)
+                        {
+                            var buf = new byte[4096];
+                            long pos = 0;
+                            int n;
+                            try
+                            {
+                                while ((n = from.Read(buf)) > 0)
+                                {
+                                    if (flip && at >= pos && at < pos + n) buf[at - pos] ^= 0x40;
+                                    pos += n;
+                                    to.Write(buf, 0, n);
+                                }
+                            }
+                            catch { }
+                            try { to.Close(); } catch { }
+                        }
+                        var back = new System.Threading.Thread(() => Pump(sb, sa, toClient)) { IsBackground = true };
+                        back.Start();
+                        Pump(sa, sb, !toClient);
+                        back.Join(3000);
+                    }
+                    catch { }
+                    finally { relay.Stop(); }
+                }) { IsBackground = true }.Start();
+                try
+                {
+                    using var p = new Player(Player.NoDevice, _ => { });
+                    using var c = Client.Connect("127.0.0.1", relayPort, "secret", p, _ => { });
+                    return null;
+                }
+                catch (Exception e) { return e; }
+            }
 
             // Read-only: which virtual cable output setup would rename.
             static string CableReport()

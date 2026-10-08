@@ -1,3 +1,11 @@
+1.8.5
+Bug fixed: opening Send files could freeze TailRemote until Windows closed it. The Windows file picker looks through every drive and add-on as it opens, and one that was slow froze the whole window. The picker now runs on its own, so TailRemote keeps working however long it takes.
+Bug fixed: TailRemote could also freeze while another program was holding the clipboard. The clipboard is now shared in the background.
+Bug fixed: a connection that damaged data while logging in (Clumsy's tamper, or a bad link) was taken for a wrong password, so TailRemote gave up reconnecting and the host counted it toward blocking your PC. Every login message now carries a check, so damage is recognised as damage: it just tries again, and the host never counts it.
+Bug fixed: damaged data after logging in could leave keys going nowhere for up to 10 seconds before TailRemote noticed. It now notices at once and reconnects.
+New feature: sounds for connecting, disconnecting, clipboard sent and received, files sent and received, switching control, and errors. Press Sounds for connecting, clipboard and files (Alt L) to choose a sound for each one, or None. There are 144: a real Steinway piano, soft piano, chime, marimba, music box, harp, electric piano, glass, kalimba, bell, text tone and vibraphone, each playing 12 little patterns in B-flat major. Each one plays as you move to it. The sounds play only on the PC you control from.
+Changed: if the window ever stops responding for 3 seconds, TailRemote writes what it was doing to TailRemote-crash.txt next to it, so the cause can be found.
+
 1.8.4
 Bug fixed: Send files could close TailRemote, for example if you closed the progress window while files were still going. Closing it now simply cancels the sending, and nothing about sending files can close the app any more.
 Changed: files send as fast as your connection allows. Reading, encrypting and sending now all happen at the same time instead of taking turns, on both PCs. On this PC's own connection a 128 MB file went at over 600 megabytes a second, so your network is the only limit. When a transfer finishes, NVDA says how fast it went.

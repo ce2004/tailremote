@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>1.8.4</Version>
+    <Version>1.8.5</Version>
     <!-- ARM64 by default; "dotnet publish -r win-x64" builds the x64 copy. -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
@@ -44,6 +44,10 @@
     </None>
     <EmbeddedResource Include="native\NVDA-controllerClient-LICENSE.txt">
       <LogicalName>NVDA-controllerClient-LICENSE.txt</LogicalName>
+    </EmbeddedResource>
+    <!-- Event sounds: real Steinway notes, University of Iowa Electronic Music Studios (free for any use). -->
+    <EmbeddedResource Include="native\piano\*.wav">
+      <LogicalName>piano.%(Filename).wav</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="native\Concentus-LICENSE.txt">
       <LogicalName>Concentus-LICENSE.txt</LogicalName>

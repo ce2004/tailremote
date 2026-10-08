@@ -18,6 +18,7 @@ namespace TailRemote
     {
         private const int BackgroundScanEnabled = 2, MediaStreamingMode = 3; // WLAN_INTF_OPCODE
         private IntPtr _handle;
+        private readonly System.Threading.Tasks.Task _opened;
 
         [DllImport("wlanapi.dll")] private static extern int WlanOpenHandle(uint version, IntPtr reserved, out uint negotiated, out IntPtr handle);
         [DllImport("wlanapi.dll")] private static extern int WlanCloseHandle(IntPtr handle, IntPtr reserved);
@@ -25,7 +26,10 @@ namespace TailRemote
         [DllImport("wlanapi.dll")] private static extern int WlanSetInterface(IntPtr handle, ref Guid iface, int opcode, int size, ref int data, IntPtr reserved);
         [DllImport("wlanapi.dll")] private static extern void WlanFreeMemory(IntPtr memory);
 
-        public WlanStreaming(string who)
+        /// <summary>Opens in the background: the Wi-Fi service can be slow to answer, and the window must never wait on it.</summary>
+        public WlanStreaming(string who) => _opened = System.Threading.Tasks.Task.Run(() => Open(who));
+
+        private void Open(string who)
         {
             try
             {
@@ -54,11 +58,11 @@ namespace TailRemote
             catch (Exception e) { DiagLog.Write(who + ": Wi-Fi settings not changed: " + e.Message); }
         }
 
-        public void Dispose()
+        public void Dispose() => _opened.ContinueWith(_ =>
         {
             if (_handle == IntPtr.Zero) return;
             try { WlanCloseHandle(_handle, IntPtr.Zero); } catch { } // Windows restores both settings
             _handle = IntPtr.Zero;
-        }
+        });
     }
 }
