@@ -47,6 +47,11 @@ namespace TailRemote
         private readonly Button _restart = new() { Text = "Restart remote PC and reco&nnect", AutoSize = true };
         private bool _expectRestart; // the remote PC was asked to restart: say when it is back
 
+        // Host: this PC's addresses, to give the other PC.
+        private readonly TextBox _myAddress = new() { ReadOnly = true, TabStop = true };
+        private readonly Button _copyAddress = new() { Text = "Cop&y IP address", AutoSize = true };
+        private string? _bestAddress;
+        private readonly Label _myAddressLabel;
         private readonly Label _addressLabel, _deviceLabel, _savedLabel, _listenLabel, _captureLabel, _qualityLabel, _streamingLabel;
         private readonly FlowLayoutPanel _savedButtons = new() { AutoSize = true };
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
@@ -89,6 +94,11 @@ namespace TailRemote
             table.Controls.Add(_savedButtons); table.SetColumnSpan(_savedButtons, 2);
             _addressLabel = AddRow(table, "&Address (name or IP)", _address);
             AddRow(table, "&Port", _port);
+            _myAddressLabel = AddRow(table, "This PC'&s IP address", _myAddress);
+            table.Controls.Add(_copyAddress); table.SetColumnSpan(_copyAddress, 2);
+            _copyAddress.Click += (_, _) => CopyAddress();
+            System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += (_, _) => Later(FillMyAddress);
+            FillMyAddress();
             AddRow(table, "Pass&word", _password);
             _listenLabel = AddRow(table, "Listen-&only password (optional: lets someone hear, not control)", _listenPassword);
             _deviceLabel = AddRow(table, "&Output device", _device);
@@ -206,6 +216,48 @@ namespace TailRemote
             UpdateMode();
         }
 
+        /// <summary>
+        /// Host: the addresses the other PC can connect to. The LAN one (a network with a router),
+        /// then Tailscale's, then the PC's name. The LAN address is what Copy IP address copies,
+        /// or Tailscale's when there is no LAN.
+        /// </summary>
+        private void FillMyAddress()
+        {
+            var lan = new System.Collections.Generic.List<(string Ip, string Network)>();
+            string? tailscale = null;
+            try
+            {
+                foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    var props = nic.GetIPProperties();
+                    bool router = props.GatewayAddresses.Any(g => g.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !g.Address.Equals(System.Net.IPAddress.Any));
+                    foreach (var a in props.UnicastAddresses)
+                    {
+                        if (a.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || System.Net.IPAddress.IsLoopback(a.Address)) continue;
+                        if (Protocol.IsTailscale(a.Address)) tailscale = a.Address.ToString();
+                        else if (router && a.Address.GetAddressBytes()[0] != 169) lan.Add((a.Address.ToString(), nic.Name));
+                    }
+                }
+            }
+            catch { }
+            var parts = lan.Select(l => l.Ip + " (" + l.Network + ")").ToList();
+            if (tailscale != null) parts.Add("Tailscale " + tailscale);
+            parts.Add("name " + Environment.MachineName);
+            _bestAddress = lan.Count > 0 ? lan[0].Ip : tailscale;
+            string text = string.Join(", ", parts);
+            if (_myAddress.Text != text) _myAddress.Text = text;
+            _copyAddress.Enabled = _bestAddress != null;
+        }
+
+        private void CopyAddress()
+        {
+            FillMyAddress();
+            if (_bestAddress is not string ip) { Say("This PC has no network address right now."); return; }
+            ClipboardJobs.TryAdd(() => SetClipboard(() => Clipboard.SetText(ip))); // on the clipboard's own thread, never the window's
+            Say("Copied " + ip + ".");
+        }
+
         private static Label AddRow(TableLayoutPanel t, string label, Control c)
         {
             var l = new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 8, 3, 3) };
@@ -225,6 +277,8 @@ namespace TailRemote
             _deviceLabel.Visible = _device.Visible = !host;
             _savedLabel.Visible = _saved.Visible = _savedButtons.Visible = !host;
             _listenLabel.Visible = _listenPassword.Visible = host;
+            _myAddressLabel.Visible = _myAddress.Visible = _copyAddress.Visible = host;
+            if (host) FillMyAddress();
             _captureLabel.Visible = _captureFrom.Visible = host;
             _speedUp.Visible = !host; // it is about how this PC plays the sound
             _sounds.Visible = !host; // a host's sounds would go out with its own sound
