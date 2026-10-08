@@ -26,6 +26,7 @@ namespace TailRemote
         private static int Main(string[] args)
         {
             Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => Updater.CleanLeftovers()); // old copies from earlier updates, once nothing holds them
             // Nothing may ever close TailRemote by surprise: a problem in the window is
             // written down and the app carries on.
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

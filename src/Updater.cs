@@ -72,7 +72,11 @@ namespace TailRemote
                         throw new InvalidOperationException("The download was damaged. Nothing was changed.");
                     await File.WriteAllBytesAsync(fresh, data);
                 }
-                if (File.Exists(old)) File.Delete(old);
+                // The running copy is moved aside (Windows lets a running program be renamed, not
+                // deleted). If an older leftover cannot be deleted (a TailRemote still running from
+                // it, or a virus scan holding it), it is left alone and this copy gets a new name:
+                // that used to stop the update with "Access to the path ... .old is denied".
+                if (!TryDelete(old)) old = exe + ".old-" + DateTime.Now.ToString("yyyyMMddHHmmss");
                 File.Move(exe, old);
                 File.Move(fresh, exe);
             }
@@ -86,15 +90,37 @@ namespace TailRemote
             Process.Start(new ProcessStartInfo(exe, args + " --after-update " + Environment.ProcessId) { UseShellExecute = false });
         }
 
-        /// <summary>At startup after an update: wait for the old copy to exit, then delete it.</summary>
+        /// <summary>At startup after an update: wait for the old copy to exit, then delete every leftover it can.</summary>
         public static void FinishUpdate(int oldPid)
         {
             try { Process.GetProcessById(oldPid).WaitForExit(15000); } catch { }
-            string old = Environment.ProcessPath! + ".old";
-            for (int i = 0; i < 20 && File.Exists(old); i++)
+            for (int i = 0; i < 20 && !CleanLeftovers(); i++) System.Threading.Thread.Sleep(250);
+        }
+
+        /// <summary>Deletes TailRemote's own leftovers from earlier updates (name.old, name.old-...). True if none are left.</summary>
+        public static bool CleanLeftovers()
+        {
+            string exe = Environment.ProcessPath!;
+            bool all = true;
+            try
             {
-                try { File.Delete(old); } catch { System.Threading.Thread.Sleep(250); }
+                foreach (string f in Directory.GetFiles(Path.GetDirectoryName(exe)!, Path.GetFileName(exe) + ".old*"))
+                    all &= TryDelete(f);
             }
+            catch { }
+            return all;
+        }
+
+        private static bool TryDelete(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return true;
+                File.SetAttributes(path, FileAttributes.Normal); // a read-only leftover too
+                File.Delete(path);
+                return true;
+            }
+            catch { return false; }
         }
     }
 }

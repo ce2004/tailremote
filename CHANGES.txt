@@ -1,3 +1,6 @@
+1.8.8
+Bug fixed: updating could fail with "Access to the path ... .old is denied" when an older copy of TailRemote was still running, or something else held its leftover file. The update now goes ahead anyway, and TailRemote tidies up leftovers from earlier updates by itself once nothing is using them.
+
 1.8.7
 Bug fixed: copying something new while a copy was still going to the other PC broke file copying until you reconnected. The new copy now simply replaces the old one.
 Bug fixed: on a busy PC, copies to the other PC could slow to a crawl and stay slow, and Stop the transfer could take a long time. Each copy now starts quickly, recovers its speed by itself, and stops at once.
