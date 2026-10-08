@@ -139,24 +139,34 @@ namespace TailRemote
             catch { return Array.Empty<string>(); }
         }
 
+        /// <summary>Test only (--chaostest): sends a batch with any paths at all, as a hostile PC could.</summary>
+        internal void TestSendEntries(List<(string Rel, byte[]? Data)> entries) =>
+            SendBatch(KindFiles, "test", entries.Select(e => (e.Rel, e.Data == null ? null : (Func<Stream>?)(() => new MemoryStream(e.Data)), (long)(e.Data?.Length ?? -1))).ToList());
+
         private void SendBatch(byte kind, string what, List<(string Rel, Func<Stream>? Open, long Length)> entries)
         {
             // Copying something new replaces what is still going.
             var mine = new CancellationTokenSource();
+            DiagLog.Write("files: batch " + what + " asked for");
             Interlocked.Exchange(ref _sending, mine)?.Cancel();
+            DiagLog.Write("files: batch " + what + " cancelled the one before, waiting its turn");
             lock (_sendGate)
             {
+                DiagLog.Write("files: batch " + what + " started");
                 if (mine.IsCancellationRequested || _closed) return;
                 _outgoing = true;
                 var t = new Transfer { Outgoing = true, What = what, Total = entries.Sum(e => Math.Max(0, e.Length)) };
-                var frames = new BlockingCollection<(byte[] Frame, int Payload)>(16);
+                // Plain messages: each is encrypted only as it is sent, on this one thread. Every
+                // frame's number must follow the last; a frame encrypted and then dropped (the old
+                // batch being replaced) broke that, and the other PC closed the file connection.
+                var frames = new BlockingCollection<(byte[] Message, int Payload)>(16);
                 Exception? failed = null;
                 uint id = _nextId++;
                 var producer = new Thread(() =>
                 {
                     try { Produce(kind, id, entries, t.Total, frames, mine.Token); }
-                    catch (Exception e) { failed = e; }
-                    finally { try { frames.CompleteAdding(); } catch { } }
+                    catch (Exception e) { failed = e; DiagLog.Write("files: reader for " + what + " ended: " + e.GetType().Name); }
+                    finally { try { frames.CompleteAdding(); } catch { } DiagLog.Write("files: reader for " + what + " finished"); }
                 }) { IsBackground = true, Name = "TailRemote files out" };
                 producer.Start();
 
@@ -164,18 +174,22 @@ namespace TailRemote
                 double allowance = 0, lastTick = 0, lastReport = 0;
                 try
                 {
-                    foreach (var (frame, payload) in frames.GetConsumingEnumerable())
+                    foreach (var (message, payload) in frames.GetConsumingEnumerable())
                     {
-                        // Paced: never faster than the controlling PC says the sound can bear.
-                        if (Rate?.Invoke() is double rate && rate > 0)
+                        int frameLength = message.Length + 8 + SecureLink.TagSize;
+                        // Paced: never faster than the controlling PC says the sound can bear. The wait
+                        // is in short steps that see a new rate, and a stop, at once; once stopped, the
+                        // few frames already sealed go out at full speed (they must: each frame's number
+                        // follows the last).
+                        while (!mine.IsCancellationRequested && Rate?.Invoke() is double rate && rate > 0)
                         {
                             double now = clock.Elapsed.TotalSeconds;
-                            allowance = Math.Min(allowance + (now - lastTick) * rate, rate * 0.05 + frame.Length);
+                            allowance = Math.Min(allowance + (now - lastTick) * rate, rate * 0.05 + frameLength);
                             lastTick = now;
-                            if (allowance < frame.Length) Thread.Sleep((int)Math.Ceiling((frame.Length - allowance) / rate * 1000));
-                            allowance -= frame.Length;
+                            if (allowance >= frameLength) { allowance -= frameLength; break; }
+                            mine.Token.WaitHandle.WaitOne(Math.Clamp((int)Math.Ceiling((frameLength - allowance) / rate * 1000), 1, 50));
                         }
-                        _stream.Write(frame);
+                        _stream.Write(_link.Seal(message));
                         t.Done += payload;
                         double s = clock.Elapsed.TotalSeconds;
                         if (s - lastReport >= 0.25)
@@ -196,7 +210,9 @@ namespace TailRemote
                     Progress?.Invoke(t);
                     return;
                 }
+                DiagLog.Write("files: batch " + what + " all frames written, joining the reader");
                 producer.Join();
+                DiagLog.Write("files: batch " + what + " done");
                 _outgoing = false;
                 t.BytesPerSecond = t.Done / Math.Max(0.001, clock.Elapsed.TotalSeconds);
                 t.Finished = true;
@@ -217,9 +233,7 @@ namespace TailRemote
             BitConverter.TryWriteBytes(head.AsSpan(2), id);
             BitConverter.TryWriteBytes(head.AsSpan(6), entries.Count);
             BitConverter.TryWriteBytes(head.AsSpan(10), total);
-            frames.Add((_link.Seal(head), 0), ct);
-            byte[] buf = new byte[1 + ChunkSize];
-            buf[0] = Data;
+            frames.Add((head, 0), ct);
             try
             {
                 foreach (var (rel, open, length) in entries)
@@ -229,31 +243,35 @@ namespace TailRemote
                     start[0] = Start;
                     BitConverter.TryWriteBytes(start.AsSpan(1), length);
                     Encoding.UTF8.GetBytes(rel, start.AsSpan(9));
-                    frames.Add((_link.Seal(start), 0), ct);
+                    frames.Add((start, 0), ct);
                     if (open == null) continue; // a folder
                     using var f = open();
                     using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                    int read;
-                    while ((read = f.Read(buf, 1, ChunkSize)) > 0)
+                    while (true)
                     {
+                        byte[] chunk = new byte[1 + ChunkSize];
+                        int read = f.Read(chunk, 1, ChunkSize);
+                        if (read <= 0) break;
                         ct.ThrowIfCancellationRequested();
-                        sha.AppendData(buf, 1, read);
-                        frames.Add((_link.Seal(buf.AsSpan(0, 1 + read)), read), ct);
+                        chunk[0] = Data;
+                        if (read < ChunkSize) Array.Resize(ref chunk, 1 + read);
+                        sha.AppendData(chunk, 1, read);
+                        frames.Add((chunk, read), ct);
                     }
                     byte[] end = new byte[33];
                     end[0] = End;
                     sha.GetHashAndReset().CopyTo(end, 1);
-                    frames.Add((_link.Seal(end), 0), ct);
+                    frames.Add((end, 0), ct);
                 }
                 byte[] done = new byte[5];
                 done[0] = BatchEnd;
                 BitConverter.TryWriteBytes(done.AsSpan(1), id);
-                frames.Add((_link.Seal(done), 0), ct);
+                frames.Add((done, 0), ct);
             }
             catch (OperationCanceledException)
             {
                 // Tell the other PC to throw away the part it has (if the connection still works).
-                try { frames.TryAdd((_link.Seal(new[] { Cancel }), 0), 2000); } catch { }
+                try { frames.TryAdd((new[] { Cancel }, 0), 2000); } catch { }
                 throw;
             }
         }
@@ -385,6 +403,7 @@ namespace TailRemote
                             folder = null; kind = 0; _incoming = false;
                             break;
                         case Cancel:
+                            DiagLog.Write("files: the other PC cancelled " + t.What);
                             Abandon(kind != 0 ? "The other PC stopped sending " + t.What + "." : null);
                             break;
                     }

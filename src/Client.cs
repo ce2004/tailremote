@@ -212,17 +212,28 @@ namespace TailRemote
         private double _pace = 8 << 20;
         private readonly Queue<(long At, int Ms)> _pings = new();
         private double _paceSent;
+        private int _highPings;
+        private bool _wasBusy;
 
         private void PaceFrom(int rttMs)
         {
             long now = Environment.TickCount64;
             _pings.Enqueue((now, rttMs));
             while (_pings.Count > 0 && now - _pings.Peek().At > 30_000) _pings.Dequeue();
-            if (_files?.Busy != true) return;
+            bool busy = _files?.Busy == true;
+            if (busy && !_wasBusy) _pace = Math.Max(_pace, 2 << 20); // a new transfer starts brisk, not where the last one ended
+            _wasBusy = busy;
+            if (!busy) return;
             int floor = _pings.Min(p => p.Ms);
             int queued = rttMs - floor;
-            if (queued < 15) _pace = Math.Min(_pace * 1.25, 2.0 * (1 << 30));
-            else if (queued > 40) _pace = Math.Max(_pace * 0.6, 32 << 10);
+            // Only two high pings in a row slow it (one is often just a busy moment), and
+            // a ping that is only a little high still lets it creep back up.
+            if (queued > 40) { if (++_highPings >= 2) { _pace = Math.Max(_pace * 0.6, 16 << 10); _highPings = 0; } }
+            else
+            {
+                _highPings = 0;
+                _pace = Math.Min(_pace * (queued < 15 ? 1.25 : 1.05), 2.0 * (1 << 30));
+            }
             if (Math.Abs(_pace - _paceSent) > _paceSent * 0.1)
             {
                 _paceSent = _pace;
@@ -266,6 +277,12 @@ namespace TailRemote
 
         private readonly ConcurrentQueue<byte[]> _urgent = new(), _bulk = new();
         private readonly SemaphoreSlim _toSend = new(0);
+
+        /// <summary>Test only (--chaostest): sends any message, as the client would.</summary>
+        internal void TestWrite(byte[] message) => Write(message);
+        /// <summary>Test only (--chaostest): writes raw bytes into the connection, outside the encryption.</summary>
+        internal void TestRaw(byte[] bytes) { try { _stream.Write(bytes); } catch { } }
+        internal bool TestClosed => _closed;
 
         private void Write(ReadOnlySpan<byte> message)
         {

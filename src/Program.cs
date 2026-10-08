@@ -107,6 +107,7 @@ namespace TailRemote
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--selftest") return SelfTest();
+            if (args.Length == 1 && args[0] == "--chaostest") return ChaosTest.Run();
             if (args.Length >= 1 && args[0] == "--audiotest")
             {
                 if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;

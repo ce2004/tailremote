@@ -328,7 +328,11 @@ namespace TailRemote
         // 3. What was last shared either way is never sent again.
         private static uint _ownClipboard;           // the clipboard's number right after TailRemote itself filled it
         private static long _ownSetAt;               // when it did (Environment.TickCount64)
-        private static string? _lastText, _lastFiles; // what was last shared either way
+        private static string? _lastText, _lastFiles; // what was last shared either way: a fingerprint, never the text itself (it can be 512 MB)
+
+        /// <summary>A short fingerprint of clipboard text, so the last one shared is never held in memory.</summary>
+        private static string Fingerprint(string text) =>
+            text.Length + ":" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)), 0, 12);
         private static int _readVersion, _setVersion; // only the latest read or set is done
         private const int EchoQuietMs = 600, GatherMs = 150;
         private System.Windows.Forms.Timer? _gather;
@@ -386,8 +390,9 @@ namespace TailRemote
                 }
                 else if (!string.IsNullOrEmpty(text))
                 {
-                    if (text == _lastText) return;
-                    _lastText = text;
+                    string print = Fingerprint(text);
+                    if (print == _lastText) return;
+                    _lastText = print;
                     _lastFiles = null;
                     if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to share: over 512 megabytes.")); return; }
                     client?.SendClipboard(text);
@@ -406,7 +411,7 @@ namespace TailRemote
             ClipboardJobs.TryAdd(() =>
             {
                 if (version != System.Threading.Volatile.Read(ref _setVersion)) return; // a newer one arrived: set that instead
-                _lastText = text;
+                _lastText = Fingerprint(text);
                 _lastFiles = null;
                 SetOwn(() => Clipboard.SetDataObject(text, true, 2, 50));
             });

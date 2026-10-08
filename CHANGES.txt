@@ -1,3 +1,10 @@
+1.8.7
+Bug fixed: copying something new while a copy was still going to the other PC broke file copying until you reconnected. The new copy now simply replaces the old one.
+Bug fixed: on a busy PC, copies to the other PC could slow to a crawl and stay slow, and Stop the transfer could take a long time. Each copy now starts quickly, recovers its speed by itself, and stops at once.
+Bug fixed: someone opening lots of connections without logging in could keep you from connecting. A real login now always gets in straight away.
+Bug fixed: TailRemote kept a copy of the last clipboard text it shared, which with huge copies held hundreds of megabytes of memory. It now keeps only a short fingerprint of it.
+Changed: a new chaos test (TailRemote.exe --chaostest) hosts and connects on one PC and throws everything at it: junk logins, floods, connection storms, 100 listeners, damaged data, 2,000 strangely named files, copies both ways at once, files that try to escape the holding folder, the connection dying mid-copy and the host stopping mid-everything. It all passes.
+
 1.8.6
 New feature: copy and paste between the PCs. Copy files, folders or text with Control C (or Control X) on one PC, then paste with Control V on the other, in any folder or program. Everything travels in the background, folders and all, with text of any size up to 512 megabytes. Copying something new while a transfer is going replaces it. Pasting always copies: nothing on the other PC is ever deleted. This replaces the Send files button. Untick Share the clipboard (Alt B) and each PC keeps its own clipboard: neither ever updates the other, and nothing is sent.
 New feature: the File transfer tab (Control Tab). It shows what is being sent or received, how much is done, the speed and the time left, with a Stop the transfer button. NVDA only says when a transfer starts and when it finishes.

@@ -72,7 +72,10 @@ namespace TailRemote
         {
             private readonly Host _host;
             private readonly bool _share;
-            private string? _lastIn, _lastFiles;
+            private string? _lastIn, _lastFiles; // fingerprints, never the text itself
+
+            private static string Print(string text) =>
+                text.Length + ":" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)), 0, 12);
             private uint _own;
             private long _ownAt;
             private readonly System.Windows.Forms.Timer _gather = new() { Interval = 150 };
@@ -94,7 +97,7 @@ namespace TailRemote
                 if (!_invoker.IsHandleCreated) return;
                 _invoker.BeginInvoke(() =>
                 {
-                    _lastIn = text;
+                    _lastIn = Print(text);
                     for (int i = 0; i < 5; i++)
                     {
                         try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(text, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }
@@ -151,8 +154,9 @@ namespace TailRemote
                         else
                         {
                             string text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
-                            if (text.Length > 0 && text != _lastIn) _host.SendClipboard(text);
-                            _lastIn = text;
+                            string print = Print(text);
+                            if (text.Length > 0 && print != _lastIn) _host.SendClipboard(text);
+                            _lastIn = print;
                             _lastFiles = null;
                         }
                     }

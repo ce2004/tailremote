@@ -185,6 +185,9 @@ namespace TailRemote
 
         private Session[] AllSessions() => _everyone;
 
+        /// <summary>Test only (--chaostest): how many controllers and listeners are connected.</summary>
+        internal int TestSessions => _everyone.Length;
+
         /// <summary>Call under _gate whenever the controller or listeners change.</summary>
         private void Rebuild()
         {
@@ -195,32 +198,41 @@ namespace TailRemote
 
         // ---- Nobody can tie the host up ----
 
-        // Logins under way: at most 8 from any one address, 256 in all. A flood
-        // from one place cannot crowd out anyone else.
+        // Logins under way: at most 8 from any one address, 256 in all. A flood from one
+        // place cannot crowd out anyone else, and from one address the NEWEST login always
+        // gets in: the oldest silent one is dropped to make room. (Refusing the new one let
+        // 8 silent connections lock a real login out for as long as they kept coming.)
         private const int MaxHandshakes = 256, MaxHandshakesPerAddress = 8;
         private int _handshakes;
-        private readonly Dictionary<IPAddress, int> _pending = new();
+        private readonly Dictionary<IPAddress, LinkedList<TcpClient>> _pending = new();
 
-        private bool BeginHandshake(IPAddress a)
+        private bool BeginHandshake(IPAddress a, TcpClient tcp)
         {
+            TcpClient? drop = null;
             lock (_guesses)
             {
-                if (_handshakes >= MaxHandshakes) return false;
-                _pending.TryGetValue(a, out int n);
-                if (n >= MaxHandshakesPerAddress) return false;
-                _pending[a] = n + 1;
+                if (!_pending.TryGetValue(a, out var list)) _pending[a] = list = new LinkedList<TcpClient>();
+                if (list.Count >= MaxHandshakesPerAddress)
+                {
+                    drop = list.First!.Value; // the oldest from this address makes room
+                    list.RemoveFirst();
+                    _handshakes--;
+                }
+                if (_handshakes >= MaxHandshakes) { if (list.Count == 0) _pending.Remove(a); return false; }
+                list.AddLast(tcp);
                 _handshakes++;
-                return true;
             }
+            try { drop?.Dispose(); } catch { } // its login thread ends on its own
+            return true;
         }
 
-        private void EndHandshake(IPAddress a)
+        private void EndHandshake(IPAddress a, TcpClient tcp)
         {
             lock (_guesses)
             {
+                if (!_pending.TryGetValue(a, out var list) || !list.Remove(tcp)) return; // already dropped to make room
                 _handshakes--;
-                if (_pending.TryGetValue(a, out int n) && n > 1) _pending[a] = n - 1;
-                else _pending.Remove(a);
+                if (list.Count == 0) _pending.Remove(a);
             }
         }
         private readonly Dictionary<IPAddress, (int Fails, long Since, long BlockedUntil)> _guesses = new();
@@ -338,12 +350,12 @@ namespace TailRemote
             try
             {
                 // Refused at once, holding nothing: too many logins under way, or this address keeps guessing.
-                if (Blocked(remote) || !BeginHandshake(remote)) { tcp.Dispose(); return; }
+                if (Blocked(remote) || !BeginHandshake(remote, tcp)) { tcp.Dispose(); return; }
                 counted = true;
                 tcp.NoDelay = true;
                 tcp.SendTimeout = 5000; // a PC that stops reading is dropped, never waited on forever
                 var stream = tcp.GetStream();
-                stream.ReadTimeout = 5_000; // a login that says nothing is dropped after 5 seconds
+                stream.ReadTimeout = 3_000; // a login that says nothing is dropped after 3 seconds
 
                 byte[] nonce = RandomNumberGenerator.GetBytes(16);
                 byte[] hello = new byte[Protocol.HelloBytes];
@@ -421,7 +433,7 @@ namespace TailRemote
                     Link = new SecureLink(key, nonce, clientNonce, isHost: true),
                 };
                 s.Link.Send(s.Stream, Protocol.FeaturesMessage(SecureAttention != null ? Protocol.FeatureSecureAttention : 0));
-                EndHandshake(remote);
+                EndHandshake(remote, tcp);
                 counted = false;
                 lock (_gate)
                 {
@@ -454,7 +466,7 @@ namespace TailRemote
             }
             finally
             {
-                if (counted) EndHandshake(remote);
+                if (counted) EndHandshake(remote, tcp);
                 if (s != null)
                 {
                     bool was = false;
