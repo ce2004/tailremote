@@ -420,12 +420,21 @@ namespace TailRemote
                     var items = Enumerable.Range(0, 10).Select(i => Big("ten" + i + ".bin", 32)).ToList();
                     string[]? landed = null;
                     host.ClipboardFilesReceived += p => landed = p;
+                    int together = 0, togetherThere = 0;
+                    Action<FileChannel.Transfer> watch = t => together = Math.Max(together, t.Files.Count);
+                    Action<FileChannel.Transfer> watchThere = t => togetherThere = Math.Max(togetherThere, t.Files.Count);
+                    ctrl.TransferProgress += watch;
+                    host.TransferProgress += watchThere;
+                    ctrl.Files!.TestPause(300); // confirmations held up briefly, so the files are seen moving side by side
                     var clock = Stopwatch.StartNew();
                     var (hostSays, clientSays) = BothSay(host, ctrl, "10 items", () => ctrl.Files!.SendFiles(items));
+                    ctrl.TransferProgress -= watch;
+                    host.TransferProgress -= watchThere;
                     double mbs = 320 / clock.Elapsed.TotalSeconds;
                     for (int i = 0; i < 250 && landed == null; i++) Thread.Sleep(20); // put on the clipboard just after it says it arrived
                     bool ok = landed != null && landed.Length == 10 && items.All(p => Same(p, Path.Combine(Path.GetDirectoryName(landed[0])!, Path.GetFileName(p))));
-                    return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                    if (together < 2) return "FAIL: the files went one at a time (at most " + together + " moving at once)";
+                    return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes, up to " + together + " files moving at once (" + togetherThere + " seen arriving at once)" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
                 });
 
                 Scenario("the main connection damaged in the middle of 256 MB: it reconnects and the transfer carries on", 120, () =>

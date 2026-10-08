@@ -85,6 +85,8 @@ namespace TailRemote
             public bool Waiting;
             public string What = "";
             public long Done, Total;
+            /// <summary>Each file moving right now, with how far it has got (a fresh list each report).</summary>
+            public IReadOnlyList<(string Name, long Done, long Total)> Files = Array.Empty<(string, long, long)>();
             public double BytesPerSecond;
             public string? Result;
             public TimeSpan? Left => BytesPerSecond > 1 && Total > Done ? TimeSpan.FromSeconds((Total - Done) / BytesPerSecond) : null;
@@ -188,8 +190,10 @@ namespace TailRemote
             Interlocked.Exchange(ref _detachedAt, 0);
             // Stops that may not have reached the other PC yet (sent while it was unreachable).
             lock (_stops) foreach (var (id, at) in _stops) if (Now - at < 2 * GiveUpMs) lane.Control.Enqueue(IdMessage(Stop, id));
-            new Thread(() => ReadLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files in" }.Start();
-            new Thread(() => WriteLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files out" }.Start();
+            // Below normal: keys and sound run on their own threads at higher priority, so even a
+            // transfer using every core can never hold up a keystroke or the audio.
+            new Thread(() => ReadLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files in", Priority = ThreadPriority.BelowNormal }.Start();
+            new Thread(() => WriteLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files out", Priority = ThreadPriority.BelowNormal }.Start();
             _out?.Changed.Set();
         }
 
@@ -388,8 +392,11 @@ namespace TailRemote
             public long LastProgress = Now;
             // Under Gate:
             public readonly Queue<PieceRef> Retry = new();
-            public int Cursor;
-            public long CursorOffset;
+            public long[] Next = Array.Empty<long>();         // per file: the next offset to hand out
+            public int Fresh;                                 // the first file not started yet
+            public readonly HashSet<int> Open = new();         // started, with pieces still to hand out
+            public readonly SortedSet<int> Active = new();     // started, not all confirmed (for the per-file progress)
+            public readonly Dictionary<Lane, int> LaneFile = new(); // each lane keeps to its own file
             public readonly Dictionary<(int, long), PieceRef> InFlight = new();
             public readonly Dictionary<Lane, long> LaneUnacked = new(), LaneHeard = new();
             public long Acked;
@@ -519,6 +526,7 @@ namespace TailRemote
                 Total = entries.Sum(e => Math.Max(0, e.Length)),
             };
             o.EntryAcked = new long[entries.Count];
+            o.Next = new long[entries.Count];
             o.Handles = new SafeFileHandle?[entries.Count];
             // Sending something new replaces what is still going.
             lock (_latestGate) _latest = o;
@@ -590,6 +598,7 @@ namespace TailRemote
                     t.Done = Interlocked.Read(ref o.Acked);
                     t.BytesPerSecond = t.Done / Math.Max(0.001, s);
                     t.Waiting = lanes.Length == 0;
+                    lock (o.Gate) if (!o.Ended) t.Files = o.Active.Take(32).Select(i => (o.Entries[i].Rel, o.EntryAcked[i], o.Entries[i].Length)).ToArray();
                     Progress?.Invoke(t);
                 }
             }
@@ -597,6 +606,7 @@ namespace TailRemote
             t.BytesPerSecond = t.Done / Math.Max(0.001, clock.Elapsed.TotalSeconds);
             t.Finished = true;
             t.Waiting = false;
+            t.Files = Array.Empty<(string, long, long)>();
             if (o.Outcome == EndedWell) t.Result = "Sent " + o.What + ", at " + Speed(t.BytesPerSecond) + ".";
             else { t.Failed = true; t.Cancelled = o.Outcome == EndedStopped; t.Result = o.Why; }
             DiagLog.Write("files: " + o.What + ": " + t.Result);
@@ -648,17 +658,35 @@ namespace TailRemote
             long window = (long)Math.Clamp(rate * 0.5 / wanted, 256 << 10, 32 << 20);
             lock (o.Gate)
             {
+                if (o.Ended) return null; // checked again in here: an ended batch lets go of its list of files
                 o.LaneUnacked.TryGetValue(lane, out long unacked);
                 if (unacked > 0 && unacked + size > window) return null;
                 PieceRef p;
                 if (o.Retry.Count > 0) p = o.Retry.Dequeue();
                 else
                 {
-                    while (o.Cursor < o.Entries.Count && o.CursorOffset >= o.Entries[o.Cursor].Length) { o.Cursor++; o.CursorOffset = 0; }
-                    if (o.Cursor >= o.Entries.Count) return null;
-                    int n = (int)Math.Min(size, o.Entries[o.Cursor].Length - o.CursorOffset);
-                    p = new PieceRef(o.Cursor, o.CursorOffset, n);
-                    o.CursorOffset += n;
+                    // Each lane keeps to a file of its own, so many files move side by side, each on
+                    // its own thread. With no new file left, it helps the one with the most to go
+                    // (one big file is shared by every lane).
+                    var entries = o.Entries;
+                    int e = o.LaneFile.TryGetValue(lane, out int mine) && mine < entries.Count && o.Next[mine] < entries[mine].Length ? mine : -1;
+                    if (e < 0)
+                    {
+                        while (o.Fresh < entries.Count && entries[o.Fresh].Length <= 0) o.Fresh++;
+                        if (o.Fresh < entries.Count) e = o.Fresh++;
+                        else
+                        {
+                            long most = 0;
+                            foreach (int i in o.Open) if (entries[i].Length - o.Next[i] > most) { most = entries[i].Length - o.Next[i]; e = i; }
+                        }
+                        if (e < 0) return null;
+                        o.LaneFile[lane] = e;
+                    }
+                    int n = (int)Math.Min(size, entries[e].Length - o.Next[e]);
+                    p = new PieceRef(e, o.Next[e], n);
+                    o.Next[e] += n;
+                    if (o.Next[e] < entries[e].Length) o.Open.Add(e); else o.Open.Remove(e);
+                    o.Active.Add(e);
                 }
                 p.On = lane;
                 if (unacked == 0) o.LaneHeard[lane] = Now;
@@ -705,6 +733,7 @@ namespace TailRemote
                 o.LaneHeard[lane] = Now;
                 o.Acked += p.Length;
                 entryDone = (o.EntryAcked[e] += p.Length) == o.Entries[e].Length;
+                if (entryDone) o.Active.Remove(e);
                 all = o.Acked == o.Total;
             }
             Interlocked.Exchange(ref o.LastProgress, Now);
@@ -751,6 +780,7 @@ namespace TailRemote
             public long[] Got = Array.Empty<long>();
             public HashSet<long>?[] Claimed = Array.Empty<HashSet<long>?>();
             public byte[]? Text;
+            public readonly SortedSet<int> Active = new(); // files partly arrived (for the per-file progress)
             public long Total, Done;
             public double LastReport;
 
@@ -934,7 +964,9 @@ namespace TailRemote
                         b.Handles[e]?.Dispose();
                         b.Handles[e] = null;
                         b.Claimed[e] = null;
+                        b.Active.Remove(e);
                     }
+                    else b.Active.Add(e);
                     b.Done += n;
                     b.T.Done = b.Done;
                     double s = b.Clock.Elapsed.TotalSeconds;
@@ -942,6 +974,7 @@ namespace TailRemote
                     {
                         b.LastReport = s;
                         b.T.BytesPerSecond = b.Done / Math.Max(0.001, s);
+                        b.T.Files = b.Active.Take(32).Select(i => (b.Text != null ? "clipboard text" : Path.GetRelativePath(b.Folder!, b.Paths[i]), b.Got[i], b.Length(i))).ToArray();
                         report = true;
                     }
                     if (b.Done == b.Total && !b.Completing) complete = b.Completing = true;
@@ -967,6 +1000,7 @@ namespace TailRemote
             }
             var t = b.T;
             t.Finished = true;
+            t.Files = Array.Empty<(string, long, long)>();
             t.Done = b.Done;
             t.BytesPerSecond = b.Done / Math.Max(0.001, b.Clock.Elapsed.TotalSeconds);
             string? text = null;
@@ -1022,6 +1056,7 @@ namespace TailRemote
             }
             DiagLog.Write("files: " + why);
             var t = b.T;
+            t.Files = Array.Empty<(string, long, long)>();
             t.Finished = t.Failed = true;
             t.Cancelled = outcome == EndedStopped;
             t.Result = why;

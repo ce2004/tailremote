@@ -113,7 +113,7 @@ namespace TailRemote
                     list.AddRange(paths);
                     var data = new DataObject();
                     data.SetFileDropList(list);
-                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(1))); // paste copies
+                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(2))); // paste moves them out of the holding folder: never twice the space
                     for (int i = 0; i < 5; i++)
                     {
                         try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(data, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }

@@ -25,6 +25,9 @@ namespace TailRemote
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
         private readonly Button _sendClipboard = new() { Text = "Send the clip&board", AutoSize = true };
         private readonly Button _sendFiles = new() { Text = "Send f&iles", AutoSize = true };
+        private readonly Button _sendFolder = new() { Text = "Send a folder and everything in i&t", AutoSize = true };
+        // One bar per file moving right now (named after the file), under the overall bar.
+        private readonly FlowLayoutPanel _fileBars = new() { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Visible = false };
         // Files: right after Streaming, in the Tab order (a separate tab could only be reached with Control Tab).
         private readonly TextBox _transferStatus = new() { ReadOnly = true, TabStop = true };
         private readonly ProgressBar _transferBar = new() { Height = 22, Maximum = 100, AccessibleName = "File transfer progress" };
@@ -93,6 +96,7 @@ namespace TailRemote
             _streamingLabel = AddRow(table, "Streaming", _streaming);
             AddRow(table, "Files", _transferStatus);
             AddRow(table, "File transfer progress", _transferBar);
+            table.Controls.Add(_fileBars); table.SetColumnSpan(_fileBars, 2);
             table.Controls.Add(_transferStop); table.SetColumnSpan(_transferStop, 2);
             _transferBar.Dock = DockStyle.Fill;
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
@@ -107,6 +111,7 @@ namespace TailRemote
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_sendClipboard);
             buttons.Controls.Add(_sendFiles);
+            buttons.Controls.Add(_sendFolder);
             buttons.Controls.Add(_toggle);
             buttons.Controls.Add(_restart);
             buttons.Controls.Add(_audioSetup);
@@ -173,7 +178,8 @@ namespace TailRemote
             _savePc.Click += (_, _) => SavePc();
             _forgetPc.Click += (_, _) => ForgetPc();
             _sendClipboard.Click += (_, _) => SendClipboard();
-            _sendFiles.Click += (_, _) => SendFiles();
+            _sendFiles.Click += (_, _) => SendFiles(folder: false);
+            _sendFolder.Click += (_, _) => SendFiles(folder: true);
             _logging.CheckedChanged += (_, _) =>
             {
                 SaveSettings();
@@ -342,15 +348,21 @@ namespace TailRemote
         /// add-on as it opens, and a slow one froze TailRemote when it ran on the window's
         /// thread (1.8.4, Brock). Null: nothing chosen.
         /// </summary>
-        private static System.Threading.Tasks.Task<string[]?> PickFiles()
+        private static System.Threading.Tasks.Task<string[]?> PickFiles(bool folder)
         {
             var done = new System.Threading.Tasks.TaskCompletionSource<string[]?>();
             var t = new System.Threading.Thread(() =>
             {
                 try
                 {
-                    using var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
-                    done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? pick.FileNames : null);
+                    if (folder)
+                    {
+                        using var pick = new FolderBrowserDialog { Description = "Choose a folder to send to the other PC, with everything in it", UseDescriptionForTitle = true };
+                        done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? new[] { pick.SelectedPath } : null);
+                        return;
+                    }
+                    using var files = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
+                    done.TrySetResult(files.ShowDialog() == DialogResult.OK ? files.FileNames : null);
                 }
                 catch (Exception e) { done.TrySetException(e); }
             }) { IsBackground = true, Name = "TailRemote file picker" };
@@ -359,16 +371,16 @@ namespace TailRemote
             return done.Task;
         }
 
-        private async void SendFiles()
+        private async void SendFiles(bool folder)
         {
-            Doing("sending files");
+            Doing(folder ? "sending a folder" : "sending files");
             if (!CanSend(out _, out _)) return;
             if (_picking) { Say("The file picker is already open."); return; }
             try
             {
                 _picking = true;
                 string[]? paths;
-                try { paths = await PickFiles(); }
+                try { paths = await PickFiles(folder); }
                 finally { _picking = false; }
                 if (paths == null || paths.Length == 0) return;
                 if (!CanSend(out var client, out var host)) return; // the connection may have closed meanwhile
@@ -402,7 +414,9 @@ namespace TailRemote
                 list.AddRange(paths);
                 var data = new DataObject();
                 data.SetFileDropList(list);
-                data.SetData("Preferred DropEffect", new System.IO.MemoryStream(BitConverter.GetBytes(1))); // paste copies, never moves
+                // Paste MOVES them out of the holding folder: on the same drive that is an instant rename,
+                // so the files never take up their space twice.
+                data.SetData("Preferred DropEffect", new System.IO.MemoryStream(BitConverter.GetBytes(2)));
                 SetClipboard(() => Clipboard.SetDataObject(data, true, 2, 50));
             });
         }
@@ -464,11 +478,43 @@ namespace TailRemote
             _idleTimer.Start();
         }
 
+        /// <summary>
+        /// One bar per file moving right now, each named after its file (NVDA reads the name and
+        /// percent), with a line above it for the sizes. Bars are reused, never piled up; none
+        /// when nothing is moving.
+        /// </summary>
+        private void ShowFileBars(System.Collections.Generic.IReadOnlyList<(string Name, long Done, long Total)> files)
+        {
+            int n = Math.Min(files.Count, 32);
+            _fileBars.SuspendLayout();
+            while (_fileBars.Controls.Count < n * 2)
+            {
+                _fileBars.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(540, 0) });
+                _fileBars.Controls.Add(new ProgressBar { Width = 540, Height = 16, Maximum = 100 });
+            }
+            for (int i = 0; i < _fileBars.Controls.Count / 2; i++)
+            {
+                var label = (Label)_fileBars.Controls[i * 2];
+                var bar = (ProgressBar)_fileBars.Controls[i * 2 + 1];
+                bool shown = i < n;
+                label.Visible = bar.Visible = shown;
+                if (!shown) continue;
+                var (name, done, total) = files[i];
+                int percent = total <= 0 ? 0 : (int)Math.Clamp(done * 100 / total, 0, 100);
+                label.Text = name + ": " + FileChannel.Size(done) + " of " + FileChannel.Size(total);
+                bar.AccessibleName = name;
+                bar.Value = percent;
+            }
+            _fileBars.Visible = n > 0;
+            _fileBars.ResumeLayout();
+        }
+
         /// <summary>The connection closed: whatever was going has stopped, and the Files line says so.</summary>
         private void TransferEnded(string why)
         {
             if (_transferShown == null) return;
             _transferShown = null;
+            ShowFileBars(Array.Empty<(string, long, long)>());
             _transferStatus.Text = why;
             _transferBar.Value = 0;
             _transferStop.Enabled = false;
@@ -483,6 +529,7 @@ namespace TailRemote
             {
                 if (_transferShown != null && !ReferenceEquals(t, _transferShown) && !_transferShown.Finished) return; // an older one ending: the newer one is what is going on
                 _transferShown = null;
+                ShowFileBars(Array.Empty<(string, long, long)>());
                 _transferStatus.Text = t.Result ?? TransferIdle;
                 IdleSoon();
                 _transferBar.Value = t.Failed ? 0 : 100;
@@ -497,6 +544,7 @@ namespace TailRemote
             _transferStatus.Text = (t.Outgoing ? "Sending " : "Receiving ") + t.What + ": " + FileChannel.Size(t.Done) + " of " + FileChannel.Size(t.Total) +
                 (t.Waiting ? ", waiting for the connection to come back; it carries on from here." : ", " + FileChannel.Speed(t.BytesPerSecond) + left + ".");
             _transferBar.Value = t.Total <= 0 ? 0 : (int)Math.Clamp(t.Done * 100 / t.Total, 0, 100);
+            ShowFileBars(t.Files);
             _transferStop.Enabled = true;
         }
 
