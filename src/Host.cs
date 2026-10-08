@@ -203,11 +203,13 @@ namespace TailRemote
 
         // ---- Nobody can tie the host up ----
 
-        // Logins under way: at most 8 from any one address, 256 in all. A flood from one
+        // Logins under way: at most 32 from any one address, 256 in all. A flood from one
         // place cannot crowd out anyone else, and from one address the NEWEST login always
         // gets in: the oldest silent one is dropped to make room. (Refusing the new one let
         // 8 silent connections lock a real login out for as long as they kept coming.)
-        private const int MaxHandshakes = 256, MaxHandshakesPerAddress = 8;
+        // 32 from one address: many controllers behind one router each open file lanes, and with 8
+        // a lane's login could push a real one out.
+        private const int MaxHandshakes = 256, MaxHandshakesPerAddress = 32;
         private int _handshakes;
         private readonly Dictionary<IPAddress, LinkedList<TcpClient>> _pending = new();
 

@@ -255,6 +255,18 @@ namespace TailRemote
             while (!_closed)
             {
                 Thread.Sleep(250);
+                if (!WatchOnce()) return;
+            }
+        }
+
+        /// <summary>
+        /// One look (a method of its own, so this thread never keeps a finished transfer, with its
+        /// list of a million files, alive in a loop variable). False once the channel is closed.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private bool WatchOnce()
+        {
+            {
                 long now = Now;
                 foreach (var l in _lanes)
                     if (now - l.LastIn > QuietMs) { DiagLog.Write("files: a lane went quiet; closing it"); Kill(l); }
@@ -268,8 +280,24 @@ namespace TailRemote
                     EndIn(b, EndedBadly, "Nothing came from the other PC for a minute, so " + b.T.What + " was stopped. Send it again.",
                         "The other PC heard nothing for a minute and gave up.", null, tell: true);
                 long d = Interlocked.Read(ref _detachedAt);
-                if (d != 0 && now - d > GiveUpMs + 10_000 && (_lanes.Length == 0 || (_out == null && _in == null))) { Dispose(); return; }
+                if (d != 0 && now - d > GiveUpMs + 10_000 && (_lanes.Length == 0 || (_out == null && _in == null))) { Dispose(); return false; }
             }
+            return true;
+        }
+
+        /// <summary>
+        /// After a big transfer: memory it used goes back to Windows at once. .NET otherwise keeps
+        /// it for itself, and the app looked as if it never let go until it was closed.
+        /// </summary>
+        private static void GiveBackMemory(int entries, long bytes)
+        {
+            if (entries < 10_000 && bytes < (256L << 20)) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Thread.Sleep(1000); // the window has shown the result; nothing is waiting on this
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            });
         }
 
         // The loops' steps are methods of their own: a variable in a long-lived loop inside a try
@@ -559,8 +587,10 @@ namespace TailRemote
                 {
                     _out = null;
                     o.CloseAll();
+                    int count = o.Entries.Count;
                     lock (o.Gate) o.Entries = new List<Entry>(); // lets go of the data (a lane still reading finds nothing, and stops)
                     lock (_latestGate) if (_latest == o) _latest = null; // never keeps what was sent (clipboard text can be 512 MB)
+                    GiveBackMemory(count, o.Total);
                 }
             }
         }
@@ -571,7 +601,7 @@ namespace TailRemote
             var clock = Stopwatch.StartNew();
             double lastReport = 0;
             Lane? offeredOn = null, askedOn = null;
-            long offeredAt = 0, askedAt = 0, allAt = 0;
+            long askedAt = 0, allAt = 0;
             DiagLog.Write("files: sending " + o.What + ", " + o.Entries.Count + " entries, " + o.Total + " bytes");
             Progress?.Invoke(t);
             while (true)
@@ -583,11 +613,12 @@ namespace TailRemote
                 var lanes = _lanes;
                 if (!o.Ready)
                 {
-                    // The list of what is coming, again on another lane if the first one died.
-                    if (lanes.Length > 0 && (offeredOn == null || offeredOn.Dead || now - offeredAt > 5000))
+                    // The list of what is coming, again on another lane only if the first one died: the
+                    // other PC may take a while over a list of a million files, and sending the whole
+                    // list again every few seconds only piled up memory and slowed it further.
+                    if (lanes.Length > 0 && (offeredOn == null || offeredOn.Dead))
                     {
                         offeredOn = lanes[0];
-                        offeredAt = now;
                         foreach (var part in o.OfferParts()) offeredOn.Control.Enqueue(part);
                         offeredOn.Wake.Set();
                     }
@@ -800,6 +831,7 @@ namespace TailRemote
             public HashSet<long>?[] Claimed = Array.Empty<HashSet<long>?>();
             public byte[]? Text;
             public readonly SortedSet<int> Active = new(); // files partly arrived (for the per-file progress)
+            public readonly object[] Making = Enumerable.Range(0, 64).Select(_ => new object()).ToArray(); // a file being made holds one of these, not the whole batch
             public long Total, Done;
             public double LastReport;
 
@@ -906,6 +938,7 @@ namespace TailRemote
                 Directory.CreateDirectory(b.Folder);
                 var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var tops = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var made = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < count; i++)
                 {
                     var (rel, length) = b.Entries[i]!.Value;
@@ -919,14 +952,19 @@ namespace TailRemote
                         top = fresh;
                     }
                     string path = SafePath(b.Folder, rel)!;
-                    if (length < 0) Directory.CreateDirectory(path);
+                    // Folders and empty files now; a file with something in it is made when its first
+                    // piece arrives, by whichever lane brings it, so a million files are made by 16
+                    // threads side by side instead of one by one before anything moves.
+                    if (length < 0) { if (made.Add(path)) Directory.CreateDirectory(path); }
                     else
                     {
-                        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                        using (File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write)) { }
+                        string dir = Path.GetDirectoryName(path)!;
+                        if (made.Add(dir)) Directory.CreateDirectory(dir); // each folder once, not once per file
+                        if (length == 0) using (File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write)) { }
                     }
-                    if (tops.Add(top)) b.Tops.Add(top); // made by this batch, so its to throw away if it fails
+                    if (tops.Add(top)) b.Tops.Add(top); // this batch's own (a fresh name), so it is thrown away if the batch fails
                     b.Paths[i] = path;
+                    if ((i & 4095) == 0) b.LastActivity = Now; // a long list is still being worked through
                 }
                 b.T.What = b.Tops.Count == 1 ? b.Tops[0] : b.Tops.Count + " items";
             }
@@ -958,7 +996,26 @@ namespace TailRemote
                     if ((uint)e >= (uint)b.Entries.Length || offset < 0 || offset + n > b.Length(e)) throw new InvalidDataException("a piece that does not fit");
                     // A piece sent again (its confirmation was lost with a lane): confirmed, not written twice.
                     repeat = b.Got[e] >= b.Length(e) || !(b.Claimed[e] ??= new HashSet<long>()).Add(offset);
-                    if (!repeat && b.Text == null) h = b.Handles[e] ??= File.OpenHandle(b.Paths[e], FileMode.Open, FileAccess.Write, FileShare.Read | FileShare.Delete);
+                    h = repeat || b.Text != null ? null : b.Handles[e];
+                }
+                if (!repeat && b.Text == null && h == null)
+                {
+                    // Its first piece: the file is made now, outside the batch's lock, so the lanes make
+                    // files side by side. Only this file's lock is held while it is made.
+                    lock (b.Making[e & (b.Making.Length - 1)])
+                    {
+                        lock (b.Gate) h = b.Handles[e];
+                        if (h == null)
+                        {
+                            // Its folder was made while preparing.
+                            h = File.OpenHandle(b.Paths[e], FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read | FileShare.Delete);
+                            lock (b.Gate)
+                            {
+                                if (b.Ended) { h.Dispose(); return; }
+                                b.Handles[e] = h;
+                            }
+                        }
+                    }
                 }
                 if (!repeat)
                 {
@@ -1046,6 +1103,7 @@ namespace TailRemote
             Progress?.Invoke(t);
             if (paths != null) FilesReceived?.Invoke(paths);
             if (text != null) TextReceived?.Invoke(text);
+            GiveBackMemory(b.Entries.Length, b.Total);
         }
 
         /// <summary>
@@ -1080,6 +1138,7 @@ namespace TailRemote
             t.Cancelled = outcome == EndedStopped;
             t.Result = why;
             try { Progress?.Invoke(t); } catch { }
+            GiveBackMemory(b.Entries.Length, b.Total);
         }
 
         /// <summary>

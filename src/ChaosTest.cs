@@ -193,6 +193,39 @@ namespace TailRemote
                     return got.Count == files && gotBytes == bytes && emptyFolder ? files + " files and every folder arrived exactly" : "FAIL: " + got.Count + " of " + files + " files, " + gotBytes + " of " + bytes + " bytes, empty folder " + emptyFolder;
                 });
 
+                if (Only != null) Scenario("100,000 files in one folder tree: speed, and memory given back afterwards (only when asked for by name)", 900, () =>
+                {
+                    string src = Path.Combine(Root, "src", "Huge");
+                    for (int d = 0; d < 100; d++)
+                    {
+                        string dir = Path.Combine(src, "dir" + d);
+                        Directory.CreateDirectory(dir);
+                        for (int f = 0; f < 1000; f++) File.WriteAllText(Path.Combine(dir, "f" + f + ".txt"), "file " + d + "/" + f);
+                    }
+                    GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                    long privateBefore = Process.GetCurrentProcess().PrivateMemorySize64 >> 20;
+                    string[]? landed = null;
+                    host.ClipboardFilesReceived += p => landed = p;
+                    long peak = 0;
+                    var clock = Stopwatch.StartNew();
+                    var send = Task.Run(() => ctrl.Files!.SendFiles(new[] { src }));
+                    while (!send.IsCompleted || landed == null)
+                    {
+                        Thread.Sleep(200);
+                        peak = Math.Max(peak, Process.GetCurrentProcess().PrivateMemorySize64 >> 20);
+                        if (clock.Elapsed.TotalSeconds > 850) break;
+                    }
+                    double secs = clock.Elapsed.TotalSeconds;
+                    if (landed == null) return "FAIL: nothing arrived in " + secs.ToString("0") + " s";
+                    int count = Directory.EnumerateFiles(landed[0], "*", SearchOption.AllDirectories).Count();
+                    Thread.Sleep(4000); // the memory is given back a second after the end
+                    var me = Process.GetCurrentProcess();
+                    me.Refresh();
+                    long privateAfter = me.PrivateMemorySize64 >> 20;
+                    string line = count + " files in " + secs.ToString("0") + " s (" + (count / secs).ToString("0") + " a second); private memory " + privateBefore + " MB before, " + peak + " MB at the peak, " + privateAfter + " MB after";
+                    return count == 100_000 && privateAfter < privateBefore + 150 ? line : "FAIL: " + line;
+                });
+
                 Scenario("64 MB each way at the same moment", 120, () =>
                 {
                     string a = Big("both-a.bin", 64), b = Big("both-b.bin", 64);
@@ -458,12 +491,16 @@ namespace TailRemote
                     for (int i = 0; i < 500 && (toWindow == null || toController == null); i++) Thread.Sleep(20);
                     string file = Big("via-service.bin", 3);
                     window.SendClipboardFiles(new[] { file });
+                    for (int i = 0; i < 500 && controllerFiles == null; i++) Thread.Sleep(20);
+                    // Checked before the next one: in this test both sides share one holding folder, and
+                    // each arrival clears the older ones out of it.
+                    bool sameFile = controllerFiles != null && Same(file, controllerFiles[0]);
                     ctrl.Files!.SendFiles(new[] { Big("to-window.bin", 2) });
-                    for (int i = 0; i < 500 && (toWindow == null || toController == null || windowFiles == null || controllerFiles == null || windowSaw == null); i++) Thread.Sleep(20);
+                    for (int i = 0; i < 500 && (windowFiles == null || windowSaw == null); i++) Thread.Sleep(20);
                     ctrl.ClipboardReceived -= took;
                     ctrl.ClipboardFilesReceived -= tookFiles;
                     bool ok = toController == "from the window, through the agent" && toWindow == "from the controller, to the window"
-                        && controllerFiles != null && Same(file, controllerFiles[0]) && windowFiles != null && windowSaw != null;
+                        && sameFile && windowFiles != null && windowSaw != null;
                     return ok ? "text both ways, a file each way, and the window saw the transfer finish"
                         : "FAIL: controller got " + toController + ", window got " + toWindow + ", files to controller " + (controllerFiles != null) + ", files to window " + (windowFiles != null) + ", window saw the end " + (windowSaw != null);
                 });

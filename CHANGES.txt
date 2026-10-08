@@ -1,3 +1,8 @@
+1.8.19
+Bug fixed: after sending or receiving a folder with a huge number of files, TailRemote kept using a lot of memory until you closed it. It now lets go of all of it and gives it back to Windows a second after the transfer ends.
+Changed: folders with many files go much faster. The receiving PC no longer makes every file one by one before anything is sent: files are made as they arrive, by all 16 connections side by side, and the sending PC no longer sends the whole list again while the other PC is still working through it. In testing, 100,000 files took 10 seconds.
+Bug fixed: with several controlling PCs behind the same router, one of them could be refused while the others were opening their file connections. Far more logins from one address may now be under way at once.
+
 1.8.18
 Bug fixed: connecting a second controlling PC kicked the first one off; it reconnected and kicked the second, and the two kept connecting and disconnecting for ever. Now the same password lets many PCs control at once (up to 100), each with its own keys, sound and file transfers. Send the clipboard and Send files on the host go to all of them.
 Bug fixed: the 1.8.17 notes showed a made-up folder name, Album, as an example. TailRemote always says the real name of what you sent.
