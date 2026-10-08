@@ -30,8 +30,6 @@ namespace TailRemote
         public event Action<string>? Disconnected;
         /// <summary>Clipboard text from the host. Raised on a network thread.</summary>
         public event Action<string>? ClipboardReceived;
-        /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
-        public event Action<string>? FileMessage;
         /// <summary>True when the host let us in with its listen-only password: audio only, no keys.</summary>
         public bool ListenOnly { get; private set; }
         /// <summary>0 = full quality; above that, a lower sample rate while the connection struggles.</summary>
@@ -136,13 +134,27 @@ namespace TailRemote
                     c._link.Send(stream, new[] { Protocol.AudioQuality, (byte)c._lockedStep });
                 }
                 c._link.Send(stream, Protocol.FeaturesMessage());
-                if (!c.ListenOnly) c._files = OpenFiles(hostEp, token, key, hostNonce, myNonce, msg => c.FileMessage?.Invoke(msg));
-                if (c._files != null)
+                if (!c.ListenOnly)
                 {
-                    c._files.Rate = () => c._pace;
-                    c._files.TextReceived = text => c.ClipboardReceived?.Invoke(text);
-                    c._files.FilesReceived = paths => c.ClipboardFilesReceived?.Invoke(paths);
-                    c._files.Progress = t => c.TransferProgress?.Invoke(t);
+                    // The same channel as before a dropped connection to this host, so what was
+                    // going carries on; anywhere else, a new one.
+                    string to = address.Trim().ToLowerInvariant() + ":" + port;
+                    FileChannel? files;
+                    lock (KeptGate)
+                    {
+                        files = _kept != null && _keptFor == to && !_kept.Gone ? _kept : null;
+                        if (files == null) _kept?.Dispose();
+                        _kept = null;
+                    }
+                    files ??= new FileChannel();
+                    c._files = files;
+                    c._filesFor = to;
+                    files.Rate = () => c._pace;
+                    files.TextReceived = text => c.ClipboardReceived?.Invoke(text);
+                    files.FilesReceived = paths => c.ClipboardFilesReceived?.Invoke(paths);
+                    files.Progress = t => c.TransferProgress?.Invoke(t);
+                    byte[] channel = files.Id;
+                    files.Dial = () => OpenLane(hostEp, token, channel, key, hostNonce, myNonce);
                 }
                 c.Status += status;
                 c.Start();
@@ -152,8 +164,23 @@ namespace TailRemote
             catch { udp?.Dispose(); tcp.Dispose(); throw; }
         }
 
-        /// <summary>The second connection, for files. Without it everything else still works.</summary>
-        private static FileChannel? OpenFiles(IPEndPoint host, byte[] token, byte[] key, byte[] hostNonce, byte[] myNonce, Action<string> announce)
+        // A file channel whose main connection dropped, kept for the next connection to the same host.
+        private static readonly object KeptGate = new();
+        private static FileChannel? _kept;
+        private static string? _keptFor;
+        private string? _filesFor;
+
+        /// <summary>Disconnect pressed: transfers kept for a reconnection are stopped for good.</summary>
+        public static void ForgetTransfers()
+        {
+            lock (KeptGate) { _kept?.Dispose(); _kept = null; }
+        }
+
+        /// <summary>
+        /// One more file lane. Its keys mix in fresh random values from both PCs, so no two
+        /// lanes ever encrypt with the same key and counter. Null if it could not be opened.
+        /// </summary>
+        private static (TcpClient, SecureLink)? OpenLane(IPEndPoint host, byte[] token, byte[] channel, byte[] key, byte[] hostNonce, byte[] myNonce)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6);
             tcp.Client.DualMode = true;
@@ -164,13 +191,16 @@ namespace TailRemote
                 s.ReadTimeout = 5000;
                 byte[] hello = new byte[Protocol.HelloBytes];
                 Protocol.ReadExactly(s, hello);
-                if (!Protocol.CheckOk(hello)) throw new InvalidOperationException(Protocol.DamagedLogin);
+                if (!hello.AsSpan(0, 4).SequenceEqual(Protocol.Magic) || !Protocol.CheckOk(hello)) throw new InvalidOperationException(Protocol.DamagedLogin);
+                byte[] laneValue = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
                 byte[] answer = new byte[Protocol.AnswerBytes];
                 Protocol.FileMagic.CopyTo(answer, 0);
                 token.CopyTo(answer, 4);
+                channel.CopyTo(answer, 12);
+                laneValue.CopyTo(answer, 28);
                 Protocol.AddCheck(answer);
                 s.Write(answer);
-                return new FileChannel(tcp, new SecureLink(key, hostNonce, myNonce, isHost: false, "files "), announce);
+                return (tcp, new SecureLink(key, hostNonce, myNonce, isHost: false, FileChannel.LanePurpose(hello.AsSpan(4, 16), laneValue)));
             }
             catch { tcp.Dispose(); return null; }
         }
@@ -191,7 +221,7 @@ namespace TailRemote
             ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
         }
 
-        /// <summary>Stops a clipboard batch going to the host.</summary>
+        /// <summary>Stops what is going to or coming from the host.</summary>
         public void CancelTransfer() => _files?.CancelSending();
 
         /// <summary>Test only: the file channel.</summary>
@@ -219,10 +249,14 @@ namespace TailRemote
             _pings.Enqueue((now, rttMs));
             while (_pings.Count > 0 && now - _pings.Peek().At > 30_000) _pings.Dequeue();
             bool busy = _files?.Busy == true;
-            if (busy && !_wasBusy) _pace = Math.Max(_pace, 2 << 20); // a new transfer starts brisk, not where the last one ended
+            int floor = _pings.Min(p => p.Ms);
+            // A LAN, or Tailscale going direct to a PC nearby: the line's own delay is a few ms.
+            // There it starts fast and doubles while the sound is fine; further away it starts
+            // gently and grows by half.
+            bool near = floor <= 8;
+            if (busy && !_wasBusy) _pace = Math.Max(_pace, near ? 64 << 20 : 2 << 20); // a new transfer starts brisk, not where the last one ended
             _wasBusy = busy;
             if (!busy) return;
-            int floor = _pings.Min(p => p.Ms);
             int queued = rttMs - floor;
             // Slowed only when the sound really suffers (it ran dry or packets came late), or
             // the ping has stayed far up (150 ms of queue, twice running). Over Tailscale and
@@ -236,7 +270,7 @@ namespace TailRemote
             else
             {
                 _highPings = 0;
-                _pace = Math.Min(_pace * (queued < 30 ? 1.5 : 1.1), 2.0 * (1 << 30));
+                _pace = Math.Min(_pace * (queued >= 30 ? 1.1 : near ? 2 : 1.5), 2.0 * (1 << 30));
             }
             if (Math.Abs(_pace - _paceSent) > _paceSent * 0.1)
             {
@@ -268,7 +302,21 @@ namespace TailRemote
             _toSend.Release();
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
-            _files?.Dispose();
+            if (_files != null)
+            {
+                if (why == null) _files.Dispose(); // closed on purpose: transfers stop, and the host is told
+                else
+                {
+                    // Dropped: transfers wait for the next connection to this host (a minute at most).
+                    _files.Detach();
+                    lock (KeptGate)
+                    {
+                        if (_kept != _files) _kept?.Dispose();
+                        _kept = _files;
+                        _keptFor = _filesFor;
+                    }
+                }
+            }
             _wifi?.Dispose();
             if (why != null) Disconnected?.Invoke(why);
         }
@@ -279,7 +327,7 @@ namespace TailRemote
         // text: a large copy can never hold up a keystroke, and a hook that waits
         // gets removed by Windows, after which keys silently stay on this PC.
 
-        private readonly ConcurrentQueue<byte[]> _urgent = new(), _bulk = new();
+        private readonly ConcurrentQueue<byte[]> _urgent = new();
         private readonly SemaphoreSlim _toSend = new(0);
 
         /// <summary>Test only (--chaostest): sends any message, as the client would.</summary>
@@ -301,7 +349,7 @@ namespace TailRemote
             {
                 _toSend.Wait();
                 if (_closed) return;
-                if (!_urgent.TryDequeue(out var m) && !_bulk.TryDequeue(out m)) continue;
+                if (!_urgent.TryDequeue(out var m)) continue;
                 try { _link.Send(_stream, m); }
                 catch
                 {
@@ -339,18 +387,14 @@ namespace TailRemote
         /// <summary>Asks the host PC to restart.</summary>
         public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
 
-        /// <summary>Sends clipboard text to the host, behind any keys. Not for listeners.</summary>
+        /// <summary>Sends clipboard text to the host's clipboard. Never waits. Not for listeners.</summary>
         public void SendClipboard(string text)
         {
-            if (_closed || ListenOnly || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
-            // Big text goes over the file connection, so it never holds up keys.
-            if (text.Length > Host.SmallClipboard && _files is FileChannel files)
-            {
-                ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
-                return;
-            }
-            _bulk.Enqueue(Protocol.TextMessage(Protocol.Clipboard, text));
-            _toSend.Release();
+            // Over the file lanes, never the keys' connection: confirmed on arrival, and sent again
+            // if a connection breaks on the way.
+            var files = _files;
+            if (_closed || ListenOnly || files == null) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
         }
 
         private void TcpLoop()
@@ -373,8 +417,6 @@ namespace TailRemote
                         _peerFeatures = BitConverter.ToUInt32(m, 1);
                         DiagLog.Write("client: host features " + _peerFeatures + (ListenOnly ? ", listen only" : ", control"));
                     }
-                    else if (m.Length >= 1 && m[0] == Protocol.Clipboard && !ListenOnly)
-                        ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     // Anything else is from a newer version: ignore it.
                 }
             }

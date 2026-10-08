@@ -115,7 +115,12 @@ namespace TailRemote
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
             _transferStatus.Text = TransferIdle;
-            _transferStop.Click += (_, _) => { _client?.CancelTransfer(); _host?.CancelTransfer(); };
+            _transferStop.Click += (_, _) =>
+            {
+                if (_client != null) _client.CancelTransfer();
+                else Client.ForgetTransfers(); // waiting for a reconnection: stopped for good
+                _host?.CancelTransfer();
+            };
             Controls.Add(table);
             AcceptButton = _go;
 
@@ -317,15 +322,14 @@ namespace TailRemote
                 {
                     client?.SendClipboardFiles(files);
                     host?.SendClipboardFiles(files);
-                    string what = files.Length == 1 ? System.IO.Path.GetFileName(files[0].TrimEnd('\\')) : files.Length + " items";
-                    Later(() => { Tone(Sounds.Tone.ClipboardSent); Say("Sending " + what + " to the other PC's clipboard."); });
+                    Later(() => Tone(Sounds.Tone.ClipboardSent)); // the Files line says the rest, without speaking
                 }
                 else if (!string.IsNullOrEmpty(text))
                 {
                     if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); return; }
                     client?.SendClipboard(text);
                     host?.SendClipboard(text);
-                    Later(() => { Tone(Sounds.Tone.ClipboardSent); Say("Sent the clipboard to the other PC."); });
+                    Later(() => Tone(Sounds.Tone.ClipboardSent));
                 }
                 else Later(() => Say("The clipboard is empty: copy something first."));
             });
@@ -384,7 +388,6 @@ namespace TailRemote
             Doing("receiving the clipboard");
             if (text.Length == 0) return;
             Tone(Sounds.Tone.ClipboardReceived);
-            Say("The other PC sent its clipboard. Press Control V to paste.");
             ClipboardJobs.TryAdd(() => SetClipboard(() => Clipboard.SetDataObject(text, true, 2, 50)));
         }
 
@@ -472,14 +475,10 @@ namespace TailRemote
             IdleSoon();
         }
 
-        /// <summary>How a clipboard batch is going, either way: the tab's line and bar; spoken only when it starts and ends.</summary>
+        /// <summary>How a transfer is going, either way: the Files line and bar. Never spoken, so a lot of them cannot flood NVDA; the sounds say they started and ended.</summary>
         private void ShowTransfer(FileChannel.Transfer t)
         {
-            if (!t.Finished && !ReferenceEquals(t, _transferShown))
-            {
-                _transferShown = t;
-                Say((t.Outgoing ? "Sending " : "Receiving ") + t.What + ", " + FileChannel.Size(t.Total) + ".");
-            }
+            if (!t.Finished && !ReferenceEquals(t, _transferShown)) _transferShown = t;
             if (t.Finished)
             {
                 if (_transferShown != null && !ReferenceEquals(t, _transferShown) && !_transferShown.Finished) return; // an older one ending: the newer one is what is going on
@@ -488,7 +487,6 @@ namespace TailRemote
                 IdleSoon();
                 _transferBar.Value = t.Failed ? 0 : 100;
                 _transferStop.Enabled = false;
-                Say(t.Result ?? "");
                 // The clipboard's own sounds play when it is sent and when it arrives; file sounds are
                 // for Send files only; and stopping (or replacing) on purpose is never an error.
                 if (t.Failed) { if (!t.Cancelled) Tone(Sounds.Tone.Error); }
@@ -497,9 +495,9 @@ namespace TailRemote
             }
             string left = t.Left is TimeSpan l ? ", about " + (l.TotalSeconds < 60 ? Math.Max(1, (int)l.TotalSeconds) + " seconds" : (int)l.TotalMinutes + " minutes " + l.Seconds + " seconds") + " left" : "";
             _transferStatus.Text = (t.Outgoing ? "Sending " : "Receiving ") + t.What + ": " + FileChannel.Size(t.Done) + " of " + FileChannel.Size(t.Total) +
-                ", " + FileChannel.Speed(t.BytesPerSecond) + left + ".";
+                (t.Waiting ? ", waiting for the connection to come back; it carries on from here." : ", " + FileChannel.Speed(t.BytesPerSecond) + left + ".");
             _transferBar.Value = t.Total <= 0 ? 0 : (int)Math.Clamp(t.Done * 100 / t.Total, 0, 100);
-            _transferStop.Enabled = t.Outgoing;
+            _transferStop.Enabled = true;
         }
 
         // ---- Saved PCs ----
@@ -685,7 +683,6 @@ namespace TailRemote
                 _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 _host.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
                 _host.TransferProgress += t => Later(() => ShowTransfer(t));
-                _host.FileMessage += msg => Later(() => Say(msg));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
                 else if (Wasapi.OutputDevices().Count == 0)
@@ -789,7 +786,6 @@ namespace TailRemote
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 c.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
                 c.TransferProgress += t => Later(() => ShowTransfer(t));
-                c.FileMessage += msg => Later(() => { Say(msg); FileTone(msg); });
                 _client = c;
                 if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys
                 bool wasReconnecting = _reconnecting;
@@ -838,7 +834,13 @@ namespace TailRemote
 
         private void Disconnect(string why, bool byUser)
         {
-            TransferEnded("Stopped: the connection to the other PC closed.");
+            // Pressing Disconnect stops transfers; a dropped connection does not: they carry on
+            // when it reconnects (and say so on the Files line meanwhile).
+            if (byUser)
+            {
+                Client.ForgetTransfers();
+                TransferEnded("Stopped: you disconnected.");
+            }
             Doing("disconnecting");
             if (_client == null) return;
             // Keys come back to this PC while the connection is down, so nothing is
@@ -873,12 +875,6 @@ namespace TailRemote
         private void Tone(Sounds.Tone t)
         {
             if (!HostMode) Sounds.Play(t);
-        }
-
-        private void FileTone(string msg)
-        {
-            if (msg.StartsWith("Received")) Tone(Sounds.Tone.FileReceived);
-            else if (msg.Contains("damaged") || msg.Contains("dropped") || msg.StartsWith("Could not")) Tone(Sounds.Tone.Error);
         }
 
         private void StopReconnecting(string why)

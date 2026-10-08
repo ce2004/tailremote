@@ -33,8 +33,8 @@ namespace TailRemote
     {
         public const int DefaultPort = 47120;
         public static readonly byte[] Magic = "TRM7"u8.ToArray(); // 7: login messages carry a check (1.8.5); 6 was Opus audio
-        /// <summary>A client's second connection, for files: "TRF6" + session token (8), padded to 52 bytes.</summary>
-        public static readonly byte[] FileMagic = "TRF7"u8.ToArray();
+        /// <summary>A file lane (FileChannel): "TRF8", session token (8), channel id (16), the lane's fresh random value (16), padded, then the check.</summary>
+        public static readonly byte[] FileMagic = "TRF8"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -46,7 +46,7 @@ namespace TailRemote
         public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)
         // Either way
         public const byte Features = 0x40;   // u32 flags
-        public const byte Clipboard = 0x41;  // UTF-8 text
+        // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
         public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
@@ -98,7 +98,7 @@ namespace TailRemote
         // with a 4-byte check of the rest. A wrong check means damage: never counted as a
         // wrong password, and the client simply tries again.
         public const int HelloBytes = 24;  // magic 4, host nonce 16, check 4
-        public const int AnswerBytes = 56; // magic 4, client nonce 16, proof 32, check 4 (files: magic, token 8, zeros)
+        public const int AnswerBytes = 56; // magic 4, client nonce 16, proof 32, check 4 (file lanes: magic, token 8, channel 16, lane value 16, zeros)
         public const int ReplyBytes = 46;  // ok 1, role 1, token 8, host proof 32, check 4 (a refusal is the same size)
 
         /// <summary>Fills the last 4 bytes with a check of everything before them.</summary>

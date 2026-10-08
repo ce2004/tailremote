@@ -46,7 +46,6 @@ namespace TailRemote
             _clip = new ClipboardWindow(_host, share: false);
             _host.ClipboardReceived += text => _clip.Arrived(text);
             _host.ClipboardFilesReceived += paths => _clip.FilesArrived(paths);
-            _host.FileMessage += ServiceHost.Log;
             ServiceHost.Log("Agent hosting on port " + cfg.Port + ".");
         }
 

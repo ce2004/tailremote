@@ -357,6 +357,7 @@ namespace TailRemote
             // Clipboard both ways, and a listener's clipboard is ignored.
             string? toClient = null;
             c.ClipboardReceived += t => toClient = t;
+            for (int i = 0; i < 100 && host.ControllerFiles == null; i++) System.Threading.Thread.Sleep(20); // the first file lane
             c.SendClipboard("from client ✓");
             host.SendClipboard("from host ✓");
             using var listener = Client.Connect("127.0.0.1", 47999, "listen", silent2, log.Enqueue);

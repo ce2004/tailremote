@@ -29,14 +29,13 @@ namespace TailRemote
 
         /// <summary>Clipboard text from the controller. Raised on a network thread.</summary>
         public event Action<string>? ClipboardReceived;
-        /// <summary>A sentence about a file that arrived. Raised on a network thread.</summary>
-        public event Action<string>? FileMessage;
 
         /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
         public Func<bool>? SecureAttention { get; init; }
 
         private readonly object _gate = new();
         private Session? _controller;
+        private FileChannel? _kept; // the last controller's file channel, for its next connection; under _gate
         private readonly List<Session> _listeners = new();
         private LoopbackCapture? _capture;
 
@@ -49,7 +48,7 @@ namespace TailRemote
             public required SecureLink Link;
             public required byte Role;
             public required byte[] Key, HostNonce, ClientNonce;
-            public FileChannel? Files;
+            public FileChannel? Files; // under _gate
             public double Pace = 8 << 20; // bytes a second the host may send this controller files at (FilePace)
             public uint PeerFeatures;
             public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
@@ -111,6 +110,8 @@ namespace TailRemote
             lock (_gate)
             {
                 foreach (var s in AllSessions()) End(s, null);
+                _kept?.Dispose();
+                _kept = null;
                 _controller = null;
                 _listeners.Clear();
                 Rebuild();
@@ -131,26 +132,15 @@ namespace TailRemote
             try { s.IOControl(SIO_UDP_CONNRESET, new byte[4], null); } catch { }
         }
 
-        /// <summary>Clipboard text up to this many characters goes over the main connection; more goes over the file connection.</summary>
-        public const int SmallClipboard = 16_000;
-
-        /// <summary>Sends clipboard text to the controller, if it shares the clipboard.</summary>
+        /// <summary>Sends clipboard text to the controller's clipboard. Never waits.</summary>
         public void SendClipboard(string text)
         {
             Session? c;
             lock (_gate) c = _controller;
-            if (c == null || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
-            // Off the caller's thread: a controller that has stopped reading must not freeze this window.
-            // Big text goes over the file connection, so it never holds up keys or messages.
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    if (text.Length > SmallClipboard && c.Files != null) c.Files.SendText(text);
-                    else c.Link.Send(c.Stream, Protocol.TextMessage(Protocol.Clipboard, text));
-                }
-                catch { }
-            });
+            var files = c?.Files;
+            if (files == null) return;
+            // Over the file lanes: confirmed on arrival, and sent again if a connection breaks on the way.
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
         }
 
         /// <summary>Copied files from here to the controller's clipboard. Never waits.</summary>
@@ -176,12 +166,12 @@ namespace TailRemote
         /// <summary>True while someone is controlling this PC (the only one files and the clipboard can go to).</summary>
         public bool HasController { get { lock (_gate) return _controller?.Files != null; } }
 
-        /// <summary>Stops a clipboard batch going to the controller.</summary>
+        /// <summary>Stops what is going to or coming from the controller (also while it is reconnecting).</summary>
         public void CancelTransfer()
         {
-            Session? c;
-            lock (_gate) c = _controller;
-            c?.Files?.CancelSending();
+            FileChannel? files;
+            lock (_gate) files = _controller?.Files ?? _kept;
+            files?.CancelSending();
         }
 
         /// <summary>Test only: the controller's file channel.</summary>
@@ -392,15 +382,35 @@ namespace TailRemote
                         if (owner == null) Thread.Sleep(50);
                     }
                     if (owner == null) { tcp.Dispose(); return; }
-                    owner.Files?.Dispose();
-                    var files = new FileChannel(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, "files "),
-                        msg => FileMessage?.Invoke(msg));
-                    var o = owner;
-                    files.Rate = () => Volatile.Read(ref o.Pace);
-                    files.TextReceived = text => ClipboardReceived?.Invoke(text);
-                    files.FilesReceived = paths => ClipboardFilesReceived?.Invoke(paths);
-                    files.Progress = t => TransferProgress?.Invoke(t);
-                    owner.Files = files;
+                    // One more lane for the controller's channel. A channel this PC already has
+                    // (the controller's main connection dropped and came back) carries on with
+                    // what it was doing; a new one replaces any other.
+                    byte[] channel = answer[12..28];
+                    FileChannel files;
+                    lock (_gate)
+                    {
+                        if (owner.Files is FileChannel mine && !mine.Gone && mine.Id.AsSpan().SequenceEqual(channel)) files = mine;
+                        else
+                        {
+                            if (_kept != null && !_kept.Gone && _kept.Id.AsSpan().SequenceEqual(channel)) files = _kept;
+                            else
+                            {
+                                _kept?.Dispose();
+                                files = new FileChannel(channel)
+                                {
+                                    TextReceived = text => ClipboardReceived?.Invoke(text),
+                                    FilesReceived = paths => ClipboardFilesReceived?.Invoke(paths),
+                                    Progress = t => TransferProgress?.Invoke(t),
+                                };
+                            }
+                            _kept = null;
+                            if (owner.Files != files) owner.Files?.Dispose();
+                            owner.Files = files;
+                            var o = owner;
+                            files.Rate = () => Volatile.Read(ref o.Pace);
+                        }
+                    }
+                    files.AddLane(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, FileChannel.LanePurpose(nonce, answer.AsSpan(28, 16))));
                     handedOff = true;
                     return;
                 }
@@ -546,9 +556,6 @@ namespace TailRemote
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
                         s.Ready = true;
                         break;
-                    case Protocol.Clipboard when s.Role == Protocol.RoleControl:
-                        ClipboardReceived?.Invoke(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
-                        break;
                     // Anything else is from a newer version: ignore it.
                 }
             }
@@ -568,10 +575,21 @@ namespace TailRemote
         /// in the background: a PC that has stopped reading must never hold up
         /// the host, and End is called while holding _gate.
         /// </summary>
-        private static void End(Session s, string? why)
+        private void End(Session s, string? why)
         {
             ReleaseHeld(s);
-            s.Files?.Dispose();
+            if (s.Files is FileChannel f)
+            {
+                // Kept for the controller's next connection (a dropped one comes straight back),
+                // so its transfers carry on; stopping hosting ends them.
+                if (_stop) f.Dispose();
+                else
+                {
+                    f.Detach();
+                    if (_kept != f) _kept?.Dispose();
+                    _kept = f;
+                }
+            }
             if (why == null) { try { s.Tcp.Dispose(); } catch { } return; }
             ThreadPool.QueueUserWorkItem(_ =>
             {

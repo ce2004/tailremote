@@ -1,3 +1,12 @@
+1.8.12
+Bug fixed: if the connection damaged, dropped or held up data (as Clumsy does), Send the clipboard and Send files could get stuck for good, or silently do nothing until you reconnected. Now a transfer survives it: whatever did not arrive is sent again, a connection that dies or stalls for 10 seconds is reopened at once, and the transfer carries on from where it was, even if the main connection drops and reconnects. Only a whole minute with nothing getting through gives up, and both PCs then say so.
+Changed: the sending PC only says a transfer worked once the other PC has confirmed every piece arrived, so the two PCs always agree.
+Changed: much faster. Files go over up to 16 connections at once, each with its own threads, so several files, or parts of one big file, travel side by side and every processor core helps. On a home network or a direct Tailscale link, TailRemote notices and starts fast, then doubles its speed until the sound would suffer. On a slow line it uses fewer connections and smaller pieces, so nothing piles up and the sound stays live.
+Changed: clipboard text now goes the same safe way as files, so it is never lost when the connection hiccups.
+Changed: transfers are no longer spoken. The Files line shows them, and the sounds tell you when they start and end, so lots of them cannot flood your screen reader.
+Bug fixed: sending lots of files at once, or two files with the same name from different folders, could fail. The second one now arrives as name (2).
+Changed: Stop the file transfer now also stops a transfer coming from the other PC.
+
 1.8.11
 Bug fixed: each event's sound played on a different instrument every time. Default now always sounds the same: each event's own tune on the piano. Choose Random sound for an event in Sounds (Alt L) if you want it to change.
 

@@ -143,7 +143,8 @@ namespace TailRemote
                 string? got = null;
                 host.ClipboardReceived += t => got = t;
                 using var l = Connect(ListenPassword);
-                l.TestWrite(Protocol.TextMessage(Protocol.Clipboard, "a listener should never set the clipboard"));
+                l.TestWrite(Protocol.TextMessage(0x41, "a listener should never set the clipboard")); // the retired clipboard message
+                l.SendClipboard("nor this way"); // a listener has no file lanes, so this goes nowhere
                 l.TestWrite(new byte[] { Protocol.SecureAttention });
                 l.TestWrite(new byte[] { Protocol.RestartPc }); // must never restart this PC
                 Thread.Sleep(1000);
@@ -257,7 +258,8 @@ namespace TailRemote
                     bool replaced = landed != null && Path.GetFileName(landed[0]) == "replacement.bin" && Same(small, landed[0]);
                     bool stopped = results.Any(r => r.Failed && r.What == "replaced.bin");
                     Thread.Sleep(300);
-                    bool hostAgrees = hostResults.Any(r => r.Failed && r.Cancelled && r.What == "replaced.bin") && results.Any(r => r.Cancelled && r.What == "replaced.bin");
+                    // The receiver either said the old one stopped, or never started it (its stop came first): never that it arrived.
+                    bool hostAgrees = hostResults.All(r => r.What != "replaced.bin" || r.Cancelled) && results.Any(r => r.Cancelled && r.What == "replaced.bin");
                     return replaced && stopped && hostAgrees ? "the old one stopped (both sides said so), the new one arrived" : "FAIL: replaced " + replaced + ", sender said stopped " + stopped + ", receiver said stopped " + hostAgrees;
                 });
 
@@ -301,13 +303,12 @@ namespace TailRemote
                         int length = -1;
                         Action<string> took = t => length = t.Length;
                         host.ClipboardReceived += took;
-                        ctrl.SendClipboard(string.Concat(Enumerable.Repeat("Round " + round + " of clipboard text. ", 2_600_000)));
+                        ctrl.SendClipboard(new string((char)('a' + round), 60_000_000)); // made directly: string.Concat keeps big buffers in .NET's shared pool, which looked like a leak
                         for (int i = 0; i < 1500 && length < 0; i++) Thread.Sleep(20);
                         host.ClipboardReceived -= took;
                         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
                         sizes.Add(GC.GetTotalMemory(true) >> 20);
-                    }
-                    long growth = sizes[2] - sizes[0];
+                    }                    long growth = sizes[2] - sizes[0];
                     return growth < 30 ? "memory after each round: " + string.Join(", ", sizes) + " MB, so nothing is kept" : "FAIL: memory grew " + growth + " MB over three rounds (" + string.Join(", ", sizes) + ")";
                 });
 
@@ -351,6 +352,106 @@ namespace TailRemote
                     bool kinds = ends.Where(t => t.What == "report.bin").All(t => !t.Clipboard) && ends.Where(t => t.What == "clipboard text").All(t => t.Clipboard)
                         && ends.Count(t => t.What == "clipboard text") == 2;
                     return both && kinds ? "both copies kept (report, report (2)), and files and clipboard each told apart" : "FAIL: both copies " + both + ", kinds right " + kinds + " (" + ends.Count + " ends)";
+                });
+
+                Scenario("every file lane cut 5 times in the middle of 256 MB: it carries on", 120, () =>
+                {
+                    string file = Big("cut.bin", 256);
+                    string[]? landed = null;
+                    host.ClipboardFilesReceived += p => landed = p;
+                    int cuts = 0;
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "cut.bin", () =>
+                    {
+                        var send = Task.Run(() => ctrl.Files!.SendFiles(new[] { file }));
+                        for (; cuts < 5 && !send.IsCompleted; cuts++)
+                        {
+                            Thread.Sleep(150);
+                            if (cuts % 2 == 0) ctrl.Files!.TestCutLanes(); else host.ControllerFiles!.TestCutLanes();
+                        }
+                        send.Wait();
+                    });
+                    bool ok = hostSays?.Failed == false && clientSays?.Failed == false && landed != null && Same(file, landed[0]);
+                    return ok ? "cut " + cuts + " times, arrived whole, both sides said so (" + ctrl.Files!.TestLanes + " lanes open after)"
+                        : "FAIL: after " + cuts + " cuts host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                });
+
+                Scenario("the receiving PC stalls for 20 seconds: lanes are reopened and it finishes", 120, () =>
+                {
+                    string file = Big("stall20.bin", 64);
+                    var clock = Stopwatch.StartNew();
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "stall20.bin", () =>
+                    {
+                        ctrl.Files!.TestPause(20_000);
+                        host.ControllerFiles!.SendFiles(new[] { file });
+                    });
+                    bool ok = hostSays?.Failed == false && clientSays?.Failed == false && clock.ElapsedMilliseconds > 19_000;
+                    return ok ? "finished " + clock.Elapsed.TotalSeconds.ToString("0") + " s after the stall began; both sides said so" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                });
+
+                Scenario("clipboard text sent the moment every lane is cut", 30, () =>
+                {
+                    string? got = null;
+                    Action<string> took = t => got = t;
+                    host.ClipboardReceived += took;
+                    ctrl.Files!.TestCutLanes();
+                    ctrl.SendClipboard("redundant hello");
+                    for (int i = 0; i < 1000 && got == null; i++) Thread.Sleep(20);
+                    host.ClipboardReceived -= took;
+                    return got == "redundant hello" ? "it arrived once the lanes came back" : "FAIL: got " + (got ?? "nothing");
+                });
+
+                Scenario("300 files at once with Send files", 120, () =>
+                {
+                    var items = new List<string>();
+                    for (int i = 0; i < 300; i++)
+                    {
+                        string p = Path.Combine(Root, "many", "file" + i + ".dat");
+                        Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+                        File.WriteAllBytes(p, Encoding.UTF8.GetBytes(new string((char)('a' + i % 26), 1000 + i * 37)));
+                        items.Add(p);
+                    }
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "300 items", () => ctrl.Files!.SendFiles(items, toClipboard: false));
+                    int same = items.Count(p => File.Exists(Path.Combine(FileChannel.Downloads, Path.GetFileName(p))) && Same(p, Path.Combine(FileChannel.Downloads, Path.GetFileName(p))));
+                    return same == 300 && hostSays?.Failed == false && clientSays?.Failed == false ? "all 300 arrived exactly" : "FAIL: " + same + " of 300 arrived; host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                });
+
+                Scenario("ten 32 MB files at once, on every lane and core", 120, () =>
+                {
+                    var items = Enumerable.Range(0, 10).Select(i => Big("ten" + i + ".bin", 32)).ToList();
+                    string[]? landed = null;
+                    host.ClipboardFilesReceived += p => landed = p;
+                    var clock = Stopwatch.StartNew();
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "10 items", () => ctrl.Files!.SendFiles(items));
+                    double mbs = 320 / clock.Elapsed.TotalSeconds;
+                    for (int i = 0; i < 250 && landed == null; i++) Thread.Sleep(20); // put on the clipboard just after it says it arrived
+                    bool ok = landed != null && landed.Length == 10 && items.All(p => Same(p, Path.Combine(Path.GetDirectoryName(landed[0])!, Path.GetFileName(p))));
+                    return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                });
+
+                Scenario("the main connection damaged in the middle of 256 MB: it reconnects and the transfer carries on", 120, () =>
+                {
+                    string big = Big("resume.bin", 256);
+                    var c3 = Connect(Password);
+                    var files = c3.Files!;
+                    for (int i = 0; i < 100 && files.TestLanes == 0; i++) Thread.Sleep(50);
+                    string[]? landed = null;
+                    host.ClipboardFilesReceived += p => landed = p;
+                    FileChannel.Transfer? sent = null;
+                    Action<FileChannel.Transfer> note = t => { if (t.Finished && t.What == "resume.bin") sent = t; };
+                    c3.TransferProgress += note;
+                    var send = Task.Run(() => files.SendFiles(new[] { big }));
+                    Thread.Sleep(300);
+                    c3.TestRaw(new byte[] { 0x55, 0x55, 0x55, 0x55, 0x12, 0x34, 0x56, 0x78, 1, 2, 3 }); // the host hangs up the main connection
+                    files.TestCutLanes(); // and the lanes go down with it
+                    bool dropped = WaitClosed(c3, 12_000);
+                    c3.Dispose();
+                    using var c4 = Connect(Password); // as the window does: reconnect to the same PC
+                    c4.TransferProgress += note;
+                    send.Wait(90_000);
+                    for (int i = 0; i < 250 && (sent == null || landed == null); i++) Thread.Sleep(20);
+                    bool same = ReferenceEquals(c4.Files, files);
+                    bool ok = dropped && same && sent?.Failed == false && landed != null && Same(big, landed[0]);
+                    return ok ? "the transfer picked up on the new connection and arrived whole" : "FAIL: dropped " + dropped + ", same channel " + same + ", sender said " + sent?.Result + ", arrived " + (landed != null);
                 });
 
                 Scenario("the connection dying in the middle of 256 MB", 60, () =>
