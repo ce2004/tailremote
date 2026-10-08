@@ -15,6 +15,7 @@ namespace TailRemote
     {
         private readonly Host _host;
         private readonly ClipboardWindow _clip;
+        private readonly ServiceLink.Server _link;
         private readonly System.Windows.Forms.Timer _folderTimer = new() { Interval = 5000 };
 
         public static int Run()
@@ -41,11 +42,14 @@ namespace TailRemote
             {
                 SecureAttention = ServiceHost.RequestSas,
             };
-            // The service has no window, so it never sends; what the controlling PC sends with
-            // Send clipboard goes onto this PC's clipboard.
+            // The TailRemote window, when open, does the clipboard and sends files through this
+            // agent (ServiceLink), as the signed-in user. Without a window, what the controlling
+            // PC sends still goes onto this PC's clipboard, from here.
             _clip = new ClipboardWindow(_host, share: false);
-            _host.ClipboardReceived += text => _clip.Arrived(text);
-            _host.ClipboardFilesReceived += paths => _clip.FilesArrived(paths);
+            _link = new ServiceLink.Server(_host);
+            _host.ClipboardReceived += text => { if (!_link.Text(text)) _clip.Arrived(text); };
+            _host.ClipboardFilesReceived += paths => { if (!_link.Files(paths)) _clip.FilesArrived(paths); };
+            _host.TransferProgress += t => _link.Transfer(t);
             ServiceHost.Log("Agent hosting on port " + cfg.Port + ".");
         }
 
@@ -62,6 +66,8 @@ namespace TailRemote
             // The signed-in user's own holding folder: the agent runs as SYSTEM, whose folders
             // the user's Explorer could not paste from.
             FileChannel.StagingOverride = Path.Combine(root, "AppData", "Local", "TailRemote", "Clipboard");
+            // Send files too: the user's own Downloads, not SYSTEM's (deep inside Windows).
+            FileChannel.DownloadsOverride = Path.Combine(root, "Downloads", "TailRemote");
         }
 
         /// <summary>A hidden window that hears clipboard changes and sets the clipboard on its own thread.</summary>

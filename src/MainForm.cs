@@ -94,7 +94,7 @@ namespace TailRemote
             table.Controls.Add(_savedButtons); table.SetColumnSpan(_savedButtons, 2);
             _addressLabel = AddRow(table, "&Address (name or IP)", _address);
             AddRow(table, "&Port", _port);
-            _myAddressLabel = AddRow(table, "This PC'&s IP address", _myAddress);
+            _myAddressLabel = AddRow(table, "This PC's IP add&ress", _myAddress);
             table.Controls.Add(_copyAddress); table.SetColumnSpan(_copyAddress, 2);
             _copyAddress.Click += (_, _) => CopyAddress();
             System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += (_, _) => Later(FillMyAddress);
@@ -135,6 +135,7 @@ namespace TailRemote
                 if (_client != null) _client.CancelTransfer();
                 else Client.ForgetTransfers(); // waiting for a reconnection: stopped for good
                 _host?.CancelTransfer();
+                _serviceLink?.CancelTransfer();
             };
             Controls.Add(table);
             AcceptButton = _go;
@@ -300,7 +301,32 @@ namespace TailRemote
             else _go.Text = _client == null && !_reconnecting ? "&Connect" : "Dis&connect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
             _restart.Enabled = _client != null && !_client.ListenOnly;
+            EnsureServiceLink();
             SaveResumeState();
+        }
+
+        private ServiceLink.Client? _serviceLink;
+
+        /// <summary>
+        /// While the service hosts, this window still does the clipboard and sends files, through
+        /// the service's agent: the same buttons and Files line as when this window hosts itself.
+        /// </summary>
+        private void EnsureServiceLink()
+        {
+            bool want = HostMode && _service.Checked;
+            if (want && _serviceLink == null)
+            {
+                var link = new ServiceLink.Client();
+                link.TextArrived += text => Later(() => ClipboardArrived(text));
+                link.FilesArrived += paths => Later(() => ClipboardFilesArrived(paths));
+                link.TransferProgress += t => Later(() => ShowTransfer(t));
+                _serviceLink = link;
+            }
+            else if (!want && _serviceLink != null)
+            {
+                _serviceLink.Dispose();
+                _serviceLink = null;
+            }
         }
 
         /// <summary>
@@ -345,10 +371,19 @@ namespace TailRemote
             return jobs;
         }
 
-        private bool CanSend(out Client? client, out Host? host)
+        private bool CanSend(out Client? client, out Host? host) => CanSend(out client, out host, out _);
+
+        private bool CanSend(out Client? client, out Host? host, out ServiceLink.Client? link)
         {
             client = _client;
             host = _host;
+            link = HostMode && _service.Checked ? _serviceLink : null;
+            if (link != null)
+            {
+                if (!link.Connected) { Say("The TailRemote service is not answering. Check that it is running, or press Apply settings to the service."); return false; }
+                if (!link.HasController) { Say("No one is controlling this PC, so there is no one to send to."); return false; }
+                return true;
+            }
             if (client == null && host == null) { Say("Connect, or start hosting, first."); return false; }
             if (client?.ListenOnly == true) { Say("Listeners cannot send anything."); return false; }
             if (host != null && !host.HasController) { Say("No one is controlling this PC, so there is no one to send to."); return false; }
@@ -358,7 +393,7 @@ namespace TailRemote
         private void SendClipboard()
         {
             Doing("sending the clipboard");
-            if (!CanSend(out var client, out var host)) return;
+            if (!CanSend(out var client, out var host, out var link)) return;
             ClipboardJobs.TryAdd(() =>
             {
                 string[]? files = null;
@@ -382,6 +417,7 @@ namespace TailRemote
                 {
                     client?.SendClipboardFiles(files);
                     host?.SendClipboardFiles(files);
+                    link?.SendClipboardFiles(files);
                     Later(() => Tone(Sounds.Tone.ClipboardSent)); // the Files line says the rest, without speaking
                 }
                 else if (!string.IsNullOrEmpty(text))
@@ -389,6 +425,7 @@ namespace TailRemote
                     if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); return; }
                     client?.SendClipboard(text);
                     host?.SendClipboard(text);
+                    link?.SendClipboard(text);
                     Later(() => Tone(Sounds.Tone.ClipboardSent));
                 }
                 else Later(() => Say("The clipboard is empty: copy something first."));
@@ -437,9 +474,10 @@ namespace TailRemote
                 try { paths = await PickFiles(folder); }
                 finally { _picking = false; }
                 if (paths == null || paths.Length == 0) return;
-                if (!CanSend(out var client, out var host)) return; // the connection may have closed meanwhile
+                if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
                 client?.SendFiles(paths);
                 host?.SendFiles(paths);
+                link?.SendFiles(paths);
             }
             catch (Exception e)
             {

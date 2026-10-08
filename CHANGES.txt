@@ -1,3 +1,8 @@
+1.8.16
+Bug fixed: while the TailRemote service hosted, Send the clipboard, Send files and Send a folder did nothing, and what the controlling PC sent could not be pasted. The TailRemote window now does all of that through the service, exactly as when it hosts itself: same buttons, same Files line and progress bars, and what arrives goes onto your clipboard. The service opens the files you send as you, so nothing you could not open yourself can be sent.
+Bug fixed: with the service hosting, files from Send files went into a hidden system folder instead of your own Downloads, TailRemote.
+Bug fixed: This PC's IP address shared its Alt S shortcut with Start hosting. It is now Alt R.
+
 1.8.15
 New feature: when hosting, This PC's IP address (Alt S) shows, right before the password, the addresses the other PC can connect to: the home network one, the Tailscale one and the PC's name. Copy IP address (Alt Y) puts the home network address on the clipboard, or the Tailscale one if there is no home network.
 

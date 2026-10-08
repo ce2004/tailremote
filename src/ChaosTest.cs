@@ -437,6 +437,41 @@ namespace TailRemote
                     return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes, up to " + together + " files moving at once (" + togetherThere + " seen arriving at once)" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
                 });
 
+                Scenario("hosting as the service: the window sends and receives through the agent", 60, () =>
+                {
+                    var server = new ServiceLink.Server(host);
+                    string? toWindow = null, toController = null;
+                    string[]? windowFiles = null, controllerFiles = null;
+                    FileChannel.Transfer? windowSaw = null;
+                    host.ClipboardReceived += t => { if (!server.Text(t)) toWindow = "agent kept it"; };
+                    host.ClipboardFilesReceived += p => server.Files(p);
+                    host.TransferProgress += t => server.Transfer(t);
+                    using var window = new ServiceLink.Client();
+                    window.TextArrived += t => toWindow = t;
+                    window.FilesArrived += p => windowFiles = p;
+                    window.TransferProgress += t => { if (t.Finished) windowSaw = t; };
+                    Action<string> took = t => toController = t;
+                    Action<string[]> tookFiles = p => controllerFiles = p;
+                    ctrl.ClipboardReceived += took;
+                    ctrl.ClipboardFilesReceived += tookFiles;
+                    for (int i = 0; i < 200 && !(window.Connected && window.HasController); i++) Thread.Sleep(20);
+                    if (!window.Connected || !window.HasController) return "FAIL: the window never linked up (connected " + window.Connected + ")";
+                    window.SendClipboard("from the window, through the agent");
+                    ctrl.SendClipboard("from the controller, to the window");
+                    // Each side's next send would replace its text still on the way, so the files wait for it.
+                    for (int i = 0; i < 500 && (toWindow == null || toController == null); i++) Thread.Sleep(20);
+                    string file = Big("via-service.bin", 3);
+                    window.SendClipboardFiles(new[] { file });
+                    ctrl.Files!.SendFiles(new[] { Big("to-window.bin", 2) });
+                    for (int i = 0; i < 500 && (toWindow == null || toController == null || windowFiles == null || controllerFiles == null || windowSaw == null); i++) Thread.Sleep(20);
+                    ctrl.ClipboardReceived -= took;
+                    ctrl.ClipboardFilesReceived -= tookFiles;
+                    bool ok = toController == "from the window, through the agent" && toWindow == "from the controller, to the window"
+                        && controllerFiles != null && Same(file, controllerFiles[0]) && windowFiles != null && windowSaw != null;
+                    return ok ? "text both ways, a file each way, and the window saw the transfer finish"
+                        : "FAIL: controller got " + toController + ", window got " + toWindow + ", files to controller " + (controllerFiles != null) + ", files to window " + (windowFiles != null) + ", window saw the end " + (windowSaw != null);
+                });
+
                 Scenario("the main connection damaged in the middle of 256 MB: it reconnects and the transfer carries on", 120, () =>
                 {
                     string big = Big("resume.bin", 256);

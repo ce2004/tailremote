@@ -76,6 +76,9 @@ namespace TailRemote
 
         public sealed class Transfer
         {
+            private static int _serials;
+            /// <summary>Tells transfers apart when they are passed on (the service's agent to the window).</summary>
+            public readonly int Serial = Interlocked.Increment(ref _serials);
             public bool Outgoing, Finished, Failed;
             /// <summary>For the clipboard (Send clipboard), not Send files.</summary>
             public bool Clipboard;
@@ -384,6 +387,7 @@ namespace TailRemote
             public required string What;
             public required volatile List<Entry> Entries;
             public long Total;
+            public System.Security.Principal.WindowsIdentity? AsUser; // opens files as this user (the service's agent)
             public readonly object Gate = new();
             public readonly ManualResetEventSlim Changed = new();
             public volatile bool Ready, Ended;
@@ -412,7 +416,8 @@ namespace TailRemote
                 lock (Handles)
                 {
                     if (Ended) throw new OperationCanceledException();
-                    h = Handles[i] ??= File.OpenHandle(e.Full!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    h = Handles[i] ??= AsUser == null ? OpenRead(e.Full!)
+                        : System.Security.Principal.WindowsIdentity.RunImpersonated(AsUser.AccessToken, () => OpenRead(e.Full!));
                 }
                 for (int got = 0; got < into.Length;)
                 {
@@ -421,6 +426,8 @@ namespace TailRemote
                     got += n;
                 }
             }
+
+            private static SafeFileHandle OpenRead(string path) => File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
             public void Close(int i)
             {
@@ -463,7 +470,19 @@ namespace TailRemote
         /// Control V; otherwise into its Downloads\TailRemote (Send files). Blocking: run it off the
         /// window's thread. Replaces any batch still going.
         /// </summary>
-        public void SendFiles(IReadOnlyList<string> items, bool toClipboard = true)
+        public void SendFiles(IReadOnlyList<string> items, bool toClipboard = true, System.Security.Principal.WindowsIdentity? asUser = null)
+        {
+            // The service's agent runs as SYSTEM: it lists and opens what the window's user asked for
+            // as that user, so nothing they could not open themselves can be sent.
+            List<Entry>? listed = null;
+            if (asUser != null) System.Security.Principal.WindowsIdentity.RunImpersonated(asUser.AccessToken, () => { listed = List(items); });
+            else listed = List(items);
+            if (listed!.Count == 0) return;
+            string what = items.Count == 1 ? Path.GetFileName(items[0].TrimEnd('\\', '/')) : items.Count + " items";
+            SendBatch(toClipboard ? KindFiles : KindDownloads, what, listed, asUser);
+        }
+
+        private static List<Entry> List(IReadOnlyList<string> items)
         {
             var entries = new List<Entry>();
             var tops = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -488,9 +507,7 @@ namespace TailRemote
                 }
                 else entries.Add(new Entry(root, new FileInfo(item).Length, item, null));
             }
-            if (entries.Count == 0) return;
-            string what = items.Count == 1 ? Path.GetFileName(items[0].TrimEnd('\\', '/')) : items.Count + " items";
-            SendBatch(toClipboard ? KindFiles : KindDownloads, what, entries);
+            return entries;
         }
 
         /// <summary>Sends clipboard text. Blocking. Replaces any batch still going.</summary>
@@ -516,7 +533,7 @@ namespace TailRemote
             if (_in is In b) EndIn(b, EndedStopped, "Stopped receiving " + b.T.What + ".", "The other PC stopped receiving " + b.T.What + ".", null, tell: true);
         }
 
-        private void SendBatch(byte kind, string what, List<Entry> entries)
+        private void SendBatch(byte kind, string what, List<Entry> entries, System.Security.Principal.WindowsIdentity? asUser = null)
         {
             // Text's length is its bytes'.
             for (int i = 0; i < entries.Count; i++) if (entries[i].Data is byte[] d) entries[i] = entries[i] with { Length = d.Length };
@@ -524,6 +541,7 @@ namespace TailRemote
             {
                 Id = Interlocked.Increment(ref _nextId), Kind = kind, What = what, Entries = entries,
                 Total = entries.Sum(e => Math.Max(0, e.Length)),
+                AsUser = asUser,
             };
             o.EntryAcked = new long[entries.Count];
             o.Next = new long[entries.Count];

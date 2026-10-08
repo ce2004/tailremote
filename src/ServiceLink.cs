@@ -1,0 +1,255 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text;
+using System.Threading;
+
+namespace TailRemote
+{
+    /// <summary>
+    /// When the service hosts, the TailRemote window is not the host, yet it is the one
+    /// running as the signed-in user, on their clipboard and in their files. This pipe joins
+    /// the two: the window's Send the clipboard, Send files and Stop go out through the
+    /// agent's connection, and what the controlling PC sends (clipboard text, files, and how
+    /// transfers are going) comes to the window, which puts it on the clipboard exactly as
+    /// when it hosts itself.
+    ///
+    /// The agent runs as SYSTEM, so it opens files to send as the window's user (the pipe
+    /// tells it who that is): nobody can send a file they could not open themselves.
+    /// </summary>
+    internal static class ServiceLink
+    {
+        private const string PipeName = "TailRemoteFiles";
+        // Window to agent:
+        private const byte SendText = (byte)'t', SendClipFiles = (byte)'f', SendDownloads = (byte)'d', CancelAll = (byte)'x';
+        // Agent to window:
+        private const byte GotText = (byte)'T', GotFiles = (byte)'F', Progress = (byte)'P', Controller = (byte)'H';
+
+        private static void Write(Stream s, byte type, byte[] payload)
+        {
+            byte[] m = new byte[5 + payload.Length];
+            m[0] = type;
+            BitConverter.TryWriteBytes(m.AsSpan(1), payload.Length);
+            payload.CopyTo(m, 5);
+            s.Write(m);
+            s.Flush();
+        }
+
+        private static (byte Type, byte[] Payload) Read(Stream s)
+        {
+            Span<byte> head = stackalloc byte[5];
+            Protocol.ReadExactly(s, head);
+            int n = BitConverter.ToInt32(head[1..]);
+            if (n < 0 || n > 600 << 20) throw new InvalidDataException("a message too big");
+            byte[] p = new byte[n];
+            Protocol.ReadExactly(s, p);
+            return (head[0], p);
+        }
+
+        private static byte[] Paths(IReadOnlyList<string> paths) => Encoding.UTF8.GetBytes(string.Join("\n", paths));
+        private static string[] Paths(byte[] p) => Encoding.UTF8.GetString(p).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        private static byte[] Pack(FileChannel.Transfer t)
+        {
+            var ms = new MemoryStream();
+            var w = new BinaryWriter(ms);
+            w.Write(t.Serial);
+            w.Write(t.Outgoing); w.Write(t.Finished); w.Write(t.Failed); w.Write(t.Clipboard); w.Write(t.Cancelled); w.Write(t.Waiting);
+            w.Write(t.What); w.Write(t.Done); w.Write(t.Total); w.Write(t.BytesPerSecond);
+            w.Write(t.Result ?? ""); w.Write(t.Result != null);
+            var files = t.Files;
+            w.Write(files.Count);
+            foreach (var (name, done, total) in files) { w.Write(name); w.Write(done); w.Write(total); }
+            return ms.ToArray();
+        }
+
+        // ================= The agent's side =================
+
+        public sealed class Server
+        {
+            private readonly Host _host;
+            private readonly List<BlockingCollection<(byte, byte[])>> _windows = new();
+
+            public Server(Host host)
+            {
+                _host = host;
+                new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote service link" }.Start();
+            }
+
+            /// <summary>Hands something to every connected window; false if none is connected (the agent then does it itself).</summary>
+            public bool Forward(byte type, byte[] payload, bool mayDrop = false)
+            {
+                lock (_windows)
+                {
+                    foreach (var q in _windows) { if (!q.TryAdd((type, payload)) && !mayDrop) q.TryAdd((type, payload), 2000); }
+                    return _windows.Count > 0;
+                }
+            }
+
+            public bool Text(string text) => Forward(GotText, Encoding.UTF8.GetBytes(text));
+            public bool Files(string[] paths) => Forward(GotFiles, Paths(paths));
+            public void Transfer(FileChannel.Transfer t) => Forward(Progress, Pack(t), mayDrop: !t.Finished);
+
+            private void AcceptLoop()
+            {
+                // SYSTEM, and whoever is signed in at the PC itself: nobody over the network.
+                var sec = new PipeSecurity();
+                sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+                sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+                while (true)
+                {
+                    try
+                    {
+                        // Asynchronous: one thread reads while another writes. On a plain pipe Windows makes a
+                        // waiting read hold up every write, and nothing ever reached the window.
+                        var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, sec);
+                        pipe.WaitForConnection();
+                        new Thread(() => Serve(pipe)) { IsBackground = true, Name = "TailRemote service link window" }.Start();
+                    }
+                    catch (Exception e) { ServiceHost.Log("Service link: " + e.Message); Thread.Sleep(1000); }
+                }
+            }
+
+            private void Serve(NamedPipeServerStream pipe)
+            {
+                var outbox = new BlockingCollection<(byte, byte[])>(256);
+                WindowsIdentity? user = null;
+                try
+                {
+                    // Who the window runs as: files it sends are opened as that user, never as SYSTEM.
+                    pipe.RunAsClient(() => user = WindowsIdentity.GetCurrent(TokenAccessLevels.Query | TokenAccessLevels.Impersonate | TokenAccessLevels.Duplicate));
+                    lock (_windows) _windows.Add(outbox);
+                    ServiceHost.Log("Service link: the TailRemote window of " + user?.Name + " is connected.");
+                    new Thread(() =>
+                    {
+                        try
+                        {
+                            bool? had = null;
+                            while (pipe.IsConnected)
+                            {
+                                if (outbox.TryTake(out var m, 1000)) Write(pipe, m.Item1, m.Item2);
+                                bool has = _host.HasController;
+                                if (has != had) { had = has; Write(pipe, Controller, new[] { (byte)(has ? 1 : 0) }); }
+                            }
+                        }
+                        catch { }
+                        try { pipe.Dispose(); } catch { }
+                    }) { IsBackground = true, Name = "TailRemote service link out" }.Start();
+                    while (pipe.IsConnected)
+                    {
+                        var (type, p) = Read(pipe);
+                        var asUser = user;
+                        switch (type)
+                        {
+                            case SendText: { string text = Encoding.UTF8.GetString(p); _host.SendClipboard(text); break; }
+                            case SendClipFiles: _host.SendClipboardFiles(Paths(p), asUser); break;
+                            case SendDownloads: _host.SendFiles(Paths(p), asUser); break;
+                            case CancelAll: _host.CancelTransfer(); break;
+                        }
+                    }
+                }
+                catch { }
+                finally
+                {
+                    lock (_windows) _windows.Remove(outbox);
+                    outbox.CompleteAdding();
+                    try { pipe.Dispose(); } catch { }
+                }
+            }
+        }
+
+        // ================= The window's side =================
+
+        public sealed class Client : IDisposable
+        {
+            private volatile NamedPipeClientStream? _pipe;
+            private volatile bool _stop;
+            private readonly object _writeGate = new();
+            private readonly Dictionary<int, FileChannel.Transfer> _transfers = new();
+
+            public event Action<string>? TextArrived;
+            public event Action<string[]>? FilesArrived;
+            public event Action<FileChannel.Transfer>? TransferProgress;
+
+            public bool Connected => _pipe?.IsConnected == true;
+            public bool HasController { get; private set; }
+
+            public Client() => new Thread(Loop) { IsBackground = true, Name = "TailRemote service link" }.Start();
+
+            public void Dispose()
+            {
+                _stop = true;
+                try { _pipe?.Dispose(); } catch { }
+            }
+
+            public void SendClipboard(string text) => Send(SendText, Encoding.UTF8.GetBytes(text));
+            public void SendClipboardFiles(IReadOnlyList<string> paths) => Send(SendClipFiles, Paths(paths));
+            public void SendFiles(IReadOnlyList<string> paths) => Send(SendDownloads, Paths(paths));
+            public void CancelTransfer() => Send(CancelAll, Array.Empty<byte>());
+
+            private void Send(byte type, byte[] payload)
+            {
+                var pipe = _pipe;
+                if (pipe == null) return;
+                // Off the window's thread: big clipboard text takes a moment to go through.
+                ThreadPool.QueueUserWorkItem(_ => { try { lock (_writeGate) Write(pipe, type, payload); } catch { } });
+            }
+
+            /// <summary>Keeps connected to the agent for as long as the window wants it (every 2 seconds while it is not there).</summary>
+            private void Loop()
+            {
+                while (!_stop)
+                {
+                    try
+                    {
+                        // Impersonation allowed: the agent opens the files this user sends as this user.
+                        var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+                        pipe.Connect(2000);
+                        _pipe = pipe;
+                        while (!_stop)
+                        {
+                            var (type, p) = Read(pipe);
+                            switch (type)
+                            {
+                                case GotText: TextArrived?.Invoke(Encoding.UTF8.GetString(p)); break;
+                                case GotFiles: FilesArrived?.Invoke(Paths(p)); break;
+                                case Controller: HasController = p.Length == 1 && p[0] == 1; break;
+                                case Progress: TransferProgress?.Invoke(Unpack(p)); break;
+                            }
+                        }
+                    }
+                    catch { }
+                    try { _pipe?.Dispose(); } catch { }
+                    _pipe = null;
+                    HasController = false;
+                    if (!_stop) Thread.Sleep(2000);
+                }
+            }
+
+            /// <summary>The same transfer is the same object each time, as the window expects.</summary>
+            private FileChannel.Transfer Unpack(byte[] p)
+            {
+                var r = new BinaryReader(new MemoryStream(p));
+                int serial = r.ReadInt32();
+                if (!_transfers.TryGetValue(serial, out var t))
+                {
+                    if (_transfers.Count > 16) _transfers.Clear();
+                    _transfers[serial] = t = new FileChannel.Transfer();
+                }
+                t.Outgoing = r.ReadBoolean(); t.Finished = r.ReadBoolean(); t.Failed = r.ReadBoolean(); t.Clipboard = r.ReadBoolean(); t.Cancelled = r.ReadBoolean(); t.Waiting = r.ReadBoolean();
+                t.What = r.ReadString(); t.Done = r.ReadInt64(); t.Total = r.ReadInt64(); t.BytesPerSecond = r.ReadDouble();
+                string result = r.ReadString();
+                t.Result = r.ReadBoolean() ? result : null;
+                int n = r.ReadInt32();
+                var files = new (string, long, long)[n];
+                for (int i = 0; i < n; i++) files[i] = (r.ReadString(), r.ReadInt64(), r.ReadInt64());
+                t.Files = files;
+                return t;
+            }
+        }
+    }
+}

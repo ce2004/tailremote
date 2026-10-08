@@ -146,23 +146,24 @@ namespace TailRemote
         }
 
         /// <summary>Copied files from here to the controller's clipboard. Never waits.</summary>
-        public void SendClipboardFiles(IReadOnlyList<string> paths)
+        public void SendClipboardFiles(IReadOnlyList<string> paths, System.Security.Principal.WindowsIdentity? asUser = null)
         {
             Session? c;
             lock (_gate) c = _controller;
             var files = c?.Files;
             if (files == null) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true); } catch { } });
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true, asUser); } catch { } });
         }
 
         /// <summary>Send files: into the controller's Downloads\TailRemote. Never waits.</summary>
-        public void SendFiles(IReadOnlyList<string> paths)
+        /// <summary>asUser: the service's agent opens the files as the window's user, never as SYSTEM.</summary>
+        public void SendFiles(IReadOnlyList<string> paths, System.Security.Principal.WindowsIdentity? asUser = null)
         {
             Session? c;
             lock (_gate) c = _controller;
             var files = c?.Files;
             if (files == null) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false, asUser); } catch { } });
         }
 
         /// <summary>True while someone is controlling this PC (the only one files and the clipboard can go to).</summary>
