@@ -42,6 +42,8 @@ namespace TailRemote
         public const byte ReleaseAll = 3;
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
+        public const byte ClipboardSharing = 8; // u8 1 or 0: the client shares its clipboard or not (the host then sends it nothing)
+        public const byte FilePace = 7;      // u32 KB/s: how fast the host may send files (the client sets it from the audio ping)
         public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)
         // Either way
         public const byte Features = 0x40;   // u32 flags
@@ -89,7 +91,6 @@ namespace TailRemote
         /// <summary>What this version supports, sent to the other side after login.</summary>
         public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart;
 
-        public const int MaxClipboardChars = 1_000_000;
 
         // ---- The login, damage-proof ----
         // Before the keys exist nothing is encrypted, so a damaged byte (Clumsy's tamper,

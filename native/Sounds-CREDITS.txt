@@ -1,0 +1,9 @@
+TailRemote's event sounds
+
+Piano: Steinway concert grand recordings from the University of Iowa Electronic Music Studios, Musical Instrument Samples (theremin.music.uiowa.edu). Free to use for any project, without restriction.
+
+Harp, glockenspiel, marimba, xylophone, violin section pizzicato and Nepalese bells: Versilian Studios Chamber Orchestra 2, Community Edition (github.com/sgossner/VSCO-2-CE), released into the public domain under CC0 1.0.
+
+Sounds named Android and Android effect: from the Android Open Source Project (android.googlesource.com, platform/frameworks/base, data/sounds), Copyright The Android Open Source Project, licensed under the Apache License, Version 2.0. You may obtain a copy of the licence at www.apache.org/licenses/LICENSE-2.0. The sounds were shortened, faded and re-encoded as Opus for TailRemote.
+
+Classic phone sounds: made by TailRemote itself, in the style of early monophonic phones. Gran Vals is by Francisco Tarrega (1902) and is in the public domain.

@@ -1,24 +1,34 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Media;
+using Concentus;
 
 namespace TailRemote
 {
     /// <summary>
-    /// Short event sounds, like a phone's text tones, chosen per event in Sounds
-    /// (SoundsForm). 12 instruments times 12 little patterns, all in B-flat major,
-    /// stereo, with a little room. The piano is a real Steinway (University of Iowa
-    /// Electronic Music Studios recordings, free for any use; native\piano); the
-    /// rest are made here in code. Built the first time each is used, then kept.
-    /// Played on the controlling PC only, never on a host, where they would be sent
-    /// along with its sound.
+    /// Short event sounds, chosen per event in Sounds (SoundsForm).
+    ///
+    /// Patterns: 12 little figures (rising, two up, sigh...) played on real
+    /// instruments in any major key (Settings.SoundKey): a Steinway (University of
+    /// Iowa Electronic Music Studios, free for any use), harp, glockenspiel,
+    /// marimba, xylophone and violin pizzicato (VSCO 2 Community Edition, public
+    /// domain), and a classic phone buzzer made here. Each note uses the nearest
+    /// real recording of it, then a little stereo room.
+    ///
+    /// Fixed sounds: Android's notification and effect sounds (Android Open Source
+    /// Project, Apache License 2.0), Nepalese bells (VSCO 2), and classic phone
+    /// tunes written here in the style of the old monophonic phones.
+    ///
+    /// Recordings are built into the exe as Opus (native\sounds, snd.*.opus) and
+    /// decoded the first time they are needed. Played on the controlling PC only,
+    /// never on a host, where they would be sent along with its sound.
     /// </summary>
     internal static class Sounds
     {
         public enum Tone { Connected, Disconnected, ClipboardSent, ClipboardReceived, FileSent, FileReceived, ControlRemote, ControlLocal, Error }
 
-        /// <summary>What each event is called in the Sounds window.</summary>
         public static string Label(Tone t) => t switch
         {
             Tone.Connected => "&Connected",
@@ -33,39 +43,84 @@ namespace TailRemote
         };
 
         private const int Rate = 48000;
-        private const string NoSound = "None";
+        public const string NoSound = "None";
 
-        public static readonly string[] Instruments =
-            { "Piano", "Soft piano", "Chime", "Marimba", "Music box", "Harp", "Electric piano", "Glass", "Kalimba", "Bell", "Text tone", "Vibraphone" };
+        /// <summary>The 12 major keys, by pitch class (C = 0).</summary>
+        public static readonly string[] Keys =
+            { "C major", "D flat major", "D major", "E flat major", "E major", "F major", "F sharp major", "G major", "A flat major", "A major", "B flat major", "B major" };
 
-        // Patterns in B-flat major: (MIDI note, start in seconds). Bb3 58, D4 62, Eb4 63, F4 65, G4 67, A4 69, Bb4 70, C5 72, D5 74.
-        private static readonly (string Name, (int Note, double At)[] Notes)[] Patterns =
+        /// <summary>The key the patterns play in (pitch class, C = 0). B flat until changed.</summary>
+        public static volatile int Key = 10;
+
+        // Instruments: display name, the recordings they use (snd.NAME.MIDI.opus) or null for the made one,
+        // and how many semitones above the piano they play: each where its real recordings are, as the
+        // instrument itself sounds (a glockenspiel two octaves up), so no note is retuned more than a little.
+        private static readonly (string Name, string? Bank, bool Soft, int Up)[] Instruments =
         {
-            ("rising", new[] { (58, 0.0), (62, 0.055), (65, 0.11), (70, 0.165) }),
-            ("falling", new[] { (65, 0.0), (62, 0.075), (58, 0.15) }),
-            ("two up", new[] { (65, 0.0), (70, 0.05) }),
-            ("two down", new[] { (70, 0.0), (65, 0.05) }),
-            ("four up", new[] { (62, 0.0), (65, 0.05), (70, 0.10), (74, 0.15) }),
-            ("three down", new[] { (74, 0.0), (72, 0.07), (70, 0.14) }),
-            ("chord high", new[] { (62, 0.0), (65, 0.0), (70, 0.0) }),
-            ("chord low", new[] { (58, 0.0), (62, 0.0), (65, 0.0) }),
-            ("sigh", new[] { (63, 0.0), (62, 0.13) }),
-            ("single", new[] { (70, 0.0) }),
-            ("bounce", new[] { (65, 0.0), (70, 0.06), (65, 0.12) }),
-            ("sparkle", new[] { (67, 0.0), (69, 0.035), (70, 0.07), (72, 0.105), (74, 0.14) }),
+            ("Piano", "piano", false, 0), ("Soft piano", "piano", true, 0), ("Harp", "harp", false, 0), ("Glockenspiel", "glockenspiel", false, 24),
+            ("Marimba", "marimba", false, 0), ("Xylophone", "xylophone", false, 12), ("Pizzicato strings", "pizzicato", false, 12), ("Classic phone", null, false, 24),
+            // Made here, in code:
+            ("Chime", "made", false, 0), ("Music box", "made", false, 0), ("Electric piano", "made", false, 0), ("Glass", "made", false, 0),
+            ("Kalimba", "made", false, 0), ("Bell", "made", false, 0), ("Text tone", "made", false, 0), ("Vibraphone", "made", false, 0),
         };
 
-        /// <summary>Every sound by name, "None" first: "Piano, rising", "Chime, two up" and so on.</summary>
-        public static IReadOnlyList<string> All { get; } = BuildNames();
+        /// <summary>The choice that plays the event's own pattern on a different instrument each time.</summary>
+        public const string DefaultName = "Default";
+        /// <summary>The choice that plays any sound at all, a different one each time.</summary>
+        public const string RandomName = "Random sound";
 
-        private static List<string> BuildNames()
+        // Patterns: semitones above the key's home note, and when (seconds). Every one is in the major key.
+        private static readonly (string Name, (int Step, double At)[] Notes)[] Patterns =
+        {
+            ("rising", new[] { (0, 0.0), (4, 0.055), (7, 0.11), (12, 0.165) }),
+            ("falling", new[] { (7, 0.0), (4, 0.075), (0, 0.15) }),
+            ("two up", new[] { (7, 0.0), (12, 0.05) }),
+            ("two down", new[] { (12, 0.0), (7, 0.05) }),
+            ("four up", new[] { (4, 0.0), (7, 0.05), (12, 0.10), (16, 0.15) }),
+            ("three down", new[] { (16, 0.0), (14, 0.07), (12, 0.14) }),
+            ("chord high", new[] { (4, 0.0), (7, 0.0), (12, 0.0) }),
+            ("chord low", new[] { (0, 0.0), (4, 0.0), (7, 0.0) }),
+            ("sigh", new[] { (5, 0.0), (4, 0.13) }),
+            ("single", new[] { (12, 0.0) }),
+            ("bounce", new[] { (7, 0.0), (12, 0.06), (7, 0.12) }),
+            ("sparkle", new[] { (9, 0.0), (11, 0.035), (12, 0.07), (14, 0.105), (16, 0.14) }),
+        };
+
+        // Classic phone tunes, written here: (MIDI note or 0 for a rest, length in seconds).
+        private static readonly (string Name, (int Note, double Len)[] Notes)[] PhoneTunes =
+        {
+            // S M S in Morse code.
+            ("SMS", new[] { (93, .06), (0, .06), (93, .06), (0, .06), (93, .06), (0, .18), (93, .18), (0, .06), (93, .18), (0, .18), (93, .06), (0, .06), (93, .06), (0, .06), (93, .06) }),
+            // Gran Vals (Tárrega, 1902): the phrase old phones made famous.
+            ("Gran Vals", new[] { (88, .11), (86, .11), (78, .22), (80, .22), (85, .11), (83, .11), (74, .22), (76, .22), (83, .11), (81, .11), (73, .22), (76, .22), (81, .44) }),
+            ("Ascending", new[] { (84, .05), (88, .05), (91, .05), (96, .1) }),
+            ("Standard", new[] { (93, .09), (0, .07), (93, .09) }),
+            ("Ripple", new[] { (88, .04), (91, .04), (88, .04), (91, .04), (88, .04), (91, .04), (88, .04), (91, .08) }),
+            ("Low", new[] { (69, .12), (0, .03), (64, .16) }),
+            ("Espionage", new[] { (91, .07), (0, .03), (91, .07), (0, .03), (98, .14) }),
+            ("Bee", new[] { (86, .03), (87, .03), (86, .03), (87, .03), (86, .03), (87, .03), (86, .03), (87, .06) }),
+        };
+
+        private static readonly Lazy<string[]> Resources = new(() => typeof(Sounds).Assembly.GetManifestResourceNames().Where(n => n.StartsWith("snd.")).ToArray());
+
+        /// <summary>Every sound by name, None first.</summary>
+        public static IReadOnlyList<string> All => _all.Value;
+        private static readonly Lazy<List<string>> _all = new(() =>
         {
             var names = new List<string> { NoSound };
-            foreach (var i in Instruments) foreach (var p in Patterns) names.Add(i + ", " + p.Name);
+            foreach (var i in Instruments) foreach (var p in Patterns) names.Add(i.Name + ", " + p.Name);
+            foreach (var t in PhoneTunes) names.Add("Classic phone: " + t.Name);
+            // Recorded fixed sounds: snd.fixed.GROUP.NAME.opus, grouped as they sort.
+            foreach (string r in Resources.Value.Where(r => r.StartsWith("snd.fixed.")).OrderBy(r => r, StringComparer.OrdinalIgnoreCase))
+            {
+                string rest = r["snd.fixed.".Length..^".opus".Length];
+                int dot = rest.IndexOf('.');
+                string group = rest[..dot], name = rest[(dot + 1)..];
+                names.Add(group switch { "android" => "Android: " + name, "android effect" => "Android effect: " + name, _ => name });
+            }
             return names;
-        }
+        });
 
-        /// <summary>The sound each event gets until it is changed: the piano.</summary>
         public static string Default(Tone t) => "Piano, " + t switch
         {
             Tone.Connected => "rising",
@@ -79,106 +134,318 @@ namespace TailRemote
             _ => "sigh",
         };
 
-        /// <summary>The chosen sound for each event (Settings.SoundChoices), looked up by Play.</summary>
-        public static Func<Tone, string> Choice = Default;
+        /// <summary>The chosen sound for each event, or DefaultName or RandomName.</summary>
+        public static Func<Tone, string> Choice = _ => DefaultName;
+
+        private static readonly Random Rng = new();
+        private static readonly Dictionary<Tone, string> Last = new();
+
+        /// <summary>
+        /// What an event plays this time. Default: its own pattern (rising for connecting,
+        /// a sigh for an error...) on a random instrument; Random sound: anything at all.
+        /// Never the same instrument (or sound) twice in a row, so it does not get samey.
+        /// </summary>
+        public static string Resolve(Tone t, string choice)
+        {
+            if (choice != DefaultName && choice != RandomName) return choice;
+            lock (Last)
+            {
+                Last.TryGetValue(t, out var before);
+                string pick;
+                do
+                {
+                    pick = choice == DefaultName
+                        ? Instruments[Rng.Next(Instruments.Length)].Name + ", " + Default(t)["Piano, ".Length..]
+                        : All[Rng.Next(1, All.Count)];
+                }
+                while (pick == before && All.Count > 2);
+                Last[t] = pick;
+                return pick;
+            }
+        }
 
         private static readonly Dictionary<string, byte[]> Cache = new();
         private static SoundPlayer? _playing; // kept alive while it plays
 
-        /// <summary>Plays the sound chosen for an event. Never throws, never waits.</summary>
-        public static void Play(Tone t) => PlayNamed(Choice(t));
+        /// <summary>Plays an event's sound. Built and started in the background: the window never waits on a sound.</summary>
+        public static void Play(Tone t)
+        {
+            string name = Resolve(t, Choice(t));
+            PlayNamed(name);
+        }
 
-        /// <summary>Plays a sound by name (the Sounds window previews with it).</summary>
-        public static void PlayNamed(string name)
+        /// <summary>Plays a sound by name, in the background (the Sounds window previews with it).</summary>
+        public static void PlayNamed(string name) => System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
             try
             {
-                byte[]? wav = Get(name);
-                if (wav == null) return;
+                if (Get(name) is not byte[] wav) return;
                 var player = new SoundPlayer(new MemoryStream(wav));
                 player.Play();
                 _playing = player;
             }
             catch { }
-        }
+        });
 
-        /// <summary>Plays a sound by name and waits (for --sampler).</summary>
         public static void PlayNamedAndWait(string name)
         {
             try { if (Get(name) is byte[] wav) new SoundPlayer(new MemoryStream(wav)).PlaySync(); } catch { }
         }
 
-        /// <summary>Plays and waits (for --tones).</summary>
-        public static void PlayAndWait(Tone t)
-        {
-            try { if (Get(Choice(t)) is byte[] wav) new SoundPlayer(new MemoryStream(wav)).PlaySync(); } catch { }
-        }
+        public static void PlayAndWait(Tone t) => PlayNamedAndWait(Resolve(t, Choice(t)));
 
-        /// <summary>Builds the chosen sounds in the background, so the first one plays at once.</summary>
+        /// <summary>Decodes the piano in the background, so the first sounds play at once.</summary>
         public static void Warm() => System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
-            foreach (Tone t in Enum.GetValues<Tone>()) try { Get(Choice(t)); } catch { }
+            foreach (Tone t in Enum.GetValues<Tone>()) try { Get(Default(t)); } catch { }
         });
 
         private static byte[]? Get(string name)
         {
             if (name == NoSound) return null;
+            int key = Key;
+            string cacheKey = name + "|" + key;
             lock (Cache)
             {
-                if (Cache.TryGetValue(name, out var have)) return have;
-                int comma = name.IndexOf(", ", StringComparison.Ordinal);
-                if (comma < 0) return null;
-                int instrument = Array.IndexOf(Instruments, name[..comma]);
-                int pattern = Array.FindIndex(Patterns, p => p.Name == name[(comma + 2)..]);
-                if (instrument < 0 || pattern < 0) return null;
-                byte[] wav = Render(instrument, Patterns[pattern].Notes);
-                Cache[name] = wav;
+                if (Cache.TryGetValue(cacheKey, out var have)) return have;
+                var (l, r) = Make(name, key);
+                if (l == null) return null;
+                byte[] wav = Wav(l, r!);
+                Cache[cacheKey] = wav;
                 return wav;
             }
         }
 
-        // ---- Making a sound ----
-
-        private static byte[] Render(int instrument, (int Note, double At)[] notes)
+        private static (double[]? L, double[]? R) Make(string name, int key)
         {
-            double last = 0;
-            foreach (var n in notes) last = Math.Max(last, n.At);
-            int length = (int)((last + 0.95) * Rate);
+            if (name.StartsWith("Classic phone: "))
+            {
+                var tune = PhoneTunes.FirstOrDefault(t => t.Name == name["Classic phone: ".Length..]);
+                return tune.Notes == null ? (null, null) : PhoneTune(tune.Notes);
+            }
+            string? res = name.StartsWith("Android effect: ") ? "snd.fixed.android effect." + name["Android effect: ".Length..] + ".opus"
+                : name.StartsWith("Android: ") ? "snd.fixed.android." + name["Android: ".Length..] + ".opus"
+                : name.StartsWith("Nepalese bell") ? "snd.fixed.bell." + name + ".opus" : null;
+            if (res != null)
+            {
+                var (fl, fr) = Recording(res);
+                return (Copy(fl), Copy(fr));
+            }
+            int comma = name.IndexOf(", ", StringComparison.Ordinal);
+            if (comma < 0) return (null, null);
+            int instrument = Array.FindIndex(Instruments, i => i.Name == name[..comma]);
+            int pattern = Array.FindIndex(Patterns, p => p.Name == name[(comma + 2)..]);
+            if (instrument < 0 || pattern < 0) return (null, null);
+            return PatternSound(Instruments[instrument], Patterns[pattern].Notes, key);
+        }
+
+        private static double[] Copy(double[] a) => (double[])a.Clone();
+
+        // ---- Patterns on real instruments ----
+
+        private static (double[] L, double[] R) PatternSound((string Name, string? Bank, bool Soft, int Up) inst, (int Step, double At)[] notes, int key)
+        {
+            // The key's home note: the one from G flat 3 (54) up, so every key fits the recordings.
+            int home = 54 + ((key - 54 % 12) % 12 + 12) % 12 + inst.Up;
+            if (inst.Bank == "made") return MadePattern(inst.Name, notes, home);
+            if (inst.Bank == null)
+            {
+                // The classic phone plays one note at a time: chords become a quick run, an octave up.
+                var run = new List<(int, double)>();
+                foreach (var (step, _) in notes) run.Add((home + step, 0.07));
+                return PhoneTune(run.SelectMany(n => new[] { n, (0, 0.015) }).ToArray());
+            }
+            double last = notes.Max(n => n.At);
+            int length = (int)((last + 1.0) * Rate);
             var left = new double[length];
             var right = new double[length];
             for (int k = 0; k < notes.Length; k++)
             {
-                var (note, at) = notes[k];
-                int start = (int)(at * Rate);
-                // A slight spread across the notes, left to right with the pitch.
-                double pan = notes.Length == 1 ? 0 : -0.25 + 0.5 * k / (notes.Length - 1);
-                double gl = Math.Sqrt(0.5 * (1 - pan)), gr = Math.Sqrt(0.5 * (1 + pan));
-                if (instrument <= 1)
+                var (step, at) = notes[k];
+                var (nl, nr) = Note(inst.Bank, home + step);
+                double pan = notes.Length == 1 ? 0 : -0.2 + 0.4 * k / (notes.Length - 1); // a slight spread, low to high
+                double gl = Math.Sqrt(0.5 * (1 - pan)) * 1.414, gr = Math.Sqrt(0.5 * (1 + pan)) * 1.414;
+                int start = (int)(at * Rate), n = Math.Min(nl.Length, length - start);
+                double lpL = 0, lpR = 0, a = inst.Soft ? 0.2 : 1; // the soft piano: rounder and quieter
+                for (int i = 0; i < n; i++)
                 {
-                    var (l, r) = Piano(note);
-                    bool soft = instrument == 1;
-                    double lp = 0, rp = 0, a = soft ? 0.18 : 1; // the soft piano: rounder and quieter
-                    int n = Math.Min(l.Length, length - start);
-                    for (int i = 0; i < n; i++)
-                    {
-                        lp += a * (l[i] - lp); rp += a * (r[i] - rp);
-                        double g = soft ? 0.8 : 1;
-                        left[start + i] += lp * g;
-                        right[start + i] += rp * g;
-                    }
-                }
-                else
-                {
-                    double[] v = Voice(instrument, 440 * Math.Pow(2, (note - 69) / 12.0), length - start);
-                    for (int i = 0; i < v.Length; i++) { left[start + i] += v[i] * gl; right[start + i] += v[i] * gr; }
+                    lpL += a * (nl[i] - lpL); lpR += a * (nr[i] - lpR);
+                    left[start + i] += lpL * gl * (inst.Soft ? 0.8 : 1);
+                    right[start + i] += lpR * gr * (inst.Soft ? 0.8 : 1);
                 }
             }
-            Room(left, right, instrument == 1 ? 0.26 : 0.18);
+            Room(left, right, inst.Soft ? 0.26 : 0.18);
+            return (left, right);
+        }
 
+        /// <summary>One note from an instrument's recordings: the nearest one, retuned the rest of the way. Quick: it rings 0.42 s, then fades over 0.22 s.</summary>
+        private static (double[] L, double[] R) Note(string bank, int midi)
+        {
+            var have = Resources.Value.Where(r => r.StartsWith("snd." + bank + "."))
+                .Select(r => int.Parse(r["snd.".Length..^".opus".Length][(bank.Length + 1)..])).ToArray();
+            int nearest = have.OrderBy(m => Math.Abs(m - midi)).First();
+            var (sl, sr) = Recording("snd." + bank + "." + nearest + ".opus");
+            double ratio = Math.Pow(2, (midi - nearest) / 12.0);
+            int ring = (int)(0.42 * Rate), release = (int)(0.22 * Rate), length = Math.Min(ring + release, (int)((sl.Length - 2) / ratio));
+            var l = new double[Math.Max(0, length)];
+            var r = new double[l.Length];
+            for (int i = 0; i < l.Length; i++)
+            {
+                double pos = i * ratio;
+                int p = (int)pos;
+                double f = pos - p;
+                double g = i > ring ? Math.Pow(Math.Cos((i - ring) / (double)release * Math.PI / 2), 2) : 1;
+                l[i] = (sl[p] + (sl[p + 1] - sl[p]) * f) * g;
+                r[i] = (sr[p] + (sr[p + 1] - sr[p]) * f) * g;
+            }
+            return (l, r);
+        }
+
+        // ---- The instruments made in code ----
+
+        private static (double[] L, double[] R) MadePattern(string instrument, (int Step, double At)[] notes, int home)
+        {
+            double last = notes.Max(n => n.At);
+            int length = (int)((last + 1.0) * Rate);
+            var left = new double[length];
+            var right = new double[length];
+            for (int k = 0; k < notes.Length; k++)
+            {
+                var (step, at) = notes[k];
+                int start = (int)(at * Rate);
+                double pan = notes.Length == 1 ? 0 : -0.25 + 0.5 * k / (notes.Length - 1);
+                double gl = Math.Sqrt(0.5 * (1 - pan)) * 1.414, gr = Math.Sqrt(0.5 * (1 + pan)) * 1.414;
+                double[] v = Voice(instrument, 440 * Math.Pow(2, (home + step - 69) / 12.0), length - start);
+                for (int i = 0; i < v.Length; i++) { left[start + i] += v[i] * gl; right[start + i] += v[i] * gr; }
+            }
+            Room(left, right, 0.18);
+            return (left, right);
+        }
+
+        /// <summary>One note of a made instrument, mono, at most 0.75 s.</summary>
+        private static double[] Voice(string instrument, double f, int room)
+        {
+            int length = Math.Min(room, (int)(0.75 * Rate));
+            var v = new double[length];
+            static double Tau(double seconds, double t) => Math.Exp(-t / seconds);
+            for (int i = 0; i < length; i++)
+            {
+                double t = i / (double)Rate, w = 2 * Math.PI * f * t;
+                double attack = Math.Min(1, i / (Rate * 0.003));
+                v[i] = attack * instrument switch
+                {
+                    "Chime" => Math.Sin(w + 2.2 * Tau(0.25, t) * Math.Sin(3.5 * w)) * Tau(0.45, t),
+                    "Music box" => (Math.Sin(2 * w) + 0.3 * Math.Sin(6 * w) * Tau(0.08, t)) * Tau(0.4, t),
+                    "Electric piano" => (Math.Sin(w + 1.2 * Tau(0.3, t) * Math.Sin(w)) + 0.25 * Math.Sin(14 * w) * Tau(0.015, t)) * Tau(0.5, t),
+                    "Glass" => (Math.Sin(w) + 0.4 * Math.Sin(2.76 * w) * Tau(0.3, t)) * Math.Min(1, t / 0.02) * Tau(0.5, t),
+                    "Kalimba" => (Math.Sin(w) + 0.5 * Math.Sin(5.4 * w) * Tau(0.012, t)) * Tau(0.25, t),
+                    "Bell" => (Math.Sin(2 * w) + 0.6 * Math.Sin(2 * 2.4 * w) * Tau(0.2, t) + 0.35 * Math.Sin(2 * 3.9 * w) * Tau(0.12, t)) * Tau(0.5, t),
+                    "Text tone" => Math.Sin(2 * Math.PI * f * 2 * (t - 0.02 * t * t)) * Tau(0.09, t),
+                    "Vibraphone" => (Math.Sin(w) + 0.25 * Math.Sin(4 * w) * Tau(0.05, t)) * (1 - 0.3 * (0.5 + 0.5 * Math.Sin(2 * Math.PI * 5.5 * t))) * Tau(0.55, t),
+                    _ => Math.Sin(w) * Tau(0.3, t),
+                };
+            }
+            int release = Rate / 20; // a soft stop at the end, never a click
+            for (int i = 0; i < Math.Min(release, length); i++) v[length - 1 - i] *= i / (double)release;
+            return v;
+        }
+
+        // ---- The classic phone buzzer ----
+
+        private static (double[] L, double[] R) PhoneTune((int Note, double Len)[] notes)
+        {
+            int length = (int)((notes.Sum(n => n.Len) + 0.25) * Rate);
+            var v = new double[length];
+            int at = 0;
+            foreach (var (note, len) in notes)
+            {
+                int n = (int)(len * Rate);
+                if (note > 0)
+                {
+                    double f = 440 * Math.Pow(2, (note - 69) / 12.0), phase = 0;
+                    for (int i = 0; i < n && at + i < length; i++)
+                    {
+                        // A soft-edged square wave (its first few odd overtones), like a phone's buzzer.
+                        phase += 2 * Math.PI * f / Rate;
+                        double s = 0;
+                        for (int h = 1; h <= 9 && h * f < Rate / 2.5; h += 2) s += Math.Sin(h * phase) / h;
+                        double edge = Math.Min(1, Math.Min(i, n - i) / (Rate * 0.003)); // no clicks between notes
+                        v[at + i] = s * 0.8 * edge;
+                    }
+                }
+                at += n;
+            }
+            var right = (double[])v.Clone();
+            Room(v, right, 0.08);
+            return (v, right);
+        }
+
+        // ---- Recordings ----
+
+        private static readonly Dictionary<string, (double[] L, double[] R)> Recordings = new();
+
+        /// <summary>A built-in recording (Ogg Opus), decoded once and kept.</summary>
+        private static (double[] L, double[] R) Recording(string resource)
+        {
+            if (Recordings.TryGetValue(resource, out var have)) return have;
+            using var s = typeof(Sounds).Assembly.GetManifestResourceStream(resource) ?? throw new InvalidOperationException("No " + resource);
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            return Recordings[resource] = OggOpus(ms.ToArray());
+        }
+
+        /// <summary>
+        /// Decodes an Ogg Opus file (stereo, 48 kHz, as the asset build makes them):
+        /// gathers the packets from the Ogg pages, skips the two header packets and
+        /// Opus's pre-skip, and stops at the length the last page gives.
+        /// </summary>
+        private static (double[] L, double[] R) OggOpus(byte[] file)
+        {
+            var packets = new List<byte[]>();
+            var current = new MemoryStream();
+            long lastGranule = 0;
+            int pos = 0;
+            while (pos + 27 <= file.Length && file[pos] == 'O' && file[pos + 1] == 'g' && file[pos + 2] == 'g' && file[pos + 3] == 'S')
+            {
+                long granule = BitConverter.ToInt64(file, pos + 6);
+                int segments = file[pos + 26];
+                int data = pos + 27 + segments;
+                for (int i = 0; i < segments; i++)
+                {
+                    int len = file[pos + 27 + i];
+                    current.Write(file, data, len);
+                    data += len;
+                    if (len < 255) { packets.Add(current.ToArray()); current.SetLength(0); }
+                }
+                if (granule > 0) lastGranule = granule;
+                pos = data;
+            }
+            if (packets.Count < 3) return (Array.Empty<double>(), Array.Empty<double>());
+            int preSkip = BitConverter.ToUInt16(packets[0], 10);
+            var decoder = OpusCodecFactory.CreateDecoder(Rate, 2);
+            var pcm = new short[5760 * 2];
+            var all = new List<short>();
+            for (int i = 2; i < packets.Count; i++)
+            {
+                int frames = decoder.Decode(packets[i], pcm, 5760, false);
+                for (int k = 0; k < frames * 2; k++) all.Add(pcm[k]);
+            }
+            int total = (int)Math.Min(all.Count / 2 - preSkip, lastGranule > preSkip ? lastGranule - preSkip : all.Count / 2);
+            var l = new double[Math.Max(0, total)];
+            var r = new double[l.Length];
+            for (int i = 0; i < l.Length; i++) { l[i] = all[(preSkip + i) * 2] / 32768.0; r[i] = all[(preSkip + i) * 2 + 1] / 32768.0; }
+            return (l, r);
+        }
+
+        // ---- Output ----
+
+        private static byte[] Wav(double[] left, double[] right)
+        {
+            int length = left.Length;
             double peak = 1e-9;
             for (int i = 0; i < length; i++) peak = Math.Max(peak, Math.Max(Math.Abs(left[i]), Math.Abs(right[i])));
             double gain = 0.40 / peak;
-            int fade = Rate / 12;
+            int fade = Math.Min(length / 4, Rate / 12);
             using var ms = new MemoryStream();
             using var w = new BinaryWriter(ms);
             w.Write("RIFF"u8); w.Write(36 + length * 4); w.Write("WAVE"u8);
@@ -192,84 +459,6 @@ namespace TailRemote
             }
             w.Flush();
             return ms.ToArray();
-        }
-
-        private static readonly Dictionary<int, (double[] L, double[] R)> PianoNotes = new();
-
-        /// <summary>A Steinway note, quick: it rings 0.42 s, then the damper falls over 0.22 s.</summary>
-        private static (double[] L, double[] R) Piano(int note)
-        {
-            if (PianoNotes.TryGetValue(note, out var have)) return have;
-            using var s = typeof(Sounds).Assembly.GetManifestResourceStream("piano." + note + ".wav")
-                ?? throw new InvalidOperationException("No piano note " + note);
-            using var r = new BinaryReader(s);
-            r.ReadBytes(44);
-            int frames = (int)((s.Length - 44) / 4);
-            int keep = Math.Min(frames, (int)(0.64 * Rate)), release = (int)(0.22 * Rate);
-            var l = new double[keep];
-            var rr = new double[keep];
-            for (int i = 0; i < keep; i++)
-            {
-                double g = i > keep - release ? Math.Pow(Math.Cos((i - (keep - release)) / (double)release * Math.PI / 2), 2) : 1;
-                l[i] = r.ReadInt16() / 32768.0 * g;
-                rr[i] = r.ReadInt16() / 32768.0 * g;
-            }
-            return PianoNotes[note] = (l, rr);
-        }
-
-        /// <summary>One note of a made instrument, mono, at most 0.75 s.</summary>
-        private static double[] Voice(int instrument, double f, int room)
-        {
-            int length = Math.Min(room, (int)(0.75 * Rate));
-            var v = new double[length];
-            var rnd = new Random((int)f);
-            double Tau(double seconds, double t) => Math.Exp(-t / seconds);
-            switch (Instruments[instrument])
-            {
-                case "Harp":
-                {
-                    // A plucked string (Karplus-Strong): a burst of noise through a tuned, damped loop.
-                    int period = (int)Math.Round(Rate / f);
-                    var line = new double[period];
-                    for (int i = 0; i < period; i++) line[i] = rnd.NextDouble() * 2 - 1;
-                    for (int i = 0, at = 0; i < length; i++)
-                    {
-                        int next = (at + 1) % period;
-                        double y = line[at];
-                        line[at] = 0.996 * 0.5 * (line[at] + line[next]);
-                        at = next;
-                        v[i] = y * 0.6;
-                    }
-                    break;
-                }
-                default:
-                    for (int i = 0; i < length; i++)
-                    {
-                        double t = i / (double)Rate, w = 2 * Math.PI * f * t;
-                        double attack = Math.Min(1, i / (Rate * 0.003));
-                        v[i] = attack * Instruments[instrument] switch
-                        {
-                            // Bell-like: a carrier and a modulator 3.5 times higher, the brightness fading.
-                            "Chime" => Math.Sin(w + 2.2 * Tau(0.25, t) * Math.Sin(3.5 * w)) * Tau(0.45, t),
-                            "Marimba" => (Math.Sin(w) + 0.35 * Math.Sin(4 * w) * Tau(0.03, t)) * Tau(0.18, t),
-                            "Music box" => (Math.Sin(2 * w) + 0.3 * Math.Sin(6 * w) * Tau(0.08, t)) * Tau(0.4, t),
-                            // A tine: the body at 1:1, a bright knock at 14 times that fades at once.
-                            "Electric piano" => (Math.Sin(w + 1.2 * Tau(0.3, t) * Math.Sin(w)) + 0.25 * Math.Sin(14 * w) * Tau(0.015, t)) * Tau(0.5, t),
-                            "Glass" => (Math.Sin(w) + 0.4 * Math.Sin(2.76 * w) * Tau(0.3, t)) * Math.Min(1, t / 0.02) * Tau(0.5, t),
-                            "Kalimba" => (Math.Sin(w) + 0.5 * Math.Sin(5.4 * w) * Tau(0.012, t)) * Tau(0.25, t),
-                            // A small bell: its out-of-tune overtones, an octave up.
-                            "Bell" => (Math.Sin(2 * w) + 0.6 * Math.Sin(2 * 2.4 * w) * Tau(0.2, t) + 0.35 * Math.Sin(2 * 3.9 * w) * Tau(0.12, t)) * Tau(0.5, t),
-                            // A phone's text tone: a pure blip that dips a hair in pitch.
-                            "Text tone" => Math.Sin(2 * Math.PI * f * 2 * (t - 0.02 * t * t)) * Tau(0.09, t),
-                            "Vibraphone" => (Math.Sin(w) + 0.25 * Math.Sin(4 * w) * Tau(0.05, t)) * (1 - 0.3 * (0.5 + 0.5 * Math.Sin(2 * Math.PI * 5.5 * t))) * Tau(0.55, t),
-                            _ => Math.Sin(w) * Tau(0.3, t),
-                        };
-                    }
-                    break;
-            }
-            int release = Rate / 20; // a soft stop at the end, never a click
-            for (int i = 0; i < Math.Min(release, length); i++) v[length - 1 - i] *= i / (double)release;
-            return v;
         }
 
         /// <summary>A little room in stereo (Freeverb: eight damped echoes and four smears each side).</summary>
@@ -288,8 +477,8 @@ namespace TailRemote
                     for (int i = 0, at = 0; i < input.Length; i++)
                     {
                         double y = buf[at];
-                        store = y * 0.6 + store * 0.4;          // damping
-                        buf[at] = input[i] * 0.015 + store * 0.8; // room size
+                        store = y * 0.6 + store * 0.4;
+                        buf[at] = input[i] * 0.015 + store * 0.8;
                         at = (at + 1) % buf.Length;
                         output[i] += y;
                     }

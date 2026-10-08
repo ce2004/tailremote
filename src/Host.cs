@@ -50,6 +50,8 @@ namespace TailRemote
             public required byte Role;
             public required byte[] Key, HostNonce, ClientNonce;
             public FileChannel? Files;
+            public volatile bool Sharing = true; // the controller shares its clipboard (ClipboardSharing)
+            public double Pace = 8 << 20; // bytes a second the host may send this controller files at (FilePace)
             public uint PeerFeatures;
             public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
@@ -130,24 +132,53 @@ namespace TailRemote
             try { s.IOControl(SIO_UDP_CONNRESET, new byte[4], null); } catch { }
         }
 
+        /// <summary>Clipboard text up to this many characters goes over the main connection; more goes over the file connection.</summary>
+        public const int SmallClipboard = 16_000;
+
         /// <summary>Sends clipboard text to the controller, if it shares the clipboard.</summary>
         public void SendClipboard(string text)
         {
             Session? c;
             lock (_gate) c = _controller;
-            if (c == null || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
+            if (c == null || !c.Sharing || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
             // Off the caller's thread: a controller that has stopped reading must not freeze this window.
-            ThreadPool.QueueUserWorkItem(_ => { try { c.Link.Send(c.Stream, Protocol.TextMessage(Protocol.Clipboard, text)); } catch { } });
+            // Big text goes over the file connection, so it never holds up keys or messages.
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    if (text.Length > SmallClipboard && c.Files != null) c.Files.SendText(text);
+                    else c.Link.Send(c.Stream, Protocol.TextMessage(Protocol.Clipboard, text));
+                }
+                catch { }
+            });
         }
 
-        /// <summary>Sends files to the controller. Blocking; throws with a readable message.</summary>
-        public string SendFiles(IReadOnlyList<string> paths, Action<string, int> report, CancellationToken ct)
+        /// <summary>Copied files from here to the controller's clipboard. Never waits.</summary>
+        public void SendClipboardFiles(IReadOnlyList<string> paths)
         {
             Session? c;
             lock (_gate) c = _controller;
-            var files = c?.Files ?? throw new InvalidOperationException("No one is controlling this PC, so there is no one to send files to.");
-            return files.Send(paths, report, ct);
+            var files = c?.Files;
+            if (files == null || !c!.Sharing || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths); } catch { } });
         }
+
+        /// <summary>Stops a clipboard batch going to the controller.</summary>
+        public void CancelTransfer()
+        {
+            Session? c;
+            lock (_gate) c = _controller;
+            c?.Files?.CancelSending();
+        }
+
+        /// <summary>Test only: the controller's file channel.</summary>
+        internal FileChannel? ControllerFiles { get { lock (_gate) return _controller?.Files; } }
+
+        /// <summary>Files from the controller's clipboard, in the holding folder. Raised on a network thread.</summary>
+        public event Action<string[]>? ClipboardFilesReceived;
+        /// <summary>How a clipboard batch is going, either way. Raised on a network thread.</summary>
+        public event Action<FileChannel.Transfer>? TransferProgress;
 
         /// <summary>Everyone connected, as a ready-made array: the audio thread reads it without waiting for anything.</summary>
         private volatile Session[] _everyone = Array.Empty<Session>();
@@ -338,8 +369,14 @@ namespace TailRemote
                     }
                     if (owner == null) { tcp.Dispose(); return; }
                     owner.Files?.Dispose();
-                    owner.Files = new FileChannel(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, "files "),
+                    var files = new FileChannel(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, "files "),
                         msg => FileMessage?.Invoke(msg));
+                    var o = owner;
+                    files.Rate = () => Volatile.Read(ref o.Pace);
+                    files.TextReceived = text => ClipboardReceived?.Invoke(text);
+                    files.FilesReceived = paths => ClipboardFilesReceived?.Invoke(paths);
+                    files.Progress = t => TransferProgress?.Invoke(t);
+                    owner.Files = files;
                     handedOff = true;
                     return;
                 }
@@ -477,6 +514,13 @@ namespace TailRemote
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);
                         DiagLog.Write("host: " + s.Address + " asked for quality step " + s.Quality);
+                        break;
+                    case Protocol.ClipboardSharing when m.Length == 2:
+                        s.Sharing = m[1] != 0;
+                        if (!s.Sharing) s.Files?.CancelSending();
+                        break;
+                    case Protocol.FilePace when m.Length == 5:
+                        Volatile.Write(ref s.Pace, Math.Max(16 << 10, BitConverter.ToUInt32(m, 1) * 1024.0));
                         break;
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);

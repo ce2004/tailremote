@@ -67,7 +67,7 @@ namespace TailRemote
             if (args.Length == 1 && args[0] == "--licence")
             {
                 // The licences of what is built in: the NVDA controller client and Concentus (Opus).
-                foreach (var name in new[] { "NVDA-controllerClient-LICENSE.txt", "Concentus-LICENSE.txt" })
+                foreach (var name in new[] { "NVDA-controllerClient-LICENSE.txt", "Concentus-LICENSE.txt", "Sounds-CREDITS.txt" })
                 {
                     using var s = typeof(Program).Assembly.GetManifestResourceStream(name)!;
                     using var f = File.Create(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath)!, name));
@@ -78,12 +78,21 @@ namespace TailRemote
 
             if (args.Length >= 1 && args[0] == "--sampler")
             {
-                // One pattern on every instrument: TailRemote.exe --sampler [pattern], "rising" if none given.
-                string pattern = args.Length > 1 ? args[1] : "rising";
-                foreach (string instrument in Sounds.Instruments)
+                // A tour of the sounds: --sampler [pattern | classic | android | bells] [key 0-11]
+                string what = args.Length > 1 ? args[1] : "rising";
+                if (args.Length > 2 && int.TryParse(args[2], out int key)) Sounds.Key = Math.Clamp(key, 0, 11);
+                var names = what switch
                 {
-                    Sounds.PlayNamedAndWait(instrument + ", " + pattern);
-                    System.Threading.Thread.Sleep(400);
+                    "classic" => Sounds.All.Where(n => n.StartsWith("Classic phone: ")).ToList(),
+                    "android" => Sounds.All.Where(n => n.StartsWith("Android")).ToList(),
+                    "bells" => Sounds.All.Where(n => n.StartsWith("Nepalese")).ToList(),
+                    _ => Sounds.All.Where(n => n.EndsWith(", " + what)).ToList(),
+                };
+                foreach (string name in names)
+                {
+                    Console.WriteLine(name);
+                    Sounds.PlayNamedAndWait(name);
+                    System.Threading.Thread.Sleep(350);
                 }
                 return 0;
             }
@@ -394,38 +403,52 @@ namespace TailRemote
                 lossless += " | damaged logins: retried, never blocked";
             }
 
-            // Files both ways, into a temporary folder, checked byte for byte.
+            // Clipboard files and folders both ways, into a temporary holding folder, checked byte for byte.
             string dir = Path.Combine(Path.GetTempPath(), "tailremote-selftest-files");
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
-            FileChannel.FolderOverride = Path.Combine(dir, "in");
-            Directory.CreateDirectory(dir);
+            FileChannel.StagingOverride = Path.Combine(dir, "stage");
+            string album = Path.Combine(dir, "src", "Album");
+            Directory.CreateDirectory(Path.Combine(album, "sub"));
+            Directory.CreateDirectory(Path.Combine(album, "empty"));
             byte[] content = new byte[700_000];
             new Random(5).NextBytes(content);
-            string src = Path.Combine(dir, "test file.bin");
-            File.WriteAllBytes(src, content);
-            var got = new System.Collections.Concurrent.ConcurrentQueue<string>();
-            host.FileMessage += got.Enqueue;
-            c.FileMessage += got.Enqueue;
-            for (int i = 0; i < 40; i++) { try { c.SendFiles(new[] { src }, (_, _) => { }, default); break; } catch when (i < 39) { System.Threading.Thread.Sleep(50); } }
-            host.SendFiles(new[] { src }, (_, _) => { }, default);
-            for (int i = 0; i < 100 && got.Count < 2; i++) System.Threading.Thread.Sleep(50);
-            string a1 = Path.Combine(FileChannel.Folder, "test file.bin"), a2 = Path.Combine(FileChannel.Folder, "test file (2).bin");
-            if (got.Count < 2 || !File.Exists(a2) || !File.ReadAllBytes(a1).AsSpan().SequenceEqual(content) || !File.ReadAllBytes(a2).AsSpan().SequenceEqual(content))
-                return Fail("files: " + string.Join(" / ", got));
+            File.WriteAllBytes(Path.Combine(album, "sub", "a.bin"), content);
+            File.WriteAllText(Path.Combine(album, "b.txt"), "hello");
+            string loose = Path.Combine(dir, "src", "loose file.bin");
+            File.WriteAllBytes(loose, content);
+            for (int i = 0; i < 100 && (c.Files == null || host.ControllerFiles == null); i++) System.Threading.Thread.Sleep(50);
+            if (c.Files == null || host.ControllerFiles == null) return Fail("the file connection never opened");
 
-            // Speed: 128 MB over this PC's own connection, checked byte for byte.
+            string[]? landed = null;
+            host.ClipboardFilesReceived += paths => landed = paths;
+            c.Files.SendFiles(new[] { album, loose });
+            for (int i = 0; i < 200 && landed == null; i++) System.Threading.Thread.Sleep(20);
+            if (landed == null || landed.Length != 2) return Fail("clipboard files: " + (landed == null ? "nothing arrived" : landed.Length + " items"));
+            string at = Path.GetDirectoryName(landed[0])!;
+            if (!File.ReadAllBytes(Path.Combine(at, "Album", "sub", "a.bin")).AsSpan().SequenceEqual(content) || File.ReadAllText(Path.Combine(at, "Album", "b.txt")) != "hello"
+                || !Directory.Exists(Path.Combine(at, "Album", "empty")) || !File.ReadAllBytes(Path.Combine(at, "loose file.bin")).AsSpan().SequenceEqual(content))
+                return Fail("clipboard files arrived wrong");
+
+            // Big clipboard text the other way, over the file connection.
+            string bigText = string.Concat(Enumerable.Repeat("TailRemote clipboard, the long way round. ", 120_000)); // about 5 MB
+            string? gotText = null;
+            c.ClipboardReceived += t => gotText = t;
+            host.ControllerFiles.SendText(bigText);
+            for (int i = 0; i < 200 && gotText == null; i++) System.Threading.Thread.Sleep(20);
+            if (gotText != bigText) return Fail("big clipboard text: " + (gotText == null ? "nothing arrived" : gotText.Length + " characters"));
+
+            // Speed: 128 MB over this PC's own connection, paced from the audio ping, checked byte for byte.
             byte[] big = new byte[128 << 20];
             new Random(9).NextBytes(big);
-            string bigSrc = Path.Combine(dir, "big.bin");
+            string bigSrc = Path.Combine(dir, "src", "big.bin");
             File.WriteAllBytes(bigSrc, big);
-            got.Clear();
+            landed = null;
             var bigClock = System.Diagnostics.Stopwatch.StartNew();
-            c.SendFiles(new[] { bigSrc }, (_, _) => { }, default);
-            for (int i = 0; i < 600 && got.IsEmpty; i++) System.Threading.Thread.Sleep(20);
+            c.Files.SendFiles(new[] { bigSrc });
+            for (int i = 0; i < 1000 && landed == null; i++) System.Threading.Thread.Sleep(20);
             double bigSecs = bigClock.Elapsed.TotalSeconds;
-            if (got.IsEmpty || !File.ReadAllBytes(Path.Combine(FileChannel.Folder, "big.bin")).AsSpan().SequenceEqual(big))
-                return Fail("128 MB file: " + string.Join(" / ", got));
-            lossless += " | files: 128 MB at " + (128 / bigSecs).ToString("0") + " MB/s";
+            if (landed == null || !File.ReadAllBytes(landed[0]).AsSpan().SequenceEqual(big)) return Fail("128 MB file did not arrive whole");
+            lossless += " | clipboard files, folders and 5 MB of text both ways | 128 MB at " + (128 / bigSecs).ToString("0") + " MB/s";
 
             // The audio path's own ping (UDP hello and pong) gets measured.
             for (int i = 0; i < 60 && c.AudioPingMs < 0; i++) System.Threading.Thread.Sleep(50);

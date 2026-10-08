@@ -1,3 +1,12 @@
+1.8.6
+New feature: copy and paste between the PCs. Copy files, folders or text with Control C (or Control X) on one PC, then paste with Control V on the other, in any folder or program. Everything travels in the background, folders and all, with text of any size up to 512 megabytes. Copying something new while a transfer is going replaces it. Pasting always copies: nothing on the other PC is ever deleted. This replaces the Send files button. Untick Share the clipboard (Alt B) and each PC keeps its own clipboard: neither ever updates the other, and nothing is sent.
+New feature: the File transfer tab (Control Tab). It shows what is being sent or received, how much is done, the speed and the time left, with a Stop the transfer button. NVDA only says when a transfer starts and when it finishes.
+Changed: sending files no longer makes the sound lag. While files are going, TailRemote measures the sound's ping ten times a second and slows the transfer the moment it starts holding the sound up, then speeds it back up, so files go as fast as the connection allows with the sound kept clear.
+New feature: many more sounds. Real recorded instruments: a Steinway, harp, glockenspiel, marimba, xylophone and pizzicato strings, plus a classic phone and the earlier ones (chime, music box, electric piano, glass, kalimba, bell, text tone, vibraphone), Android's notification and effect sounds, Nepalese bells, and classic phone tunes. Choose the key for all of them (Alt K in Sounds).
+Changed: sounds are different each time. Default plays each event's own tune (rising for connecting, a sigh for an error) on a different instrument every time, and Random sound plays anything at all.
+Bug fixed: clipboard sharing could bounce the same thing back and forth between the PCs, and copying quickly could make it fall behind. A paste from the other PC is never sent back, and quick copies send only the latest one.
+Bug fixed: sharing a large clipboard could freeze TailRemote. Nothing about the clipboard or the sounds runs on the window any more.
+
 1.8.5
 Bug fixed: opening Send files could freeze TailRemote until Windows closed it. The Windows file picker looks through every drive and add-on as it opens, and one that was slow froze the whole window. The picker now runs on its own, so TailRemote keeps working however long it takes.
 Bug fixed: TailRemote could also freeze while another program was holding the clipboard. The clipboard is now shared in the background.

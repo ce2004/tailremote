@@ -34,6 +34,8 @@ namespace TailRemote
         public bool Sounds { get; set; } = true;
         /// <summary>Which sound each event makes (event name to sound name); events not here get the piano.</summary>
         public System.Collections.Generic.Dictionary<string, string> SoundChoices { get; set; } = new();
+        /// <summary>The major key the sounds play in, by pitch class (C 0 ... B 11). B flat until changed.</summary>
+        public int SoundKey { get; set; } = 10;
         /// <summary>Sound quality: -1 follows the connection (Variable); otherwise the bitrate step it is locked to.</summary>
         public int SoundQuality { get; set; } = -1;
         public System.Collections.Generic.List<SavedPc> SavedPcs { get; set; } = new();

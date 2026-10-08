@@ -23,11 +23,15 @@ namespace TailRemote
         private readonly Button _savePc = new() { Text = "Save t&his PC", AutoSize = true };
         private readonly Button _forgetPc = new() { Text = "&Forget saved PC", AutoSize = true };
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
-        private readonly CheckBox _shareClipboard = new() { Text = "Share clip&board text with the other PC", AutoSize = true };
+        private readonly CheckBox _shareClipboard = new() { Text = "Share the clip&board with the other PC: text, files and folders", AutoSize = true };
+        private readonly TabControl _tabs = new();
+        private readonly TabPage _mainPage = new("Connection"), _transferPage = new("File transfer");
+        private readonly TextBox _transferStatus = new() { ReadOnly = true, Multiline = true, Width = 540, Height = 64, AccessibleName = "Transfer status" };
+        private readonly ProgressBar _transferBar = new() { Width = 540, Height = 22, Maximum = 100, AccessibleName = "Transfer progress" };
+        private readonly Button _transferStop = new() { Text = "&Stop the transfer", AutoSize = true, Enabled = false };
         private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
         private readonly Button _sounds = new() { Text = "Sounds for connecting, clipboard and fi&les", AutoSize = true };
         private readonly CheckBox _speedUp = new() { Text = "Catch up b&y fast-forwarding the sound at 2x or 4x, same pitch (otherwise it skips ahead)", AutoSize = true, MaximumSize = new Size(560, 0) };
-        private string? _lastClipboardIn; // what the other PC last put here, so it is not sent straight back
         private readonly CheckBox _startup = new() { Text = "Start &hosting when Windows starts (asks for administrator)", AutoSize = true };
         private readonly CheckBox _service = new() { Text = "Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts, and Control Alt End sends Control Alt Delete", AutoSize = true, MaximumSize = new Size(560, 0) };
         private bool _settingService; // set while the checkbox is changed by code, not by the user
@@ -37,7 +41,6 @@ namespace TailRemote
         private readonly Button _audioSetup = new() { Text = "Set up au&dio device", AutoSize = true };
         private readonly Button _audioRemove = new() { Text = "Remove audio de&vice", AutoSize = true };
         private readonly Button _portEditor = new() { Text = "Port &editor", AutoSize = true };
-        private readonly Button _sendFiles = new() { Text = "Send f&iles", AutoSize = true };
         private readonly Button _restart = new() { Text = "Restart remote PC and reco&nnect", AutoSize = true };
         private bool _expectRestart; // the remote PC was asked to restart: say when it is back
 
@@ -100,14 +103,26 @@ namespace TailRemote
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_go);
             buttons.Controls.Add(_toggle);
-            buttons.Controls.Add(_sendFiles);
             buttons.Controls.Add(_restart);
             buttons.Controls.Add(_audioSetup);
             buttons.Controls.Add(_audioRemove);
             buttons.Controls.Add(_portEditor);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
-            Controls.Add(table);
+            // Two tabs: everything above, and File transfer.
+            _mainPage.Controls.Add(table);
+            var transfer = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
+            _transferStatus.Text = TransferIdle;
+            transfer.Controls.Add(_transferStatus);
+            transfer.Controls.Add(_transferBar);
+            transfer.Controls.Add(_transferStop);
+            _transferPage.Controls.Add(transfer);
+            _transferStop.Click += (_, _) => { _client?.CancelTransfer(); _host?.CancelTransfer(); };
+            _tabs.TabPages.Add(_mainPage);
+            _tabs.TabPages.Add(_transferPage);
+            _mainTable = table;
+            Controls.Add(_tabs);
+            FitTabs();
             AcceptButton = _go;
 
             _mode.SelectedIndex = _settings.HostMode ? 1 : 0;
@@ -118,7 +133,8 @@ namespace TailRemote
             _shareClipboard.Checked = _settings.ShareClipboard;
             _logging.Checked = _settings.Logging;
             _speedUp.Checked = _settings.CatchUpBySpeed;
-            Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && Sounds.All.Contains(s) ? s : Sounds.Default(t);
+            Sounds.Key = Math.Clamp(_settings.SoundKey, 0, 11);
+            Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && (s == Sounds.RandomName || Sounds.All.Contains(s)) ? s : Sounds.DefaultName;
             _sounds.Click += (_, _) =>
             {
                 Doing("choosing sounds");
@@ -158,7 +174,15 @@ namespace TailRemote
             _saved.SelectedIndexChanged += (_, _) => UseSaved();
             _savePc.Click += (_, _) => SavePc();
             _forgetPc.Click += (_, _) => ForgetPc();
-            _shareClipboard.CheckedChanged += (_, _) => SaveSettings();
+            _shareClipboard.CheckedChanged += (_, _) =>
+            {
+                SaveSettings();
+                // Off: each PC keeps its own clipboard and neither updates the other. Anything
+                // still going stops, and the host is told to send nothing.
+                _client?.SetClipboardSharing(_shareClipboard.Checked);
+                if (!_shareClipboard.Checked) { _client?.CancelTransfer(); _host?.CancelTransfer(); }
+                Say(_shareClipboard.Checked ? "Sharing the clipboard with the other PC." : "Not sharing the clipboard: each PC keeps its own.");
+            };
             _logging.CheckedChanged += (_, _) =>
             {
                 SaveSettings();
@@ -169,7 +193,6 @@ namespace TailRemote
             _go.Click += (_, _) => Go();
             _toggle.Click += (_, _) => _keys?.Toggle();
             _update.Click += (_, _) => CheckForUpdates();
-            _sendFiles.Click += (_, _) => SendFiles();
             _restart.Click += (_, _) => RestartRemote();
             _audioSetup.Click += (_, _) => SetUpAudio();
             _audioRemove.Click += (_, _) => RemoveAudio();
@@ -197,6 +220,15 @@ namespace TailRemote
         }
 
         private bool HostMode => _mode.SelectedIndex == 1;
+        private TableLayoutPanel? _mainTable;
+
+        /// <summary>The tabs sized to what the Connection tab holds (it changes with the mode).</summary>
+        private void FitTabs()
+        {
+            if (_mainTable == null) return;
+            var want = _mainTable.GetPreferredSize(Size.Empty);
+            _tabs.Size = new Size(Math.Max(want.Width, 580) + 16, want.Height + 40);
+        }
 
         private void UpdateMode()
         {
@@ -215,6 +247,7 @@ namespace TailRemote
             _startup.Visible = host;
             _service.Visible = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
+            FitTabs();
             UpdateButtons();
         }
 
@@ -263,16 +296,20 @@ namespace TailRemote
             base.WndProc(ref m);
         }
 
-        // ---- Clipboard sharing: text only, both ways, never echoed back ----
+        // ---- Clipboard sharing: text and files, both ways, never echoed back ----
+        // Copy (or cut) files or text here while connected, and they go to the other PC's
+        // clipboard: Control V there pastes them anywhere. Big text and files travel over the
+        // file connection (FileChannel), small text over the main one.
+        //
+        // All clipboard work is on a thread of its own. Windows' clipboard calls wait (and
+        // retry for a second or more) whenever another program has it open, and on the
+        // window's thread that froze TailRemote until Windows closed it (1.8.4, 1.8.5).
 
-        // The clipboard is read and written on a thread of its own. Windows' clipboard calls
-        // wait (and retry for a second or more) whenever another program has it open; on the
-        // window's thread that froze TailRemote long enough for Windows to close it (1.8.4).
         private static readonly System.Collections.Concurrent.BlockingCollection<Action> ClipboardJobs = StartClipboardThread();
 
         private static System.Collections.Concurrent.BlockingCollection<Action> StartClipboardThread()
         {
-            var jobs = new System.Collections.Concurrent.BlockingCollection<Action>(16);
+            var jobs = new System.Collections.Concurrent.BlockingCollection<Action>(64);
             var t = new System.Threading.Thread(() => { foreach (var job in jobs.GetConsumingEnumerable()) try { job(); } catch { } })
                 { IsBackground = true, Name = "TailRemote clipboard" };
             t.SetApartmentState(System.Threading.ApartmentState.STA); // the clipboard needs it
@@ -280,46 +317,135 @@ namespace TailRemote
             return jobs;
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+
+        // Never ping-pong, never pile up:
+        // 1. For 0.6 s after TailRemote itself fills this clipboard, its changes are ignored.
+        //    Windows reports one paste as several changes, and may adjust the text a little
+        //    (line endings), so neither a change counter nor comparing text alone stopped echoes.
+        // 2. Copies are gathered for 150 ms and only the latest is read and sent: ten quick
+        //    copies send one thing. Arriving clipboards likewise: only the newest is set.
+        // 3. What was last shared either way is never sent again.
+        private static uint _ownClipboard;           // the clipboard's number right after TailRemote itself filled it
+        private static long _ownSetAt;               // when it did (Environment.TickCount64)
+        private static string? _lastText, _lastFiles; // what was last shared either way
+        private static int _readVersion, _setVersion; // only the latest read or set is done
+        private const int EchoQuietMs = 600, GatherMs = 150;
+        private System.Windows.Forms.Timer? _gather;
+
         private void ClipboardChanged()
         {
-            if (!_shareClipboard.Checked || (_client == null && _host == null)) return;
-            ClipboardJobs.TryAdd(() =>
+            if (!_shareClipboard.Checked) return;
+            if (Environment.TickCount64 - System.Threading.Interlocked.Read(ref _ownSetAt) < EchoQuietMs) return; // our own paste
+            if (_gather == null)
             {
-                string? text = null;
-                for (int i = 0; i < 5 && text == null; i++)
-                {
-                    try { text = Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
-                    catch { System.Threading.Thread.Sleep(50); } // another program has it open
-                }
-                if (text != null) Later(() => ClipboardRead(text));
-            });
+                _gather = new System.Windows.Forms.Timer { Interval = GatherMs };
+                _gather.Tick += (_, _) => { _gather!.Stop(); ClipboardSettled(); };
+            }
+            _gather.Stop();
+            _gather.Start(); // restart: wait until the copying stops for a moment
         }
 
-        private void ClipboardRead(string text)
+        private void ClipboardSettled()
         {
-            Doing("sharing the clipboard");
-            if (!_shareClipboard.Checked || (_client == null && _host == null)) return;
-            if (string.IsNullOrEmpty(text) || text == _lastClipboardIn || text.Length > Protocol.MaxClipboardChars) return;
-            _lastClipboardIn = null;
-            if (_client != null && !_client.ListenOnly) Tone(Sounds.Tone.ClipboardSent);
-            _client?.SendClipboard(text);
-            _host?.SendClipboard(text);
+            if (!_shareClipboard.Checked) return;
+            var client = _client;
+            var host = _host;
+            if ((client == null && host == null) || client?.ListenOnly == true) return;
+            uint seq = GetClipboardSequenceNumber();
+            int version = System.Threading.Interlocked.Increment(ref _readVersion);
+            ClipboardJobs.TryAdd(() =>
+            {
+                if (version != System.Threading.Volatile.Read(ref _readVersion)) return; // a newer copy came: that one goes instead
+                if (seq == _ownClipboard || Environment.TickCount64 - System.Threading.Interlocked.Read(ref _ownSetAt) < EchoQuietMs) return; // what TailRemote itself just put there
+                string[]? files = null;
+                string? text = null;
+                for (int i = 0; i < 5; i++)
+                {
+                    try
+                    {
+                        if (Clipboard.ContainsFileDropList())
+                        {
+                            var list = Clipboard.GetFileDropList();
+                            files = new string[list.Count];
+                            list.CopyTo(files, 0);
+                        }
+                        else if (Clipboard.ContainsText()) text = Clipboard.GetText();
+                        break;
+                    }
+                    catch { System.Threading.Thread.Sleep(50); } // another program has it open
+                }
+                if (files is { Length: > 0 })
+                {
+                    string key = string.Join("|", files);
+                    if (key == _lastFiles) return;
+                    _lastFiles = key;
+                    _lastText = null;
+                    client?.SendClipboardFiles(files);
+                    host?.SendClipboardFiles(files);
+                }
+                else if (!string.IsNullOrEmpty(text))
+                {
+                    if (text == _lastText) return;
+                    _lastText = text;
+                    _lastFiles = null;
+                    if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to share: over 512 megabytes.")); return; }
+                    client?.SendClipboard(text);
+                    host?.SendClipboard(text);
+                    if (client != null) Later(() => Tone(Sounds.Tone.ClipboardSent));
+                }
+            });
         }
 
         private void ClipboardArrived(string text)
         {
             Doing("receiving the clipboard");
             if (!_shareClipboard.Checked || text.Length == 0) return;
-            _lastClipboardIn = text;
             Tone(Sounds.Tone.ClipboardReceived);
+            int version = System.Threading.Interlocked.Increment(ref _setVersion);
             ClipboardJobs.TryAdd(() =>
             {
-                for (int i = 0; i < 5; i++)
-                {
-                    try { Clipboard.SetDataObject(text, true, 2, 50); return; }
-                    catch { System.Threading.Thread.Sleep(100); }
-                }
+                if (version != System.Threading.Volatile.Read(ref _setVersion)) return; // a newer one arrived: set that instead
+                _lastText = text;
+                _lastFiles = null;
+                SetOwn(() => Clipboard.SetDataObject(text, true, 2, 50));
             });
+        }
+
+        /// <summary>Files from the other PC's clipboard, in the holding folder: put on this clipboard, so Control V pastes them.</summary>
+        private void ClipboardFilesArrived(string[] paths)
+        {
+            if (!_shareClipboard.Checked || paths.Length == 0) return;
+            int version = System.Threading.Interlocked.Increment(ref _setVersion);
+            ClipboardJobs.TryAdd(() =>
+            {
+                if (version != System.Threading.Volatile.Read(ref _setVersion)) return;
+                _lastFiles = string.Join("|", paths);
+                _lastText = null;
+                var list = new System.Collections.Specialized.StringCollection();
+                list.AddRange(paths);
+                var data = new DataObject();
+                data.SetFileDropList(list);
+                data.SetData("Preferred DropEffect", new System.IO.MemoryStream(BitConverter.GetBytes(1))); // paste copies, never moves
+                SetOwn(() => Clipboard.SetDataObject(data, true, 2, 50));
+            });
+        }
+
+        /// <summary>Fills this clipboard for the other PC, marking it as TailRemote's own so it is never sent back. Clipboard thread.</summary>
+        private static void SetOwn(Action set)
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    System.Threading.Interlocked.Exchange(ref _ownSetAt, Environment.TickCount64); // quiet from just before, too
+                    set();
+                    _ownClipboard = GetClipboardSequenceNumber();
+                    System.Threading.Interlocked.Exchange(ref _ownSetAt, Environment.TickCount64);
+                    return;
+                }
+                catch { System.Threading.Thread.Sleep(100); }
+            }
         }
 
         // ---- Which output the host sends ----
@@ -352,60 +478,34 @@ namespace TailRemote
             Say("Asked the remote PC to restart.");
         }
 
-        // ---- Files ----
+        // ---- The File transfer tab ----
 
-        private bool _picking;
+        private const string TransferIdle = "Nothing is being sent or received. Copy files, folders or text with Control C (or Control X), then paste them on the other PC with Control V.";
+        private FileChannel.Transfer? _transferShown;
 
-        /// <summary>
-        /// The Windows file picker, on a thread of its own. It looks through every drive
-        /// and shell add-on as it opens (network and cloud drives, phones), and one that
-        /// is slow or stuck hung it; on the window's thread that froze TailRemote until
-        /// Windows closed it (1.8.4, Brock). Now only the picker waits. Null: nothing chosen.
-        /// </summary>
-        private static System.Threading.Tasks.Task<string[]?> PickFiles()
+        /// <summary>How a clipboard batch is going, either way: the tab's line and bar; spoken only when it starts and ends.</summary>
+        private void ShowTransfer(FileChannel.Transfer t)
         {
-            var done = new System.Threading.Tasks.TaskCompletionSource<string[]?>();
-            var t = new System.Threading.Thread(() =>
+            if (!t.Finished && !ReferenceEquals(t, _transferShown))
             {
-                try
-                {
-                    using var pick = new OpenFileDialog { Multiselect = true, Title = "Choose files to send to the other PC" };
-                    done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? pick.FileNames : null);
-                }
-                catch (Exception e) { done.TrySetException(e); }
-            }) { IsBackground = true, Name = "TailRemote file picker" };
-            t.SetApartmentState(System.Threading.ApartmentState.STA);
-            t.Start();
-            return done.Task;
-        }
-
-        private async void SendFiles()
-        {
-            Doing("sending files");
-            if (_client == null && _host == null) { Say("Connect or start hosting first."); return; }
-            if (_client?.ListenOnly == true) { Say("Listeners cannot send files."); return; }
-            if (_picking) { Say("The file picker is already open."); return; }
-            try
-            {
-                _picking = true;
-                string[]? paths;
-                try { paths = await PickFiles(); }
-                finally { _picking = false; }
-                if (paths == null || paths.Length == 0) return;
-                var client = _client;
-                var host = _host;
-                if (client == null && host == null) { Say("The connection closed. Connect again, then send the files."); return; }
-                using var progress = new SetupForm("Sending files", (report, ct) => System.Threading.Tasks.Task.Run(() =>
-                    client != null ? client.SendFiles(paths, report, ct) : host!.SendFiles(paths, report, ct), ct));
-                progress.ShowDialog(this);
-                Tone(progress.Result == 0 ? Sounds.Tone.FileSent : Sounds.Tone.Error);
+                _transferShown = t;
+                Say((t.Outgoing ? "Sending " : "Receiving ") + t.What + ", " + FileChannel.Size(t.Total) + ".");
             }
-            catch (Exception e)
+            if (t.Finished)
             {
-                // Sending files must never be able to close TailRemote.
-                DiagLog.Write("send files: " + e);
-                Say("Could not send the files: " + e.Message);
+                _transferShown = null;
+                _transferStatus.Text = t.Result ?? TransferIdle;
+                _transferBar.Value = t.Failed ? 0 : 100;
+                _transferStop.Enabled = false;
+                Say(t.Result ?? "");
+                Tone(t.Failed ? Sounds.Tone.Error : t.Outgoing ? Sounds.Tone.FileSent : Sounds.Tone.FileReceived);
+                return;
             }
+            string left = t.Left is TimeSpan l ? ", about " + (l.TotalSeconds < 60 ? Math.Max(1, (int)l.TotalSeconds) + " seconds" : (int)l.TotalMinutes + " minutes " + l.Seconds + " seconds") + " left" : "";
+            _transferStatus.Text = (t.Outgoing ? "Sending " : "Receiving ") + t.What + ": " + FileChannel.Size(t.Done) + " of " + FileChannel.Size(t.Total) +
+                ", " + FileChannel.Speed(t.BytesPerSecond) + left + ".";
+            _transferBar.Value = t.Total <= 0 ? 0 : (int)Math.Clamp(t.Done * 100 / t.Total, 0, 100);
+            _transferStop.Enabled = t.Outgoing;
         }
 
         // ---- Saved PCs ----
@@ -543,7 +643,8 @@ namespace TailRemote
                 while (!IsDisposed)
                 {
                     System.Threading.Thread.Sleep(1000);
-                    try { if (IsHandleCreated) BeginInvoke(() => _answeredAt = Environment.TickCount64); } catch { return; }
+                    // Answering clears the label too: a report then always names what was really going on.
+                    try { if (IsHandleCreated) BeginInvoke(() => { _answeredAt = Environment.TickCount64; _doing = "nothing in particular"; }); } catch { return; }
                     long stuck = Environment.TickCount64 - System.Threading.Interlocked.Read(ref _answeredAt);
                     if (stuck > 3000 && !reported)
                     {
@@ -589,6 +690,8 @@ namespace TailRemote
                 _host = new Host(port, _password.Text, listen, msg => Later(() => Log(msg)),
                     _settings.CaptureDevice.Length == 0 ? null : _settings.CaptureDevice);
                 _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
+                _host.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
+                _host.TransferProgress += t => Later(() => ShowTransfer(t));
                 _host.FileMessage += msg => Later(() => Say(msg));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));
                 if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
@@ -689,7 +792,10 @@ namespace TailRemote
                     return;
                 }
                 c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
+                c.SetClipboardSharing(_shareClipboard.Checked);
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
+                c.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
+                c.TransferProgress += t => Later(() => ShowTransfer(t));
                 c.FileMessage += msg => Later(() => { Say(msg); FileTone(msg); });
                 _client = c;
                 if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using Concentus;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -136,6 +137,13 @@ namespace TailRemote
                 }
                 c._link.Send(stream, Protocol.FeaturesMessage());
                 if (!c.ListenOnly) c._files = OpenFiles(hostEp, token, key, hostNonce, myNonce, msg => c.FileMessage?.Invoke(msg));
+                if (c._files != null)
+                {
+                    c._files.Rate = () => c._pace;
+                    c._files.TextReceived = text => c.ClipboardReceived?.Invoke(text);
+                    c._files.FilesReceived = paths => c.ClipboardFilesReceived?.Invoke(paths);
+                    c._files.Progress = t => c.TransferProgress?.Invoke(t);
+                }
                 c.Status += status;
                 c.Start();
                 return c;
@@ -167,10 +175,63 @@ namespace TailRemote
             catch { tcp.Dispose(); return null; }
         }
 
-        /// <summary>Sends files to the host. Blocking; throws with a readable message.</summary>
-        public string SendFiles(IReadOnlyList<string> paths, Action<string, int> report, CancellationToken ct) =>
-            (_files ?? throw new InvalidOperationException(ListenOnly ? "Listeners cannot send files." : "File sending is not available on this connection. Reconnect and try again."))
-                .Send(paths, report, ct);
+        /// <summary>Copied files from here to the host's clipboard. Never waits.</summary>
+        public void SendClipboardFiles(IReadOnlyList<string> paths)
+        {
+            var files = _files;
+            if (_closed || ListenOnly || files == null || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths); } catch { } });
+        }
+
+        /// <summary>
+        /// Tells the host whether this PC shares its clipboard. Off: each PC keeps its own
+        /// clipboard, and neither ever updates the other (the host sends nothing at all).
+        /// </summary>
+        public void SetClipboardSharing(bool on)
+        {
+            Write(stackalloc byte[] { Protocol.ClipboardSharing, (byte)(on ? 1 : 0) });
+            if (!on) _files?.CancelSending();
+        }
+
+        /// <summary>Stops a clipboard batch going to the host.</summary>
+        public void CancelTransfer() => _files?.CancelSending();
+
+        /// <summary>Test only: the file channel.</summary>
+        internal FileChannel? Files => _files;
+
+        /// <summary>Files from the host's clipboard, in the holding folder. Raised on a network thread.</summary>
+        public event Action<string[]>? ClipboardFilesReceived;
+        /// <summary>How a clipboard batch is going, either way. Raised on a network thread.</summary>
+        public event Action<FileChannel.Transfer>? TransferProgress;
+
+        // ---- Pacing files so the sound never queues behind them ----
+        // While a batch goes either way, the audio path's ping is measured ten times a second.
+        // Its lowest value over the last 30 seconds is the line's own delay; anything above
+        // that is data queueing somewhere. Clear (under 15 ms of queue): faster by a quarter.
+        // Queueing (over 40 ms): down to 60 percent at once. The host is told the same rate.
+        private double _pace = 8 << 20;
+        private readonly Queue<(long At, int Ms)> _pings = new();
+        private double _paceSent;
+
+        private void PaceFrom(int rttMs)
+        {
+            long now = Environment.TickCount64;
+            _pings.Enqueue((now, rttMs));
+            while (_pings.Count > 0 && now - _pings.Peek().At > 30_000) _pings.Dequeue();
+            if (_files?.Busy != true) return;
+            int floor = _pings.Min(p => p.Ms);
+            int queued = rttMs - floor;
+            if (queued < 15) _pace = Math.Min(_pace * 1.25, 2.0 * (1 << 30));
+            else if (queued > 40) _pace = Math.Max(_pace * 0.6, 32 << 10);
+            if (Math.Abs(_pace - _paceSent) > _paceSent * 0.1)
+            {
+                _paceSent = _pace;
+                Span<byte> m = stackalloc byte[5];
+                m[0] = Protocol.FilePace;
+                BitConverter.TryWriteBytes(m[1..], (uint)Math.Min(uint.MaxValue, _pace / 1024));
+                Write(m);
+            }
+        }
 
         private void Start()
         {
@@ -261,6 +322,12 @@ namespace TailRemote
         public void SendClipboard(string text)
         {
             if (_closed || ListenOnly || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
+            // Big text goes over the file connection, so it never holds up keys.
+            if (text.Length > Host.SmallClipboard && _files is FileChannel files)
+            {
+                ThreadPool.QueueUserWorkItem(_ => { try { files.SendText(text); } catch { } });
+                return;
+            }
             _bulk.Enqueue(Protocol.TextMessage(Protocol.Clipboard, text));
             _toSend.Release();
         }
@@ -410,7 +477,7 @@ namespace TailRemote
             {
                 long sent = BitConverter.ToInt64(d, 1);
                 long ms = (Stopwatch.GetTimestamp() - sent) * 1000 / Stopwatch.Frequency;
-                if (ms >= 0 && ms < 10_000) AudioPingMs = (int)ms;
+                if (ms >= 0 && ms < 10_000) { AudioPingMs = (int)ms; PaceFrom((int)ms); }
                 return;
             }
             if (d.Length < Protocol.MinAudioPacketBytes || d[0] != Protocol.UdpOpus) return;
@@ -662,20 +729,28 @@ namespace TailRemote
             hello[0] = Protocol.UdpHello;
             _token.CopyTo(hello, 1);
             byte[] ping = new byte[9];
-            int tick = 0;
+            long lastHello = 0, lastPing = 0;
             _lastPong = Environment.TickCount64;
             while (!_closed)
             {
-                if (Environment.TickCount64 - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
-                BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
-                try { _udp.Send(hello, hello.Length); } catch { }
-                if (tick++ % 2 == 0)
+                long now = Environment.TickCount64;
+                if (now - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
+                // The UDP hello (and its pong, the audio ping): once a second, or ten times a second
+                // while files are going either way, so the pacing sees queueing at once.
+                if (now - lastHello >= (_files?.Busy == true ? 100 : 1000))
                 {
+                    lastHello = now;
+                    BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
+                    try { _udp.Send(hello, hello.Length); } catch { }
+                }
+                if (now - lastPing >= 2000)
+                {
+                    lastPing = now;
                     ping[0] = Protocol.Ping;
                     BitConverter.TryWriteBytes(ping.AsSpan(1), Stopwatch.GetTimestamp());
                     Write(ping);
                 }
-                Thread.Sleep(1000);
+                Thread.Sleep(50);
             }
         }
     }

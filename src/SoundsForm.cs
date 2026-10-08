@@ -7,19 +7,21 @@ namespace TailRemote
 {
     /// <summary>
     /// Sounds: which sound each event makes. One list per event: Default (the
-    /// piano sound made for it), None, then every sound (Sounds.All). Moving through
-    /// a list plays each sound as you reach it.
+    /// event's own tune on a different instrument each time), Random sound, None,
+    /// then every sound (Sounds.All). Moving through a list plays each as you reach it.
     /// </summary>
     internal sealed class SoundsForm : Form
     {
         private readonly Settings _settings;
         private readonly Dictionary<Sounds.Tone, ComboBox> _lists = new();
+        private readonly ComboBox _key = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, AccessibleName = "Key" };
+        private readonly int _keyBefore;
         private bool _ready;
-        private const string DefaultItem = "Default";
 
         public SoundsForm(Settings settings)
         {
             _settings = settings;
+            _keyBefore = Math.Clamp(settings.SoundKey, 0, 11);
             Text = "Sounds";
             Font = new Font("Segoe UI", 10f);
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -29,12 +31,25 @@ namespace TailRemote
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
             var table = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Padding = new Padding(12) };
+            // The key every pattern plays in.
+            _key.Items.AddRange(Sounds.Keys);
+            _key.SelectedIndex = Math.Clamp(settings.SoundKey, 0, 11);
+            _key.SelectedIndexChanged += (_, _) =>
+            {
+                if (!_ready) return;
+                Sounds.Key = _key.SelectedIndex;
+                Sounds.PlayNamed(Sounds.Default(Sounds.Tone.Connected)); // hear the new key
+            };
+            table.Controls.Add(new Label { Text = "&Key", AutoSize = true, Anchor = AnchorStyles.Left });
+            table.Controls.Add(_key);
             foreach (Sounds.Tone t in Enum.GetValues<Sounds.Tone>())
             {
                 var label = new Label { Text = Sounds.Label(t), AutoSize = true, Anchor = AnchorStyles.Left };
                 var list = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, AccessibleName = Sounds.Label(t).Replace("&", "") };
-                // Default first (the piano sound made for this event), then None, then every sound.
-                list.Items.Add(DefaultItem);
+                // Default first (this event's own tune on a different instrument each time), then
+                // Random sound (anything, each time), then None and every sound.
+                list.Items.Add(Sounds.DefaultName);
+                list.Items.Add(Sounds.RandomName);
                 foreach (string name in Sounds.All) list.Items.Add(name);
                 int at = settings.SoundChoices.TryGetValue(t.ToString(), out var c) ? list.Items.IndexOf(c) : -1;
                 list.SelectedIndex = at < 0 ? 0 : at;
@@ -42,7 +57,7 @@ namespace TailRemote
                 var tone = t;
                 list.SelectedIndexChanged += (_, _) =>
                 {
-                    if (_ready && list.SelectedItem is string s) Sounds.PlayNamed(s == DefaultItem ? Sounds.Default(tone) : s);
+                    if (_ready && list.SelectedItem is string s) Sounds.PlayNamed(Sounds.Resolve(tone, s));
                 };
                 table.Controls.Add(label);
                 table.Controls.Add(list);
@@ -53,6 +68,7 @@ namespace TailRemote
             var ok = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
             var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
             ok.Click += (_, _) => Save();
+            cancel.Click += (_, _) => Sounds.Key = _keyBefore; // Cancel puts the key back
             buttons.Controls.Add(ok);
             buttons.Controls.Add(cancel);
             table.Controls.Add(buttons);
@@ -70,9 +86,11 @@ namespace TailRemote
 
         private void Save()
         {
+            _settings.SoundKey = _key.SelectedIndex;
+            Sounds.Key = _key.SelectedIndex;
             _settings.SoundChoices = new Dictionary<string, string>();
             foreach (var (t, list) in _lists)
-                if (list.SelectedItem is string s && s != DefaultItem) _settings.SoundChoices[t.ToString()] = s;
+                if (list.SelectedItem is string s && s != Sounds.DefaultName) _settings.SoundChoices[t.ToString()] = s;
             try { _settings.Save(); } catch { }
         }
     }

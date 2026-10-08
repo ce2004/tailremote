@@ -41,8 +41,13 @@ namespace TailRemote
             {
                 SecureAttention = ServiceHost.RequestSas,
             };
-            _clip = new ClipboardWindow(_host);
-            _host.ClipboardReceived += text => _clip.Arrived(text);
+            _clip = new ClipboardWindow(_host, cfg.ShareClipboard);
+            if (cfg.ShareClipboard)
+            {
+                // Off in the settings: this PC keeps its own clipboard, and neither PC updates the other.
+                _host.ClipboardReceived += text => _clip.Arrived(text);
+                _host.ClipboardFilesReceived += paths => _clip.FilesArrived(paths);
+            }
             _host.FileMessage += ServiceHost.Log;
             ServiceHost.Log("Agent hosting on port " + cfg.Port + ".");
         }
@@ -57,20 +62,29 @@ namespace TailRemote
         {
             string? profile = NativeService.UserProfile(NativeService.WTSGetActiveConsoleSessionId());
             string root = profile ?? Path.Combine(Environment.GetEnvironmentVariable("PUBLIC") ?? @"C:\Users\Public");
-            FileChannel.FolderOverride = Path.Combine(root, "Downloads", "TailRemote");
+            // The signed-in user's own holding folder: the agent runs as SYSTEM, whose folders
+            // the user's Explorer could not paste from.
+            FileChannel.StagingOverride = Path.Combine(root, "AppData", "Local", "TailRemote", "Clipboard");
         }
 
         /// <summary>A hidden window that hears clipboard changes and sets the clipboard on its own thread.</summary>
         private sealed class ClipboardWindow : NativeWindow
         {
             private readonly Host _host;
-            private string? _lastIn;
+            private readonly bool _share;
+            private string? _lastIn, _lastFiles;
+            private uint _own;
+            private long _ownAt;
+            private readonly System.Windows.Forms.Timer _gather = new() { Interval = 150 };
+            [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
             private readonly Control _invoker = new();
 
-            public ClipboardWindow(Host host)
+            public ClipboardWindow(Host host, bool share)
             {
                 _host = host;
+                _share = share;
                 _invoker.CreateControl();
+                _gather.Tick += (_, _) => { _gather.Stop(); Settled(); };
                 CreateHandle(new CreateParams());
                 Native.AddClipboardFormatListener(Handle);
             }
@@ -83,7 +97,26 @@ namespace TailRemote
                     _lastIn = text;
                     for (int i = 0; i < 5; i++)
                     {
-                        try { Clipboard.SetText(text); return; }
+                        try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(text, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }
+                        catch { System.Threading.Thread.Sleep(20); }
+                    }
+                });
+            }
+
+            public void FilesArrived(string[] paths)
+            {
+                if (!_invoker.IsHandleCreated) return;
+                _invoker.BeginInvoke(() =>
+                {
+                    _lastFiles = string.Join("|", paths);
+                    var list = new System.Collections.Specialized.StringCollection();
+                    list.AddRange(paths);
+                    var data = new DataObject();
+                    data.SetFileDropList(list);
+                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(1))); // paste copies
+                    for (int i = 0; i < 5; i++)
+                    {
+                        try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(data, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }
                         catch { System.Threading.Thread.Sleep(20); }
                     }
                 });
@@ -91,17 +124,40 @@ namespace TailRemote
 
             protected override void WndProc(ref Message m)
             {
-                if (m.Msg == 0x031D) // WM_CLIPBOARDUPDATE
+                if (m.Msg == 0x031D && _share) // WM_CLIPBOARDUPDATE, only while sharing
+                {
+                    // Not our own paste (0.6 s quiet after it), and only once the copying stops for 150 ms.
+                    if (Environment.TickCount64 - _ownAt >= 600) { _gather.Stop(); _gather.Start(); }
+                }
+                base.WndProc(ref m);
+            }
+
+            private void Settled()
+            {
                 {
                     try
                     {
-                        string text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
-                        if (text.Length > 0 && text != _lastIn && text.Length <= Protocol.MaxClipboardChars) _host.SendClipboard(text);
-                        _lastIn = null;
+                        if (GetClipboardSequenceNumber() == _own || Environment.TickCount64 - _ownAt < 600) return; // what the agent itself just put there
+                        if (Clipboard.ContainsFileDropList())
+                        {
+                            var list = Clipboard.GetFileDropList();
+                            var files = new string[list.Count];
+                            list.CopyTo(files, 0);
+                            string key = string.Join("|", files);
+                            if (files.Length > 0 && key != _lastFiles) _host.SendClipboardFiles(files);
+                            _lastFiles = key;
+                            _lastIn = null;
+                        }
+                        else
+                        {
+                            string text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+                            if (text.Length > 0 && text != _lastIn) _host.SendClipboard(text);
+                            _lastIn = text;
+                            _lastFiles = null;
+                        }
                     }
                     catch { }
                 }
-                base.WndProc(ref m);
             }
         }
     }
