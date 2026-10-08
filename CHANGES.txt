@@ -1,3 +1,6 @@
+1.8.9
+Changed: file progress is now the Files line, right after Streaming as you Tab through the window, followed by the progress bar and Stop the file transfer. It shows what is being sent or received, how much is done, the speed and the time left. The separate File transfer tab, which only Control Tab could reach, is gone.
+
 1.8.8
 Bug fixed: updating could fail with "Access to the path ... .old is denied" when an older copy of TailRemote was still running, or something else held its leftover file. The update now goes ahead anyway, and TailRemote tidies up leftovers from earlier updates by itself once nothing is using them.
 

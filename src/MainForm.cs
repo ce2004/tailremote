@@ -24,11 +24,10 @@ namespace TailRemote
         private readonly Button _forgetPc = new() { Text = "&Forget saved PC", AutoSize = true };
         private readonly TextBox _listenPassword = new() { UseSystemPasswordChar = true };
         private readonly CheckBox _shareClipboard = new() { Text = "Share the clip&board with the other PC: text, files and folders", AutoSize = true };
-        private readonly TabControl _tabs = new();
-        private readonly TabPage _mainPage = new("Connection"), _transferPage = new("File transfer");
-        private readonly TextBox _transferStatus = new() { ReadOnly = true, Multiline = true, Width = 540, Height = 64, AccessibleName = "Transfer status" };
-        private readonly ProgressBar _transferBar = new() { Width = 540, Height = 22, Maximum = 100, AccessibleName = "Transfer progress" };
-        private readonly Button _transferStop = new() { Text = "&Stop the transfer", AutoSize = true, Enabled = false };
+        // Files: right after Streaming, in the Tab order (a separate tab could only be reached with Control Tab).
+        private readonly TextBox _transferStatus = new() { ReadOnly = true, TabStop = true };
+        private readonly ProgressBar _transferBar = new() { Height = 22, Maximum = 100, AccessibleName = "File transfer progress" };
+        private readonly Button _transferStop = new() { Text = "Stop the file transfer", AutoSize = true, Enabled = false };
         private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
         private readonly Button _sounds = new() { Text = "Sounds for connecting, clipboard and fi&les", AutoSize = true };
         private readonly CheckBox _speedUp = new() { Text = "Catch up b&y fast-forwarding the sound at 2x or 4x, same pitch (otherwise it skips ahead)", AutoSize = true, MaximumSize = new Size(560, 0) };
@@ -91,6 +90,10 @@ namespace TailRemote
             _deviceLabel = AddRow(table, "&Output device", _device);
             _qualityLabel = AddRow(table, "Sound &quality", _quality);
             _streamingLabel = AddRow(table, "Streaming", _streaming);
+            AddRow(table, "Files", _transferStatus);
+            AddRow(table, "File transfer progress", _transferBar);
+            table.Controls.Add(_transferStop); table.SetColumnSpan(_transferStop, 2);
+            _transferBar.Dock = DockStyle.Fill;
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_shareClipboard); table.SetColumnSpan(_shareClipboard, 2);
             table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
@@ -109,20 +112,9 @@ namespace TailRemote
             buttons.Controls.Add(_portEditor);
             buttons.Controls.Add(_update);
             table.Controls.Add(buttons); table.SetColumnSpan(buttons, 2);
-            // Two tabs: everything above, and File transfer.
-            _mainPage.Controls.Add(table);
-            var transfer = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
             _transferStatus.Text = TransferIdle;
-            transfer.Controls.Add(_transferStatus);
-            transfer.Controls.Add(_transferBar);
-            transfer.Controls.Add(_transferStop);
-            _transferPage.Controls.Add(transfer);
             _transferStop.Click += (_, _) => { _client?.CancelTransfer(); _host?.CancelTransfer(); };
-            _tabs.TabPages.Add(_mainPage);
-            _tabs.TabPages.Add(_transferPage);
-            _mainTable = table;
-            Controls.Add(_tabs);
-            FitTabs();
+            Controls.Add(table);
             AcceptButton = _go;
 
             _mode.SelectedIndex = _settings.HostMode ? 1 : 0;
@@ -220,15 +212,6 @@ namespace TailRemote
         }
 
         private bool HostMode => _mode.SelectedIndex == 1;
-        private TableLayoutPanel? _mainTable;
-
-        /// <summary>The tabs sized to what the Connection tab holds (it changes with the mode).</summary>
-        private void FitTabs()
-        {
-            if (_mainTable == null) return;
-            var want = _mainTable.GetPreferredSize(Size.Empty);
-            _tabs.Size = new Size(Math.Max(want.Width, 580) + 16, want.Height + 40);
-        }
 
         private void UpdateMode()
         {
@@ -247,7 +230,6 @@ namespace TailRemote
             _startup.Visible = host;
             _service.Visible = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
-            FitTabs();
             UpdateButtons();
         }
 
@@ -483,9 +465,9 @@ namespace TailRemote
             Say("Asked the remote PC to restart.");
         }
 
-        // ---- The File transfer tab ----
+        // ---- The Files line: how a transfer is going ----
 
-        private const string TransferIdle = "Nothing is being sent or received. Copy files, folders or text with Control C (or Control X), then paste them on the other PC with Control V.";
+        private const string TransferIdle = "Nothing being sent or received. Copy files, folders or text with Control C, then paste on the other PC with Control V.";
         private FileChannel.Transfer? _transferShown;
 
         /// <summary>How a clipboard batch is going, either way: the tab's line and bar; spoken only when it starts and ends.</summary>
