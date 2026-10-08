@@ -44,7 +44,6 @@ namespace TailRemote
             public string ListenPasswordEnc { get; set; } = "";
             public string CaptureDevice { get; set; } = "";
             public bool Logging { get; set; }
-            public bool ShareClipboard { get; set; } = true;
             public bool WeSetSasPolicy { get; set; }
 
             public static string Seal(string s) => s.Length == 0 ? "" : Convert.ToBase64String(Native.Protect(System.Text.Encoding.UTF8.GetBytes(s), true, machine: true));
@@ -129,7 +128,6 @@ namespace TailRemote
                     ListenPasswordEnc = Config.Seal(s.ListenPassword),
                     CaptureDevice = s.CaptureDevice,
                     Logging = s.Logging,
-                    ShareClipboard = s.ShareClipboard,
                     WeSetSasPolicy = old?.WeSetSasPolicy ?? false,
                 };
                 // Ctrl+Alt+Del from a service needs this policy (1 = services may send it).

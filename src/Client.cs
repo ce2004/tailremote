@@ -179,18 +179,16 @@ namespace TailRemote
         public void SendClipboardFiles(IReadOnlyList<string> paths)
         {
             var files = _files;
-            if (_closed || ListenOnly || files == null || (_peerFeatures & Protocol.FeatureClipboard) == 0) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths); } catch { } });
+            if (_closed || ListenOnly || files == null) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true); } catch { } });
         }
 
-        /// <summary>
-        /// Tells the host whether this PC shares its clipboard. Off: each PC keeps its own
-        /// clipboard, and neither ever updates the other (the host sends nothing at all).
-        /// </summary>
-        public void SetClipboardSharing(bool on)
+        /// <summary>Send files: into the host's Downloads\TailRemote. Never waits.</summary>
+        public void SendFiles(IReadOnlyList<string> paths)
         {
-            Write(stackalloc byte[] { Protocol.ClipboardSharing, (byte)(on ? 1 : 0) });
-            if (!on) _files?.CancelSending();
+            var files = _files;
+            if (_closed || ListenOnly || files == null) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
         }
 
         /// <summary>Stops a clipboard batch going to the host.</summary>
@@ -212,7 +210,7 @@ namespace TailRemote
         private double _pace = 8 << 20;
         private readonly Queue<(long At, int Ms)> _pings = new();
         private double _paceSent;
-        private int _highPings;
+        private int _highPings, _lastTrouble;
         private bool _wasBusy;
 
         private void PaceFrom(int rttMs)
@@ -226,13 +224,19 @@ namespace TailRemote
             if (!busy) return;
             int floor = _pings.Min(p => p.Ms);
             int queued = rttMs - floor;
-            // Only two high pings in a row slow it (one is often just a busy moment), and
-            // a ping that is only a little high still lets it creep back up.
-            if (queued > 40) { if (++_highPings >= 2) { _pace = Math.Max(_pace * 0.6, 16 << 10); _highPings = 0; } }
+            // Slowed only when the sound really suffers (it ran dry or packets came late), or
+            // the ping has stayed far up (150 ms of queue, twice running). Over Tailscale and
+            // Wi-Fi the ping swings a lot while the sound is fine, and slowing on that alone
+            // kept transfers needlessly slow.
+            int trouble = _player.Trouble;
+            bool hurt = trouble != _lastTrouble;
+            _lastTrouble = trouble;
+            if (hurt) { _pace = Math.Max(_pace * 0.7, 64 << 10); _highPings = 0; }
+            else if (queued > 150) { if (++_highPings >= 2) { _pace = Math.Max(_pace * 0.7, 64 << 10); _highPings = 0; } }
             else
             {
                 _highPings = 0;
-                _pace = Math.Min(_pace * (queued < 15 ? 1.25 : 1.05), 2.0 * (1 << 30));
+                _pace = Math.Min(_pace * (queued < 30 ? 1.5 : 1.1), 2.0 * (1 << 30));
             }
             if (Math.Abs(_pace - _paceSent) > _paceSent * 0.1)
             {

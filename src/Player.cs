@@ -158,8 +158,13 @@ namespace TailRemote
         public static double Now => Stopwatch.GetTimestamp() * 1000.0 / Stopwatch.Frequency;
 
         /// <summary>A packet that came after its moment had passed: counted, never played.</summary>
+        /// <summary>Counts every time the sound suffered (ran dry, or a packet came too late): file pacing slows down when it rises.</summary>
+        public int Trouble => Volatile.Read(ref _trouble);
+        private int _trouble;
+
         public void CountLate(int ticks)
         {
+            Interlocked.Increment(ref _trouble);
             Interlocked.Add(ref _statPackets, ticks);
             Interlocked.Add(ref _statLate, ticks);
             _diagLate += ticks;
@@ -470,6 +475,7 @@ namespace TailRemote
                         _ff = 0;
                         _xfLeft = 0;
                         _diagDry++;
+                        Interlocked.Increment(ref _trouble);
                     }
                     if (_playing)
                     {

@@ -1,3 +1,9 @@
+1.8.10
+Changed: nothing is shared by itself any more. Both PCs have two buttons. Send the clipboard (Alt B) sends what is on your clipboard (text, or files and folders you copied) to the other PC's clipboard, ready to paste with Control V. Send files (Alt I) sends files you choose to Downloads, TailRemote on the other PC, never over anything already there. The Share clipboard box is gone.
+Bug fixed: the wrong sound could play for an event. Clipboard text played a file sound, and stopping or replacing a transfer on purpose played the error sound. Now the clipboard has its own sounds, files have theirs, and the error sound is only for real failures.
+Bug fixed: the PC that sent a file could say it failed while the other PC still said it was receiving. A short pause in the connection no longer stops a transfer, a connection that really breaks is noticed by both PCs at once, and the Files line goes back to idle by itself.
+Changed: files go much faster. The speed only backs off when the sound actually suffers, not whenever the ping wobbles, which over Tailscale and Wi-Fi it always does.
+
 1.8.9
 Changed: file progress is now the Files line, right after Streaming as you Tab through the window, followed by the progress bar and Stop the file transfer. It shows what is being sent or received, how much is done, the speed and the time left. The separate File transfer tab, which only Control Tab could reach, is gone.
 

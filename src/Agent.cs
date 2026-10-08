@@ -41,13 +41,11 @@ namespace TailRemote
             {
                 SecureAttention = ServiceHost.RequestSas,
             };
-            _clip = new ClipboardWindow(_host, cfg.ShareClipboard);
-            if (cfg.ShareClipboard)
-            {
-                // Off in the settings: this PC keeps its own clipboard, and neither PC updates the other.
-                _host.ClipboardReceived += text => _clip.Arrived(text);
-                _host.ClipboardFilesReceived += paths => _clip.FilesArrived(paths);
-            }
+            // The service has no window, so it never sends; what the controlling PC sends with
+            // Send clipboard goes onto this PC's clipboard.
+            _clip = new ClipboardWindow(_host, share: false);
+            _host.ClipboardReceived += text => _clip.Arrived(text);
+            _host.ClipboardFilesReceived += paths => _clip.FilesArrived(paths);
             _host.FileMessage += ServiceHost.Log;
             ServiceHost.Log("Agent hosting on port " + cfg.Port + ".");
         }

@@ -50,7 +50,6 @@ namespace TailRemote
             public required byte Role;
             public required byte[] Key, HostNonce, ClientNonce;
             public FileChannel? Files;
-            public volatile bool Sharing = true; // the controller shares its clipboard (ClipboardSharing)
             public double Pace = 8 << 20; // bytes a second the host may send this controller files at (FilePace)
             public uint PeerFeatures;
             public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
@@ -140,7 +139,7 @@ namespace TailRemote
         {
             Session? c;
             lock (_gate) c = _controller;
-            if (c == null || !c.Sharing || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
+            if (c == null || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
             // Off the caller's thread: a controller that has stopped reading must not freeze this window.
             // Big text goes over the file connection, so it never holds up keys or messages.
             ThreadPool.QueueUserWorkItem(_ =>
@@ -160,9 +159,22 @@ namespace TailRemote
             Session? c;
             lock (_gate) c = _controller;
             var files = c?.Files;
-            if (files == null || !c!.Sharing || (c.PeerFeatures & Protocol.FeatureClipboard) == 0) return;
-            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths); } catch { } });
+            if (files == null) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: true); } catch { } });
         }
+
+        /// <summary>Send files: into the controller's Downloads\TailRemote. Never waits.</summary>
+        public void SendFiles(IReadOnlyList<string> paths)
+        {
+            Session? c;
+            lock (_gate) c = _controller;
+            var files = c?.Files;
+            if (files == null) return;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
+        }
+
+        /// <summary>True while someone is controlling this PC (the only one files and the clipboard can go to).</summary>
+        public bool HasController { get { lock (_gate) return _controller?.Files != null; } }
 
         /// <summary>Stops a clipboard batch going to the controller.</summary>
         public void CancelTransfer()
@@ -526,10 +538,6 @@ namespace TailRemote
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);
                         DiagLog.Write("host: " + s.Address + " asked for quality step " + s.Quality);
-                        break;
-                    case Protocol.ClipboardSharing when m.Length == 2:
-                        s.Sharing = m[1] != 0;
-                        if (!s.Sharing) s.Files?.CancelSending();
                         break;
                     case Protocol.FilePace when m.Length == 5:
                         Volatile.Write(ref s.Pace, Math.Max(16 << 10, BitConverter.ToUInt32(m, 1) * 1024.0));

@@ -21,7 +21,7 @@ On your PC
 Features
 - Control Shift Enter in the TailRemote window switches between the remote PC and this one.
 - Control Alt End sends Control Alt Delete to the remote PC, when it runs TailRemote as a service.
-- Copy and paste between the PCs while Share the clipboard (Alt B) is checked: copy files, folders or text with Control C (or Control X) on one PC, then paste with Control V on the other, in any folder or program. They travel in the background, as fast as the connection allows without the sound lagging; files wait in a TailRemote holding folder until pasted. Pasting always copies: nothing on the other PC is ever deleted.
+- Send the clipboard (Alt B) sends what is on this PC's clipboard to the other PC's clipboard: text, or files and folders you copied. Paste it there with Control V. Send files (Alt I) sends files you choose to Downloads, TailRemote on the other PC, never over anything already there. Both PCs have both buttons; nothing is ever sent by itself.
 - The Files line (right after Streaming) shows what is being sent or received, how far along, the speed and the time left, followed by the progress bar and Stop the file transfer.
 - Sounds for connecting, clipboard and files (Alt L): a sound for each event. Default plays the event's own tune on a different instrument each time; Random sound plays anything; or choose one of the instruments (a real Steinway, harp, glockenspiel, marimba, xylophone, pizzicato strings, classic phone and more) or Android's notification sounds, and the key (Alt K). TailRemote.exe --licence writes where the sounds come from.
 - Restart remote PC and reconnect (Alt N) restarts the remote PC and reconnects when it is back.

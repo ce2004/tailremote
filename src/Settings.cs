@@ -26,7 +26,6 @@ namespace TailRemote
         /// <summary>Host: the output whose sound is sent ("" = Windows' default).</summary>
         public string CaptureDevice { get; set; } = "";
         public string ListenPasswordEnc { get; set; } = "";
-        public bool ShareClipboard { get; set; } = true;
         public bool Logging { get; set; }
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
         public bool CatchUpBySpeed { get; set; }

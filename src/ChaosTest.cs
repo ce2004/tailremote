@@ -34,6 +34,7 @@ namespace TailRemote
             if (Directory.Exists(Root)) Directory.Delete(Root, true);
             Directory.CreateDirectory(Root);
             FileChannel.StagingOverride = Path.Combine(Root, "stage");
+            FileChannel.DownloadsOverride = Path.Combine(Root, "downloads");
             var host = NewHost();
             Thread.Sleep(500);
             GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
@@ -132,8 +133,7 @@ namespace TailRemote
                 c.TestWrite(new byte[] { 0xEE, 1, 2, 3 });                     // a message type nobody knows
                 c.TestWrite(new byte[] { Protocol.AudioQuality });            // too short
                 c.TestWrite(new byte[] { Protocol.Features });
-                for (int i = 0; i < 1000; i++) c.TestWrite(new byte[] { Protocol.ClipboardSharing, (byte)(i & 1) });
-                c.TestWrite(new byte[] { Protocol.ClipboardSharing, 1 });
+                for (int i = 0; i < 1000; i++) c.TestWrite(new byte[] { 8, (byte)(i & 1) }); // a retired message type, a thousand times
                 Thread.Sleep(1500);
                 return c.TestClosed ? "FAIL: the host dropped the connection over nonsense" : "the connection stayed up and ignored all of it";
             });
@@ -210,13 +210,45 @@ namespace TailRemote
                     return ok ? "both arrived whole" : "FAIL: to host " + (toHost != null) + ", to client " + (toClient != null);
                 });
 
+                Scenario("both PCs agree: 64 MB from the host, then 64 MB to it", 120, () =>
+                {
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "agree-down.bin", () => host.ControllerFiles!.SendFiles(new[] { Big("agree-down.bin", 64) }));
+                    var (hostSays2, clientSays2) = BothSay(host, ctrl, "agree-up.bin", () => ctrl.Files!.SendFiles(new[] { Big("agree-up.bin", 64) }));
+                    bool ok = hostSays?.Failed == false && clientSays?.Failed == false && hostSays2?.Failed == false && clientSays2?.Failed == false;
+                    return ok ? "both sides said it worked, both ways" : "FAIL: down: host " + hostSays?.Result + " / client " + clientSays?.Result + "; up: host " + hostSays2?.Result + " / client " + clientSays2?.Result;
+                });
+
+                Scenario("the receiving PC stalls for 8 seconds in the middle of 128 MB", 120, () =>
+                {
+                    string file = Big("stall.bin", 128);
+                    var clock = Stopwatch.StartNew();
+                    var (hostSays, clientSays) = BothSay(host, ctrl, "stall.bin", () =>
+                    {
+                        ctrl.Files!.TestPause(8000); // the client stops reading first, as a busy or frozen PC would
+                        host.ControllerFiles!.SendFiles(new[] { file });
+                    });
+                    if (clock.ElapsedMilliseconds < 7500) return "FAIL: the stall did not happen (" + clock.ElapsedMilliseconds + " ms)";
+                    bool ok = hostSays?.Failed == false && clientSays?.Failed == false;
+                    return ok ? "it waited out the stall and finished; both sides said so" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
+                });
+
+                Scenario("speed both ways (paced from the sound)", 120, () =>
+                {
+                    double down = Timed(host, ctrl, "speed-down.bin", 256, () => host.ControllerFiles!.SendFiles(new[] { Big("speed-down.bin", 256) }));
+                    double up = Timed(host, ctrl, "speed-up.bin", 256, () => ctrl.Files!.SendFiles(new[] { Big("speed-up.bin", 256) }));
+                    return down > 50 && up > 50 ? "256 MB from the host at " + down.ToString("0") + " MB/s, to it at " + up.ToString("0") + " MB/s" : "FAIL: only " + down.ToString("0") + " and " + up.ToString("0") + " MB/s";
+                });
+
                 Scenario("copying something new while 256 MB is still going", 120, () =>
                 {
                     string big = Big("replaced.bin", 256), small = Big("replacement.bin", 1);
                     var results = new List<FileChannel.Transfer>();
                     ctrl.TransferProgress += t => { if (t.Finished) lock (results) results.Add(t); };
+                    var hostResults = new List<FileChannel.Transfer>();
+                    host.TransferProgress += t => { if (t.Finished) lock (hostResults) hostResults.Add(t); };
                     string[]? landed = null;
                     host.ClipboardFilesReceived += p => landed = p;
+                    host.ControllerFiles!.TestPause(1500); // the receiving side holds the first copy up, so it is surely still going
                     var first = Task.Run(() => ctrl.Files!.SendFiles(new[] { big }));
                     Thread.Sleep(300);
                     ctrl.Files!.SendFiles(new[] { small });
@@ -224,7 +256,9 @@ namespace TailRemote
                     for (int i = 0; i < 300 && landed == null; i++) Thread.Sleep(20);
                     bool replaced = landed != null && Path.GetFileName(landed[0]) == "replacement.bin" && Same(small, landed[0]);
                     bool stopped = results.Any(r => r.Failed && r.What == "replaced.bin");
-                    return replaced && stopped ? "the old one stopped, the new one arrived" : "FAIL: replaced " + replaced + ", old one stopped " + stopped;
+                    Thread.Sleep(300);
+                    bool hostAgrees = hostResults.Any(r => r.Failed && r.Cancelled && r.What == "replaced.bin") && results.Any(r => r.Cancelled && r.What == "replaced.bin");
+                    return replaced && stopped && hostAgrees ? "the old one stopped (both sides said so), the new one arrived" : "FAIL: replaced " + replaced + ", sender said stopped " + stopped + ", receiver said stopped " + hostAgrees;
                 });
 
                 Scenario("a file another program has locked", 30, () =>
@@ -295,29 +329,35 @@ namespace TailRemote
                     return !escaped && acceptedEvil == null && landed != null ? "every escape was refused, and normal copies still work" : "FAIL: escaped " + escaped + ", accepted " + acceptedEvil;
                 });
 
-                Scenario("sharing turned off: nothing may arrive", 30, () =>
+                Scenario("Send files: into Downloads, never over what is there, and the right kind of transfer", 60, () =>
                 {
-                    string? text = null;
-                    string[]? files = null;
-                    ctrl.ClipboardReceived += t => text = t;
-                    ctrl.ClipboardFilesReceived += p => files = p;
-                    ctrl.SetClipboardSharing(false);
-                    Thread.Sleep(300);
-                    host.SendClipboard("should never arrive");
-                    host.SendClipboard(new string('z', 100_000));
-                    host.SendClipboardFiles(new[] { Big("never.bin", 1) });
-                    Thread.Sleep(2000);
-                    bool quiet = text == null && files == null;
-                    ctrl.SetClipboardSharing(true);
-                    Thread.Sleep(300);
-                    host.SendClipboard("now it should");
-                    for (int i = 0; i < 200 && text == null; i++) Thread.Sleep(20);
-                    return quiet && text == "now it should" ? "nothing arrived while off; it worked again when back on" : "FAIL: while off text " + (text != null) + ", files " + (files != null);
+                    string file = Big("report.bin", 2);
+                    var ends = new List<FileChannel.Transfer>();
+                    Action<FileChannel.Transfer> note = t => { if (t.Finished) lock (ends) ends.Add(t); };
+                    ctrl.TransferProgress += note;
+                    host.TransferProgress += note;
+                    for (int round = 0; round < 2; round++)
+                    {
+                        int before = ends.Count;
+                        host.ControllerFiles!.SendFiles(new[] { file }, toClipboard: false);
+                        for (int i = 0; i < 300 && ends.Count < before + 2; i++) Thread.Sleep(20);
+                    }
+                    ctrl.Files!.SendText(new string('q', 50_000)); // clipboard text, the long way
+                    for (int i = 0; i < 300 && ends.Count < 6; i++) Thread.Sleep(20);
+                    ctrl.TransferProgress -= note;
+                    host.TransferProgress -= note;
+                    bool both = File.Exists(Path.Combine(FileChannel.Downloads, "report.bin")) && File.Exists(Path.Combine(FileChannel.Downloads, "report (2).bin"))
+                        && Same(file, Path.Combine(FileChannel.Downloads, "report (2).bin"));
+                    bool kinds = ends.Where(t => t.What == "report.bin").All(t => !t.Clipboard) && ends.Where(t => t.What == "clipboard text").All(t => t.Clipboard)
+                        && ends.Count(t => t.What == "clipboard text") == 2;
+                    return both && kinds ? "both copies kept (report, report (2)), and files and clipboard each told apart" : "FAIL: both copies " + both + ", kinds right " + kinds + " (" + ends.Count + " ends)";
                 });
 
                 Scenario("the connection dying in the middle of 256 MB", 60, () =>
                 {
                     string big = Big("dies.bin", 256);
+                    var hostDied = new List<FileChannel.Transfer>();
+                    host.TransferProgress += t => { if (t.Finished && t.What == "dies.bin") lock (hostDied) hostDied.Add(t); };
                     var c2 = Connect(Password); // a second controller, to be cut off
                     for (int i = 0; i < 100 && c2.Files == null; i++) Thread.Sleep(50);
                     var send = Task.Run(() => c2.Files!.SendFiles(new[] { big }));
@@ -326,7 +366,8 @@ namespace TailRemote
                     send.Wait(10_000);
                     Thread.Sleep(1500);
                     var partial = Directory.Exists(FileChannel.Staging) ? Directory.EnumerateFiles(FileChannel.Staging, "dies.bin", SearchOption.AllDirectories).ToList() : new List<string>();
-                    return partial.Count == 0 ? "the half-arrived file was thrown away, nothing left behind" : "FAIL: a partial file was left: " + partial[0];
+                    bool receiverSaid = hostDied.Any(r => r.Failed);
+                    return partial.Count == 0 && receiverSaid ? "the receiving PC said it failed too, and threw the half-arrived file away" : "FAIL: partial left " + partial.Count + ", receiver said failed " + receiverSaid;
                 });
             }
 
@@ -374,6 +415,29 @@ namespace TailRemote
             Console.WriteLine(text);
             try { Directory.Delete(Root, true); } catch { }
             return _failures == 0 ? 0 : 1;
+        }
+
+        /// <summary>Runs a transfer and returns how each side said it ended (waits up to 60 s for both).</summary>
+        private static (FileChannel.Transfer? Host, FileChannel.Transfer? Client) BothSay(Host host, Client ctrl, string what, Action run)
+        {
+            FileChannel.Transfer? h = null, c = null;
+            Action<FileChannel.Transfer> onHost = t => { if (t.Finished && t.What == what) h = t; };
+            Action<FileChannel.Transfer> onClient = t => { if (t.Finished && t.What == what) c = t; };
+            host.TransferProgress += onHost;
+            ctrl.TransferProgress += onClient;
+            run();
+            for (int i = 0; i < 3000 && (h == null || c == null); i++) Thread.Sleep(20);
+            host.TransferProgress -= onHost;
+            ctrl.TransferProgress -= onClient;
+            return (h, c);
+        }
+
+        /// <summary>MB a second for a transfer, from start until the receiving side says it is done.</summary>
+        private static double Timed(Host host, Client ctrl, string what, int mb, Action run)
+        {
+            var clock = Stopwatch.StartNew();
+            var (h, c) = BothSay(host, ctrl, what, run);
+            return h?.Failed == false && c?.Failed == false ? mb / clock.Elapsed.TotalSeconds : 0;
         }
 
         private static Host NewHost() => new(Port, Password, ListenPassword, m => { lock (Log) Log.Add(m); });

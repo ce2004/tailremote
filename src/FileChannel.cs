@@ -32,7 +32,7 @@ namespace TailRemote
         private const byte Cancel = 0x53;     // the batch was stopped: throw away what came
         private const byte BatchStart = 0x54; // u8 kind, u32 id, u32 entries, u64 total bytes
         private const byte BatchEnd = 0x55;   // u32 id: everything arrived
-        private const byte KindFiles = 1, KindText = 2;
+        private const byte KindFiles = 1, KindText = 2, KindDownloads = 3; // clipboard files, clipboard text, Send files
         private const int ChunkSize = 256 * 1024; // small enough that pacing is smooth, big enough to be fast
 
         /// <summary>The most text a clipboard may carry: 512 MB.</summary>
@@ -63,6 +63,10 @@ namespace TailRemote
         public sealed class Transfer
         {
             public bool Outgoing, Finished, Failed;
+            /// <summary>For the clipboard (Send clipboard), not Send files.</summary>
+            public bool Clipboard;
+            /// <summary>Stopped on purpose (Stop, or something newer sent), not a real failure.</summary>
+            public bool Cancelled;
             public string What = "";
             public long Done, Total;
             public double BytesPerSecond;
@@ -80,6 +84,12 @@ namespace TailRemote
         {
             _tcp = tcp;
             _tcp.NoDelay = true;
+            // No timeouts: a transfer may pause (a slow disk, a Wi-Fi gap) and carry on. The host's
+            // login set a 5 second one on this socket, which made the sender give up and say "failed"
+            // while the other PC still waited, saying "receiving". The main connection's heartbeat
+            // decides whether the other PC is gone, and closes this one with it.
+            _tcp.SendTimeout = 0;
+            _tcp.ReceiveTimeout = 0;
             _stream = tcp.GetStream();
             _stream.ReadTimeout = Timeout.Infinite;
             _link = link;
@@ -102,8 +112,16 @@ namespace TailRemote
 
         // ---- Sending ----
 
-        /// <summary>Sends copied files and folders. Blocking: run it off the window's thread. Replaces any batch still going.</summary>
-        public void SendFiles(IReadOnlyList<string> items)
+        /// <summary>Where Send files puts what arrives: Downloads\TailRemote.</summary>
+        public static string Downloads => DownloadsOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "TailRemote");
+        public static string? DownloadsOverride;
+
+        /// <summary>
+        /// Sends files and folders. toClipboard: onto the other PC's clipboard (Send clipboard), ready for
+        /// Control V; otherwise into its Downloads\TailRemote (Send files). Blocking: run it off the
+        /// window's thread. Replaces any batch still going.
+        /// </summary>
+        public void SendFiles(IReadOnlyList<string> items, bool toClipboard = true)
         {
             var entries = new List<(string Rel, string Full, long Length)>();
             foreach (string item in items)
@@ -120,7 +138,7 @@ namespace TailRemote
             if (entries.Count == 0) return;
             int files = entries.Count(e => e.Length >= 0);
             string what = items.Count == 1 ? Path.GetFileName(items[0].TrimEnd('\\', '/')) : items.Count + " items";
-            SendBatch(KindFiles, what, entries.Select(e => (e.Rel, (Func<Stream>?)(e.Length < 0 ? null : () => OpenRead(e.Full)), e.Length)).ToList());
+            SendBatch(toClipboard ? KindFiles : KindDownloads, what, entries.Select(e => (e.Rel, (Func<Stream>?)(e.Length < 0 ? null : () => OpenRead(e.Full)), e.Length)).ToList());
         }
 
         /// <summary>Sends clipboard text too large for the keyboard connection. Blocking. Replaces any batch still going.</summary>
@@ -155,7 +173,7 @@ namespace TailRemote
                 DiagLog.Write("files: batch " + what + " started");
                 if (mine.IsCancellationRequested || _closed) return;
                 _outgoing = true;
-                var t = new Transfer { Outgoing = true, What = what, Total = entries.Sum(e => Math.Max(0, e.Length)) };
+                var t = new Transfer { Outgoing = true, What = what, Total = entries.Sum(e => Math.Max(0, e.Length)), Clipboard = kind != KindDownloads };
                 // Plain messages: each is encrypted only as it is sent, on this one thread. Every
                 // frame's number must follow the last; a frame encrypted and then dropped (the old
                 // batch being replaced) broke that, and the other PC closed the file connection.
@@ -208,6 +226,7 @@ namespace TailRemote
                     t.Finished = t.Failed = true;
                     t.Result = "The connection dropped while sending " + what + ".";
                     Progress?.Invoke(t);
+                    Dispose(); // broken mid-frame: close it, so the other PC knows at once instead of waiting
                     return;
                 }
                 DiagLog.Write("files: batch " + what + " all frames written, joining the reader");
@@ -216,7 +235,7 @@ namespace TailRemote
                 _outgoing = false;
                 t.BytesPerSecond = t.Done / Math.Max(0.001, clock.Elapsed.TotalSeconds);
                 t.Finished = true;
-                if (failed is OperationCanceledException) { t.Failed = true; t.Result = "Stopped sending " + what + "."; }
+                if (failed is OperationCanceledException) { t.Failed = t.Cancelled = true; t.Result = "Stopped sending " + what + "."; }
                 else if (failed != null) { t.Failed = true; t.Result = "Could not send " + what + ": " + failed.Message; }
                 else t.Result = "Sent " + what + ", at " + Speed(t.BytesPerSecond) + ".";
                 Progress?.Invoke(t);
@@ -278,6 +297,11 @@ namespace TailRemote
 
         // ---- Receiving ----
 
+        private long _pauseUntil;
+
+        /// <summary>Test only (--chaostest): stops reading the network for a while, like a stalled PC.</summary>
+        internal void TestPause(int ms) => Interlocked.Exchange(ref _pauseUntil, Environment.TickCount64 + ms);
+
         /// <summary>This thread only takes frames off the network and decrypts them; another writes them to disk.</summary>
         private void ReceiveLoop()
         {
@@ -288,6 +312,7 @@ namespace TailRemote
             {
                 while (!_closed)
                 {
+                    while (Environment.TickCount64 < Interlocked.Read(ref _pauseUntil)) Thread.Sleep(20); // test only
                     byte[] m = _link.Receive(_stream);
                     if (m.Length > 0) queue.Add(m);
                 }
@@ -312,13 +337,19 @@ namespace TailRemote
             long expected = 0;
             IncrementalHash? sha = null;
             var tops = new List<string>();
+            var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             bool broken = false;
 
             void Abandon(string? why)
             {
                 try { file?.Dispose(); } catch { }
                 file = null; sha?.Dispose(); sha = null;
-                if (folder != null) { try { Directory.Delete(folder, true); } catch { } }
+                if (folder != null)
+                {
+                    // The holding folder is this batch's own; in Downloads, only what this batch made.
+                    if (kind == KindDownloads) foreach (string top in tops) { try { var p = Path.Combine(folder, top); if (Directory.Exists(p)) Directory.Delete(p, true); else File.Delete(p); } catch { } }
+                    else try { Directory.Delete(folder, true); } catch { }
+                }
                 if (kind != 0 && why != null)
                 {
                     t.Finished = t.Failed = true;
@@ -328,8 +359,15 @@ namespace TailRemote
                 folder = null; kind = 0; _incoming = false; broken = false;
             }
 
-            foreach (byte[] m in queue.GetConsumingEnumerable())
+            while (!queue.IsCompleted)
             {
+                // Nothing at all for 30 seconds in the middle of something: say so, rather than
+                // claim to be receiving forever.
+                if (!queue.TryTake(out byte[]? m, 30_000) || m == null)
+                {
+                    if (kind != 0 && !queue.IsCompleted) Abandon("Nothing came from the other PC for 30 seconds, so " + t.What + " was stopped. Copy it again.");
+                    continue;
+                }
                 try
                 {
                     switch (m[0])
@@ -337,12 +375,18 @@ namespace TailRemote
                         case BatchStart when m.Length >= 18:
                             Abandon(null);
                             kind = m[1];
-                            t = new Transfer { Outgoing = false, Total = BitConverter.ToInt64(m, 10), What = kind == KindText ? "clipboard text" : "files" };
+                            t = new Transfer { Outgoing = false, Total = BitConverter.ToInt64(m, 10), What = kind == KindText ? "clipboard text" : "files", Clipboard = kind != KindDownloads };
+                            renamed.Clear();
                             if (kind == KindText && t.Total > MaxText) { broken = true; t.Result = "The other PC copied more text than TailRemote can carry (512 MB)."; break; }
                             if (kind == KindFiles)
                             {
                                 CleanStaging();
                                 folder = Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+                                Directory.CreateDirectory(folder);
+                            }
+                            else if (kind == KindDownloads)
+                            {
+                                folder = Downloads;
                                 Directory.CreateDirectory(folder);
                             }
                             tops.Clear();
@@ -354,8 +398,16 @@ namespace TailRemote
                             expected = BitConverter.ToInt64(m, 1);
                             rel = Encoding.UTF8.GetString(m, 9, m.Length - 9);
                             if (kind == KindText) { file = new MemoryStream((int)Math.Min(expected, int.MaxValue)); sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256); break; }
-                            string path = SafePath(folder!, rel) ?? throw new InvalidDataException("a path that leaves the folder");
+                            if (SafePath(folder!, rel) == null) throw new InvalidDataException("a path that leaves the folder");
                             string top = rel.Split('\\', '/')[0];
+                            if (kind == KindDownloads)
+                            {
+                                // Never over anything already in Downloads: "name (2).ext" and so on.
+                                if (!renamed.TryGetValue(top, out var fresh)) renamed[top] = fresh = Unique(folder!, top);
+                                rel = fresh + rel[top.Length..];
+                                top = fresh;
+                            }
+                            string path = SafePath(folder!, rel)!;
                             if (!tops.Contains(top)) tops.Add(top);
                             if (t.What == "files") t.What = top;
                             else if (tops.Count > 1) t.What = tops.Count + " items";
@@ -395,15 +447,21 @@ namespace TailRemote
                             if (kind == KindFiles)
                             {
                                 var paths = tops.Select(x => Path.Combine(folder!, x)).ToArray();
-                                t.Result = "Received " + t.What + ", at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
+                                t.Result = "The other PC sent " + t.What + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
                                 Progress?.Invoke(t);
                                 FilesReceived?.Invoke(paths);
+                            }
+                            else if (kind == KindDownloads)
+                            {
+                                t.Result = "Received " + t.What + ", at " + Speed(t.BytesPerSecond) + ". It is in Downloads, TailRemote.";
+                                Progress?.Invoke(t);
                             }
                             else { t.Result = "Received the clipboard text."; Progress?.Invoke(t); }
                             folder = null; kind = 0; _incoming = false;
                             break;
                         case Cancel:
                             DiagLog.Write("files: the other PC cancelled " + t.What);
+                            t.Cancelled = true;
                             Abandon(kind != 0 ? "The other PC stopped sending " + t.What + "." : null);
                             break;
                     }
@@ -415,8 +473,22 @@ namespace TailRemote
                     Abandon("Could not receive " + t.What + ": " + e.Message);
                 }
             }
-            if (kind != 0 && !_closed) Abandon("The connection dropped while receiving " + t.What + ".");
+            // Cut off half-way, however the connection ended (even when this side closed it because
+            // the other PC vanished): always said, so neither PC claims it is still going.
+            if (kind != 0) Abandon("The connection to the other PC closed while receiving " + t.What + ".");
             else Abandon(null);
+        }
+
+        /// <summary>A name that is not taken in the folder yet: name, name (2), name (3)...</summary>
+        private static string Unique(string folder, string name)
+        {
+            if (!File.Exists(Path.Combine(folder, name)) && !Directory.Exists(Path.Combine(folder, name))) return name;
+            string stem = Path.GetFileNameWithoutExtension(name), ext = Path.GetExtension(name);
+            for (int i = 2; ; i++)
+            {
+                string n = stem + " (" + i + ")" + ext;
+                if (!File.Exists(Path.Combine(folder, n)) && !Directory.Exists(Path.Combine(folder, n))) return n;
+            }
         }
 
         /// <summary>A path inside the batch folder, or null if it would leave it.</summary>
