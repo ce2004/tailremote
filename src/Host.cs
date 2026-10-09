@@ -60,6 +60,7 @@ namespace TailRemote
             public volatile IPEndPoint? AudioTo;
             public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
             public readonly long Since = Environment.TickCount64;
+            public long LastMessage = Environment.TickCount64; // anything at all from it (it pings several times a second while holding keys)
             public bool WarnedNoUdp;
             public readonly HashSet<(ushort Vk, bool Ext)> Held = new();
             public readonly byte[] Audio = new byte[5 + 1 + Protocol.MaxOpusBytes + SecureLink.TagSize];
@@ -77,6 +78,7 @@ namespace TailRemote
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword);
             _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
             new Thread(LogLoop) { IsBackground = true, Name = "TailRemote host log" }.Start();
+            new Thread(KeySafety) { IsBackground = true, Name = "TailRemote key safety" }.Start();
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
             _listener.Server.DualMode = true;
@@ -481,6 +483,14 @@ namespace TailRemote
                     if (_stop) { End(s, null); return; }
                     if (role == Protocol.RoleControl)
                     {
+                        // The same PC coming back after its connection broke: its old session, silent for
+                        // a while now, is let go at once (keys released), not after its 10 seconds.
+                        long now = Environment.TickCount64;
+                        foreach (var old in _controllers.Where(c => c.Address.Equals(remote) && now - Volatile.Read(ref c.LastMessage) > 3000).ToList())
+                        {
+                            _controllers.Remove(old);
+                            End(old, null);
+                        }
                         if (_controllers.Count >= MaxControllers)
                         {
                             End(s, "There are already " + MaxControllers + " PCs controlling this one.");
@@ -536,6 +546,7 @@ namespace TailRemote
             while (!_stop)
             {
                 byte[] m = s.Link.Receive(s.Stream);
+                Volatile.Write(ref s.LastMessage, Environment.TickCount64);
                 if (m.Length == 0) continue;
                 switch (m[0])
                 {
@@ -582,6 +593,30 @@ namespace TailRemote
                         s.Ready = true;
                         break;
                     // Anything else is from a newer version: ignore it.
+                }
+            }
+        }
+
+        /// <summary>
+        /// Never a stuck key. A controller holding keys tells this PC it is still there several times a
+        /// second; if it goes silent for 1.5 seconds (the connection broke, or is badly delayed) its keys
+        /// are let go at once, without waiting the 10 seconds it takes to call the connection dead.
+        /// </summary>
+        private void KeySafety()
+        {
+            while (!_stop)
+            {
+                Thread.Sleep(250);
+                long now = Environment.TickCount64;
+                foreach (var s in AllSessions())
+                {
+                    bool holding;
+                    lock (s.Held) holding = s.Held.Count > 0;
+                    if (holding && now - Volatile.Read(ref s.LastMessage) > 1500)
+                    {
+                        ReleaseHeld(s);
+                        DiagLog.Write("host: " + s.Address + " went quiet while holding keys; let them go");
+                    }
                 }
             }
         }

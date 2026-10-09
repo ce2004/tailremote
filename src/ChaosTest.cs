@@ -534,6 +534,30 @@ namespace TailRemote
                         : "FAIL: " + got.Count + " of 10 got it; the host said " + hostSaid.Count + " results, wrong: " + string.Join(" | ", wrong);
                 });
 
+                Scenario("the connection going silent while a key is held: the host lets it go within 2 seconds (F24 only, recorded, never typed)", 30, () =>
+                {
+                    var pressed = new System.Collections.Concurrent.ConcurrentQueue<(ushort Vk, bool Up, long At)>();
+                    var clock = Stopwatch.StartNew();
+                    Native.KeySink = (vk, scan, up, ext) => { pressed.Enqueue((vk, up, clock.ElapsedMilliseconds)); return true; };
+                    var c5 = Connect(Password);
+                    try
+                    {
+                        const ushort F24 = 0x87; // does nothing on any PC
+                        Thread.Sleep(300);
+                        c5.SendKey(F24, 0, false, false); // held down...
+                        Thread.Sleep(1000);
+                        bool stillHeld = !pressed.Any(k => k.Up);
+                        long silentAt = clock.ElapsedMilliseconds;
+                        c5.TestSilent = true; // ...and then the connection goes quiet, never sending the release
+                        for (int i = 0; i < 200 && !pressed.Any(k => k.Up); i++) Thread.Sleep(20);
+                        var release = pressed.Where(k => k.Up && k.Vk == F24).Select(k => (long?)k.At).FirstOrDefault();
+                        return stillHeld && release is long at && at - silentAt < 2500
+                            ? "held while the connection was alive, and let go " + (at - silentAt) + " ms after it went quiet"
+                            : "FAIL: held while alive " + stillHeld + ", released " + (release is long a ? (a - silentAt) + " ms after going quiet" : "never");
+                    }
+                    finally { Native.KeySink = null; c5.Dispose(); }
+                });
+
                 Scenario("hosting as the service: keys go from the host to the agent in the session (F24 only, recorded, never typed)", 30, () =>
                 {
                     AgentLink.TestAnyOwner = true;

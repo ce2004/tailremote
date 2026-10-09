@@ -217,7 +217,7 @@ namespace TailRemote
             _titleTimer.Tick += (_, _) => UpdateTitle();
             var trayMenu = new ContextMenuStrip();
             trayMenu.Items.Add("&Open TailRemote", null, (_, _) => RestoreFromTray());
-            trayMenu.Items.Add("&Stop hosting and exit", null, (_, _) => { _reallyExit = true; RestoreFromTray(); Close(); });
+            _trayExit = (ToolStripMenuItem)trayMenu.Items.Add("&Stop hosting and exit", null, (_, _) => { _reallyExit = true; RestoreFromTray(); Close(); });
             _tray.ContextMenuStrip = trayMenu;
             _tray.Click += (_, e) => { if (e is not MouseEventArgs m || m.Button == MouseButtons.Left) RestoreFromTray(); };
             _retryTimer.Tick += (_, _) => { if (_client == null && !_connecting) Connect(quiet: true); };
@@ -1321,12 +1321,29 @@ namespace TailRemote
             Speech.Speak(line);
         }
 
-        /// <summary>While hosting, closing the window only hides it: hosting carries on from the notification area.</summary>
+        private ToolStripMenuItem? _trayExit;
+
+        /// <summary>
+        /// While hosting or connected, closing the window only hides it: hosting, or the connection and
+        /// its sound, carry on from the notification area.
+        /// </summary>
         private void HideToTray(bool announce)
         {
+            bool connected = _host == null && (_client != null || _reconnecting);
+            if (connected && _keys?.Remote == true)
+            {
+                // The keyboard comes back to this PC first: nothing is typed into a window you cannot see.
+                _quietModeChange = true;
+                _keys.Toggle();
+            }
+            if (_trayExit != null) _trayExit.Text = connected ? "&Disconnect and exit" : "&Stop hosting and exit";
+            _tray.Text = connected ? "TailRemote, connected" : "TailRemote, hosting";
             _tray.Visible = true;
             Hide();
-            if (announce) Speech.Speak("TailRemote is still hosting, in the notification area. Press Windows B to find it. Use its menu to stop hosting and exit.");
+            if (announce)
+                Speech.Speak(connected
+                    ? "TailRemote is still connected, and you still hear the other PC. It is in the notification area: press Windows B to find it. Use its menu to disconnect and exit."
+                    : "TailRemote is still hosting, in the notification area. Press Windows B to find it. Use its menu to stop hosting and exit.");
         }
 
         private void RestoreFromTray()
@@ -1339,7 +1356,7 @@ namespace TailRemote
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing && _host != null && !_reallyExit)
+            if (e.CloseReason == CloseReason.UserClosing && (_host != null || _client != null || _reconnecting) && !_reallyExit)
             {
                 e.Cancel = true;
                 HideToTray(announce: true);

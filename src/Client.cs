@@ -344,6 +344,8 @@ namespace TailRemote
         /// <summary>Test only (--chaostest): writes raw bytes into the connection, outside the encryption.</summary>
         internal void TestRaw(byte[] bytes) { try { _stream.Write(bytes); } catch { } }
         internal bool TestClosed => _closed;
+        /// <summary>Test only (--chaostest): sends nothing more, as if the connection had silently broken.</summary>
+        internal volatile bool TestSilent;
 
         private void Write(ReadOnlySpan<byte> message)
         {
@@ -373,6 +375,7 @@ namespace TailRemote
         {
             if (_closed) return;
             if (!up) Interlocked.Increment(ref _keysSent); // counted only: what is typed is never logged
+            lock (_down) { if (up) _down.Remove((vk, extended)); else _down.Add((vk, extended)); }
             Span<byte> f = stackalloc byte[6];
             f[0] = Protocol.Key;
             BitConverter.TryWriteBytes(f[1..], vk);
@@ -381,7 +384,15 @@ namespace TailRemote
             Write(f);
         }
 
-        public void ReleaseAll() => Write(stackalloc byte[] { Protocol.ReleaseAll });
+        public void ReleaseAll()
+        {
+            lock (_down) _down.Clear();
+            Write(stackalloc byte[] { Protocol.ReleaseAll });
+        }
+
+        // Keys held down on the other PC right now: while there are any, the heartbeat pings several
+        // times a second, so the other PC lets them go within 1.5 seconds if the connection breaks.
+        private readonly HashSet<(ushort Vk, bool Ext)> _down = new();
 
         /// <summary>How the sound is reduced right now, for the title; null at full quality.</summary>
         public string? ReducedSound => AudioQuality == 0 ? null : Protocol.OpusSteps[AudioQuality].Kbps + " kbit/s";
@@ -810,6 +821,7 @@ namespace TailRemote
             Volatile.Write(ref _lastUdpPong, _lastPong);
             while (!_closed)
             {
+                if (TestSilent) { Thread.Sleep(50); _lastPong = Environment.TickCount64; continue; }
                 long now = Environment.TickCount64;
                 if (now - _lastPong > 8000) { Close("Disconnected: the host stopped answering."); return; }
                 // The connection works but UDP gets no answer: no sound can come. Said once, plainly,
@@ -831,7 +843,9 @@ namespace TailRemote
                     BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
                     try { _udp.Send(hello, hello.Length, _hostUdp); } catch { }
                 }
-                if (now - lastPing >= 2000)
+                bool holding;
+                lock (_down) holding = _down.Count > 0;
+                if (now - lastPing >= (holding ? 300 : 2000))
                 {
                     lastPing = now;
                     ping[0] = Protocol.Ping;

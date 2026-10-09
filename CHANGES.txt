@@ -1,3 +1,7 @@
+1.8.25
+Bug fixed: if the connection broke while you were holding a key, that key stayed held down on the other PC until you reconnected and pressed it again. While you hold keys, your PC now tells the other PC several times a second that it is still there; if that stops for a second and a half, the other PC lets every held key go. Reconnecting also clears the broken connection's keys at once.
+New feature: closing the window while you are connected no longer disconnects. TailRemote goes to the notification area, stays connected, and you keep hearing the other PC. Your keyboard comes back to this PC first. Press Windows B to find it again; its menu has Disconnect and exit.
+
 1.8.24
 Changed: a transfer is never thrown away when the connection breaks or you press Disconnect. Whatever has arrived stays where it is, the transfer waits (the Files line says so), and it carries on from where it was as soon as you are connected to that PC again, however long that takes. Only Stop the file transfer ends it.
 Changed: if a transfer is stopped part-way, everything that arrived is kept. Files that arrived whole stay as they are, and a file that only partly arrived is kept with (incomplete) in its name. The Files line says how many and where.
