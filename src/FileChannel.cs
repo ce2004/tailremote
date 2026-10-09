@@ -122,6 +122,8 @@ namespace TailRemote
             public readonly AutoResetEvent Wake = new(false);
             public long LastIn = Now, LastOut = Now;
             public volatile bool Dead;
+            // Reused for every frame (each used by only one thread): never a new megabyte per piece.
+            public byte[]? InBuf, OutFrame, PieceBuf;
         }
 
         private readonly object _lanesGate = new();
@@ -278,7 +280,18 @@ namespace TailRemote
                 if (_out is Out o)
                 {
                     List<Lane> stalled;
-                    lock (o.Gate) stalled = o.LaneUnacked.Where(kv => kv.Value > 0 && now - o.LaneHeard[kv.Key] > StallMs).Select(kv => kv.Key).ToList();
+                    lock (o.Gate)
+                    {
+                        stalled = o.LaneUnacked.Where(kv => kv.Value > 0 && now - o.LaneHeard[kv.Key] > StallMs).Select(kv => kv.Key).ToList();
+                        // A safety net: a piece left on a lane that is gone is sent again, never waited for.
+                        foreach (var p in o.InFlight.Values.Where(p => p.On == null || p.On.Dead).ToList())
+                        {
+                            o.InFlight.Remove((p.Entry, p.Offset));
+                            if (p.On != null) { o.LaneUnacked.Remove(p.On); o.LaneHeard.Remove(p.On); }
+                            p.On = null;
+                            o.Retry.Enqueue(p);
+                        }
+                    }
                     foreach (var l in stalled) { DiagLog.Write("files: a lane stalled; closing it, its pieces go again"); Kill(l); }
                 }
                 if (_in is In b && now - b.LastActivity > GiveUpMs)
@@ -296,7 +309,7 @@ namespace TailRemote
         /// </summary>
         private static void GiveBackMemory(int entries, long bytes)
         {
-            if (entries < 10_000 && bytes < (256L << 20)) return;
+            if (entries < 1000 && bytes < (32L << 20)) return; // a small one used next to nothing
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 Thread.Sleep(1000); // the window has shown the result; nothing is waiting on this
@@ -322,12 +335,14 @@ namespace TailRemote
             if (lane.Control.TryDequeue(out var c)) { Send(lane, c); return true; }
             if (_out is Out o && NextPiece(o, lane) is PieceRef p) { SendPiece(o, lane, p); return true; }
             if (Now - lane.LastOut >= PingMs) Send(lane, new[] { Ping });
+            // Nothing going: the big buffers go too (16 lanes would otherwise hold tens of MB for nothing).
+            if (_out == null && (lane.PieceBuf?.Length > 64 << 10 || lane.OutFrame?.Length > 64 << 10)) { lane.PieceBuf = null; lane.OutFrame = null; }
             return false;
         }
 
-        private static void Send(Lane lane, byte[] m)
+        private static void Send(Lane lane, ReadOnlySpan<byte> m)
         {
-            lane.Link.Send(lane.Stream, m);
+            lane.Link.Send(lane.Stream, m, ref lane.OutFrame);
             lane.LastOut = Now;
         }
 
@@ -344,6 +359,9 @@ namespace TailRemote
 
         /// <summary>Test only (--chaostest): cuts every lane at once, as a broken connection would.</summary>
         internal void TestCutLanes() { foreach (var l in _lanes) Kill(l); }
+
+        /// <summary>Test only: the most files being sent side by side at once.</summary>
+        internal int TestMostActive;
 
         /// <summary>Test only: how many lanes are open.</summary>
         internal int TestLanes => _lanes.Length;
@@ -365,13 +383,21 @@ namespace TailRemote
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         private void ReceiveOne(Lane lane)
         {
-            byte[] m = lane.Link.Receive(lane.Stream);
+            int n = lane.Link.Receive(lane.Stream, ref lane.InBuf);
             lane.LastIn = Now;
-            if (m.Length == 0) return;
+            if (n == 0) return;
+            byte[] buf = lane.InBuf!;
+            // A piece is written straight from the lane's own buffer; anything else is small, and copied.
+            if (buf[0] == Piece)
+            {
+                if (n > 17) OnPiece(lane, buf, n);
+                if (_in == null && buf.Length > 64 << 10) lane.InBuf = null; // that was the last of it: no big buffer kept
+                return;
+            }
+            byte[] m = buf.AsSpan(0, n).ToArray();
             switch (m[0])
             {
                 case Offer when m.Length >= 22: OnOffer(lane, m); break;
-                case Piece when m.Length > 17: OnPiece(lane, m); break;
                 case Ready when m.Length == 5: OnReady(BitConverter.ToUInt32(m, 1)); break;
                 case Got when m.Length == 21: OnGot(lane, m); break;
                 case Finished when m.Length >= 6:
@@ -714,6 +740,10 @@ namespace TailRemote
             lock (o.Gate)
             {
                 if (o.Ended) return null; // checked again in here: an ended batch lets go of its list of files
+                // A lane being cut sends its unconfirmed pieces back under this lock, after marking itself
+                // dead. Checked here too: a piece taken by a lane already cut was never sent again, and
+                // the whole transfer waited a minute and gave up.
+                if (lane.Dead) return null;
                 o.LaneUnacked.TryGetValue(lane, out long unacked);
                 if (unacked > 0 && unacked + size > window) return null;
                 PieceRef p;
@@ -742,6 +772,7 @@ namespace TailRemote
                     o.Next[e] += n;
                     if (o.Next[e] < entries[e].Length) o.Open.Add(e); else o.Open.Remove(e);
                     o.Active.Add(e);
+                    if (o.Active.Count > TestMostActive) TestMostActive = o.Active.Count;
                 }
                 p.On = lane;
                 if (unacked == 0) o.LaneHeard[lane] = Now;
@@ -753,12 +784,14 @@ namespace TailRemote
 
         private void SendPiece(Out o, Lane lane, PieceRef p)
         {
-            byte[] m = new byte[17 + p.Length];
+            int size = 17 + p.Length;
+            if (lane.PieceBuf == null || lane.PieceBuf.Length < size) lane.PieceBuf = new byte[Math.Max(size, 64 << 10)];
+            byte[] m = lane.PieceBuf; // the lane's own, reused for every piece
             m[0] = Piece;
             BitConverter.TryWriteBytes(m.AsSpan(1), o.Id);
             BitConverter.TryWriteBytes(m.AsSpan(5), p.Entry);
             BitConverter.TryWriteBytes(m.AsSpan(9), p.Offset);
-            try { o.Read(p.Entry, p.Offset, m.AsSpan(17)); }
+            try { o.Read(p.Entry, p.Offset, m.AsSpan(17, p.Length)); }
             catch (Exception e)
             {
                 if (!o.Ended) EndOut(o, EndedBadly, "Could not send " + o.What + ": " + e.Message, tell: true);
@@ -766,13 +799,13 @@ namespace TailRemote
             }
             // Paced: never faster than the controlling PC says the sound can bear. Short waits, so
             // a new rate or a stop is seen at once.
-            for (int wait; (wait = PaceWait(m.Length)) > 0;)
+            for (int wait; (wait = PaceWait(size)) > 0;)
             {
                 if (o.Ended || lane.Dead) return;
                 Thread.Sleep(wait);
             }
             if (o.Ended) return;
-            Send(lane, m);
+            Send(lane, m.AsSpan(0, size));
         }
 
         private void OnGot(Lane lane, byte[] m)
@@ -991,12 +1024,13 @@ namespace TailRemote
             b.Clock.Start();
         }
 
-        private void OnPiece(Lane lane, byte[] m)
+        /// <summary>A piece, in the lane's own buffer (m, length bytes): written, then confirmed. Nothing may keep m.</summary>
+        private void OnPiece(Lane lane, byte[] m, int length)
         {
             uint id = BitConverter.ToUInt32(m, 1);
             int e = BitConverter.ToInt32(m, 5);
             long offset = BitConverter.ToInt64(m, 9);
-            int n = m.Length - 17;
+            int n = length - 17;
             if (_in is not In b || b.Id != id)
             {
                 lock (_inGate)
@@ -1037,8 +1071,8 @@ namespace TailRemote
                 }
                 if (!repeat)
                 {
-                    if (b.Text != null) m.AsSpan(17).CopyTo(b.Text.AsSpan((int)offset));
-                    else RandomAccess.Write(h!, m.AsSpan(17), offset);
+                    if (b.Text != null) m.AsSpan(17, n).CopyTo(b.Text.AsSpan((int)offset));
+                    else RandomAccess.Write(h!, m.AsSpan(17, n), offset);
                 }
             }
             catch (Exception ex)

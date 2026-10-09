@@ -94,6 +94,44 @@ namespace TailRemote
             return frame;
         }
 
+        /// <summary>
+        /// Send, reusing the caller's frame buffer (grown when needed) instead of a new one per
+        /// message. For file lanes: a new megabyte for every piece, sent and received, left .NET
+        /// holding hundreds of megabytes after a big transfer.
+        /// </summary>
+        public void Send(Stream s, ReadOnlySpan<byte> message, ref byte[]? frame)
+        {
+            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
+            int size = HeadBytes + message.Length + TagSize;
+            if (frame == null || frame.Length < size) frame = new byte[Math.Max(size, 64 << 10)];
+            BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);
+            BitConverter.TryWriteBytes(frame.AsSpan(4, 4), ~message.Length);
+            Span<byte> nonce = stackalloc byte[12];
+            lock (_sendLock)
+            {
+                CounterNonce(nonce, _sendCounter++);
+                _send.Encrypt(nonce, message, frame.AsSpan(HeadBytes, message.Length), frame.AsSpan(HeadBytes + message.Length, TagSize));
+                s.Write(frame, 0, size);
+            }
+        }
+
+        /// <summary>Reads and decrypts one message into the caller's buffer (grown when needed), in place; returns its length. Only one thread may receive.</summary>
+        public int Receive(Stream s, ref byte[]? buffer)
+        {
+            Protocol.ReadExactly(s, _recvHead);
+            int len = BitConverter.ToInt32(_recvHead);
+            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > MaxMessage)
+                throw new InvalidOperationException("The connection damaged data on the way, so it reconnected.");
+            if (buffer == null || buffer.Length < len + TagSize) buffer = new byte[Math.Max(len + TagSize, 64 << 10)];
+            Protocol.ReadExactly(s, buffer.AsSpan(0, len + TagSize));
+            Span<byte> nonce = stackalloc byte[12];
+            CounterNonce(nonce, _recvCounter++);
+            var body = buffer.AsSpan(0, len);
+            try { _recv.Decrypt(nonce, body, buffer.AsSpan(len, TagSize), body); }
+            catch (CryptographicException) { throw new InvalidOperationException("The connection damaged data on the way, so it reconnected."); }
+            return len;
+        }
+
         /// <summary>Reads and decrypts one message. Only one thread may receive.</summary>
         public byte[] Receive(Stream s)
         {

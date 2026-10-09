@@ -226,6 +226,31 @@ namespace TailRemote
                     return count == 100_000 && privateAfter < privateBefore + 150 ? line : "FAIL: " + line;
                 });
 
+                if (Only != null) Scenario("a 500 MB folder of big files: memory given back afterwards (only when asked for by name)", 600, () =>
+                {
+                    string src = Path.Combine(Root, "src", "BigFolder");
+                    Directory.CreateDirectory(src);
+                    for (int i = 0; i < 5; i++) File.Move(Big("big" + i + ".bin", 100), Path.Combine(src, "big" + i + ".bin"));
+                    GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                    long before = Process.GetCurrentProcess().PrivateMemorySize64 >> 20, peak = 0;
+                    string[]? landed = null;
+                    host.ClipboardFilesReceived += p => landed = p;
+                    var clock = Stopwatch.StartNew();
+                    var send = Task.Run(() => ctrl.Files!.SendFiles(new[] { src }));
+                    while ((!send.IsCompleted || landed == null) && clock.Elapsed.TotalSeconds < 550)
+                    {
+                        Thread.Sleep(200);
+                        peak = Math.Max(peak, Process.GetCurrentProcess().PrivateMemorySize64 >> 20);
+                    }
+                    double secs = clock.Elapsed.TotalSeconds;
+                    Thread.Sleep(4000);
+                    var me = Process.GetCurrentProcess();
+                    me.Refresh();
+                    long after = me.PrivateMemorySize64 >> 20;
+                    string line = "500 MB in " + secs.ToString("0.0") + " s; private memory " + before + " MB before, " + peak + " MB at the peak, " + after + " MB after";
+                    return landed != null && after < before + 60 ? line : "FAIL: " + line;
+                });
+
                 Scenario("64 MB each way at the same moment", 120, () =>
                 {
                     string a = Big("both-a.bin", 64), b = Big("both-b.bin", 64);
@@ -310,7 +335,12 @@ namespace TailRemote
 
                 Scenario("50 MB of clipboard text", 60, () =>
                 {
-                    string text = string.Concat(Enumerable.Repeat("Fifty megabytes of clipboard, every character checked. ", 950_000));
+                    // Built without string.Concat, which leaves 100+ MB buffers in .NET's shared pool.
+                    var chars = new char[52_250_000];
+                    const string line = "Fifty megabytes of clipboard, every character checked. ";
+                    for (int i = 0; i < chars.Length; i++) chars[i] = line[i % line.Length];
+                    string text = new string(chars);
+                    chars = null!;
                     string? got = null;
                     Action<string> took = t => got = t;
                     host.ClipboardReceived += took;
@@ -462,6 +492,7 @@ namespace TailRemote
                     double mbs = 320 / clock.Elapsed.TotalSeconds;
                     for (int i = 0; i < 250 && landed == null; i++) Thread.Sleep(20); // put on the clipboard just after it says it arrived
                     bool ok = landed != null && landed.Length == 10 && items.All(p => Same(p, Path.Combine(Path.GetDirectoryName(landed[0])!, Path.GetFileName(p))));
+                    together = Math.Max(together, ctrl.Files!.TestMostActive); // counted by the engine itself: a fast transfer can end between two progress reports
                     if (together < 2) return "FAIL: the files went one at a time (at most " + together + " moving at once)";
                     return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes, up to " + together + " files moving at once (" + togetherThere + " seen arriving at once)" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
                 });

@@ -1,3 +1,7 @@
+1.8.21
+Bug fixed: the PC that received a folder kept a lot of memory in use afterwards. Each connection now reuses one buffer for everything it sends and receives, instead of a new one for every piece, lets go of it when nothing is moving, and the memory goes back to Windows after any transfer of more than 1,000 files or 32 MB. In testing, sending and receiving 500 MB together peaked at 84 MB.
+Bug fixed: rarely, when the connection broke in the middle of a transfer, one piece could be lost for good, and the transfer stopped moving and gave up a minute later. That piece is now always sent again.
+
 1.8.20
 Bug fixed: sending files from the host with several PCs controlling it showed a muddle, such as 0 bytes sent, and never said whether every PC got them. The Files line now follows all of them together: Sending report.bin to 10 PCs, with a progress bar for each PC, then one line at the end, such as Sent report.bin to all 10 PCs, or which ones it could not reach and why.
 Bug fixed: when several PCs sent clipboard files to the host at once, one could clear another's files away before they had all arrived, and two PCs sending a file with the same name to Downloads at the same moment could end up writing into one file. Each now gets its own place and its own name.
