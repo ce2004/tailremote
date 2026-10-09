@@ -14,11 +14,11 @@ namespace TailRemote
     /// When the service hosts, the TailRemote window is not the host, yet it is the one
     /// running as the signed-in user, on their clipboard and in their files. This pipe joins
     /// the two: the window's Send the clipboard, Send files and Stop go out through the
-    /// agent's connection, and what the controlling PC sends (clipboard text, files, and how
+    /// service's connections, and what the controlling PC sends (clipboard text, files, and how
     /// transfers are going) comes to the window, which puts it on the clipboard exactly as
     /// when it hosts itself.
     ///
-    /// The agent runs as SYSTEM, so it opens files to send as the window's user (the pipe
+    /// The service runs as SYSTEM, so it opens files to send as the window's user (the pipe
     /// tells it who that is): nobody can send a file they could not open themselves.
     /// </summary>
     internal static class ServiceLink
@@ -80,9 +80,14 @@ namespace TailRemote
             private readonly Host _host;
             private readonly List<BlockingCollection<(byte, byte[])>> _windows = new();
 
-            public Server(Host host)
+            private readonly Func<uint> _session;
+
+            /// <summary>session: the session whose TailRemote window may link up (the one at the screen); this process's own if not given.</summary>
+            public Server(Host host, Func<uint>? session = null)
             {
                 _host = host;
+                uint mine = (uint)System.Diagnostics.Process.GetCurrentProcess().SessionId;
+                _session = session ?? (() => mine);
                 new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote service link" }.Start();
             }
 
@@ -111,7 +116,6 @@ namespace TailRemote
                 sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
                 // Owned by SYSTEM, which the window checks: nobody else can pose as the service.
                 using (var me = WindowsIdentity.GetCurrent()) if (me.IsSystem) sec.SetOwner(system);
-                int mySession = System.Diagnostics.Process.GetCurrentProcess().SessionId;
                 bool first = true, warned = false;
                 while (true)
                 {
@@ -126,7 +130,7 @@ namespace TailRemote
                         pipe.WaitForConnection();
                         // Only a window in this session (the one at the screen): never another account
                         // that is also signed in, which would otherwise hear what arrives for the clipboard.
-                        if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out uint session) || session != mySession)
+                        if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out uint session) || session != _session())
                         {
                             ServiceHost.Log("Service link: refused a TailRemote window from another session (" + session + ").");
                             pipe.Dispose();

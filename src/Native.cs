@@ -130,8 +130,12 @@ namespace TailRemote
             catch { return -1; }
         }
 
+        /// <summary>Set by the service: it cannot reach the screen, so its agent in the signed-in session types the keys.</summary>
+        public static Func<ushort, ushort, bool, bool, bool>? KeySink;
+
         public static bool SendKey(ushort vk, ushort scan, bool up, bool extended)
         {
+            if (KeySink is { } sink) return sink(vk, scan, up, extended);
             if (FollowInputDesktop) FollowDesktop();
             var input = new INPUT { type = 1 };
             input.u.ki.wVk = vk;

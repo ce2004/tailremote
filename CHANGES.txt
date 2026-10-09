@@ -1,3 +1,8 @@
+1.8.23
+Changed: the TailRemote service now hosts by itself, from the moment Windows starts it, before the sign-in screen even appears. The controlling PC can be connected and listening in time to hear the Windows startup sound, and the connection now carries on through signing in, signing out and switching user, instead of dropping each time. Keys are still typed on whatever screen is showing, the lock screen and UAC prompts included.
+Changed: when the connection drops, or the other PC is restarting, TailRemote tries again every second instead of every 3 seconds, and does not wait as long for a PC that is not answering yet, so it is back the moment the other PC is.
+Changed: at startup the sound is captured as soon as Windows' audio is ready.
+
 1.8.22
 Bug fixed: with the service hosting and no TailRemote window open, what the controlling PC sent never reached the clipboard, so there was nothing to paste. The service now puts it there properly.
 Bug fixed: with a moved Downloads folder (on another drive, or in OneDrive), Send files saved into the default one instead. Files now go into your real Downloads, TailRemote, with or without the service.

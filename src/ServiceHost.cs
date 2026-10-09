@@ -15,12 +15,11 @@ namespace TailRemote
     /// The host as a Windows service, so the remote PC can be used at the lock
     /// screen, the sign-in screen and UAC prompts, and can be sent Ctrl+Alt+Del.
     ///
-    /// The service (SYSTEM, session 0) cannot reach the screen itself, so it
-    /// keeps an agent running in whichever session is on the console, also as
-    /// SYSTEM: "TailRemote.exe --agent". The agent does the hosting and follows
-    /// the input desktop, which is how keys reach the secure desktop. Only a
-    /// service may send Ctrl+Alt+Del, so the agent asks the service for it over
-    /// a pipe that only SYSTEM can open.
+    /// The service (SYSTEM, session 0) hosts, from the moment Windows starts it, before
+    /// the sign-in screen (Agent.StartHosting): connections, the sound, files, and Ctrl+Alt+Del,
+    /// which only a service may send. It cannot reach the screen, so it keeps an agent in
+    /// whichever session is on the console, also as SYSTEM: "TailRemote.exe --agent", which
+    /// types the keys it is handed (AgentLink) on whichever desktop has the keyboard.
     ///
     /// The service runs its own copy in Program Files (only administrators can
     /// change it); its settings live in ProgramData, readable only by SYSTEM and
@@ -29,7 +28,6 @@ namespace TailRemote
     internal static class ServiceHost
     {
         public const string Name = "TailRemoteHost";
-        private const string PipeName = "TailRemoteSas";
 
         public static string InstallDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "TailRemote");
         public static string InstalledExe => Path.Combine(InstallDir, "TailRemote.exe");
@@ -281,7 +279,8 @@ namespace TailRemote
         {
             _statusHandle = NativeService.RegisterServiceCtrlHandlerExW(Name, _handler!, IntPtr.Zero);
             Report(NativeService.SERVICE_START_PENDING);
-            new Thread(SasPipe) { IsBackground = true, Name = "TailRemote SAS" }.Start();
+            // Hosting starts at once, from the service itself: before the sign-in screen exists.
+            new Thread(Agent.StartHosting) { IsBackground = true, Name = "TailRemote service hosting" }.Start();
             new Thread(UpdateLoop) { IsBackground = true, Name = "TailRemote service updates" }.Start();
             new Thread(UpdatePipe) { IsBackground = true, Name = "TailRemote update nudge" }.Start();
             Report(NativeService.SERVICE_RUNNING);
@@ -319,6 +318,7 @@ namespace TailRemote
             }
             try { if (agent != null && !agent.HasExited) agent.Kill(); } catch { }
             agent?.Dispose();
+            Agent.StopHosting();
             Log("Service stopped.");
             Report(NativeService.SERVICE_STOPPED);
         }
@@ -352,27 +352,6 @@ namespace TailRemote
             {
                 if (own != IntPtr.Zero) NativeService.CloseHandle(own);
                 if (token != IntPtr.Zero) NativeService.CloseHandle(token);
-            }
-        }
-
-        /// <summary>Sends Ctrl+Alt+Del when the agent asks. Only SYSTEM can open this pipe.</summary>
-        private static void SasPipe()
-        {
-            var sec = new PipeSecurity();
-            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
-            while (!Stop.WaitOne(0))
-            {
-                try
-                {
-                    using var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, sec);
-                    pipe.WaitForConnection();
-                    if (pipe.ReadByte() == 1)
-                    {
-                        NativeService.SendSAS(false);
-                        Log("Sent Control Alt Delete.");
-                    }
-                }
-                catch (Exception e) { Log("SAS pipe: " + e.Message); Thread.Sleep(1000); }
             }
         }
 
@@ -465,19 +444,6 @@ namespace TailRemote
                 pipe.Connect(2000);
                 var v = Updater.Current;
                 pipe.Write(new byte[] { 1, (byte)v.Major, (byte)v.Minor, (byte)Math.Max(0, v.Build) });
-                return true;
-            }
-            catch { return false; }
-        }
-
-        /// <summary>From the agent: ask the service to send Ctrl+Alt+Del.</summary>
-        public static bool RequestSas()
-        {
-            try
-            {
-                using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
-                pipe.Connect(2000);
-                pipe.WriteByte(1);
                 return true;
             }
             catch { return false; }

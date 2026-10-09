@@ -1,71 +1,94 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace TailRemote
 {
     /// <summary>
-    /// The hosting half of the service: "TailRemote.exe --agent", started by the
-    /// service as SYSTEM in the console session. No window. It hosts with the
-    /// service's settings, follows the input desktop so keys reach the lock
-    /// screen and UAC prompts, shares the clipboard, and saves received files in
-    /// the signed-in user's Downloads (or Public Downloads when nobody is).
+    /// Hosting as the Windows service, in two halves.
+    ///
+    /// The service itself (SYSTEM, session 0) hosts: connections, the sound, files, Control Alt
+    /// Delete. It starts with Windows, before the sign-in screen, so the controlling PC can be
+    /// connected and hear the startup sound, and the connection carries on through signing in,
+    /// out, and switching user.
+    ///
+    /// "TailRemote.exe --agent" runs as SYSTEM in whichever session is at the screen (the service
+    /// keeps one there). It types the keys the service hands it, on whichever desktop has the
+    /// keyboard (the lock screen and UAC prompts too), and puts on the clipboard what arrives when
+    /// no TailRemote window is open to do it.
     /// </summary>
-    internal sealed class Agent : ApplicationContext
+    internal static class Agent
     {
-        private readonly Host _host;
-        private readonly ClipboardSetter _clip;
-        private readonly ServiceLink.Server _link;
-        private readonly System.Windows.Forms.Timer _folderTimer = new() { Interval = 5000 };
+        // ================= In the service =================
 
-        public static int Run()
+        private static Host? _host;
+        private static volatile bool _stopping;
+        private static System.Threading.Timer? _folders;
+
+        /// <summary>Starts hosting from the service. Retries until it can (the network may not be up yet at boot); never throws.</summary>
+        public static void StartHosting()
         {
-            Native.FollowInputDesktop = true;
             var cfg = ServiceHost.LoadConfig();
             DiagLog.Enabled = cfg?.Logging == true;
-            if (cfg == null) { ServiceHost.Log("Agent: no settings, so not hosting."); return 1; }
-            ApplicationConfiguration.Initialize();
-            try { Application.Run(new Agent(cfg)); }
-            catch (Exception e) { ServiceHost.Log("Agent stopped: " + e.Message); return 1; }
-            return 0;
-        }
-
-        private Agent(ServiceHost.Config cfg)
-        {
-            ChooseFolder();
-            _folderTimer.Tick += (_, _) => ChooseFolder();
-            _folderTimer.Start();
-
-            AudioSetup.FinishQuietly();
-            _host = new Host(cfg.Port, ServiceHost.Config.Open(cfg.PasswordEnc), ServiceHost.Config.Open(cfg.ListenPasswordEnc), ServiceHost.Log,
-                string.IsNullOrEmpty(cfg.CaptureDevice) ? null : cfg.CaptureDevice)
+            if (cfg == null) { ServiceHost.Log("No settings, so not hosting."); return; }
+            ChooseFolders();
+            _folders = new System.Threading.Timer(_ => ChooseFolders(), null, 5000, 5000);
+            var agent = new AgentLink.Server();
+            Native.KeySink = agent.Key; // keys are typed by the agent, at the screen
+            string? lastError = null;
+            while (!_stopping)
             {
-                SecureAttention = ServiceHost.RequestSas,
-            };
-            // The TailRemote window, when open, does the clipboard and sends files through this
-            // agent (ServiceLink), as the signed-in user. Without a window, what the controlling
-            // PC sends still goes onto this PC's clipboard, from here.
-            _clip = new ClipboardSetter();
-            _link = new ServiceLink.Server(_host);
-            _host.ClipboardReceived += text => { if (!_link.Text(text)) _clip.Arrived(text); };
-            _host.ClipboardFilesReceived += paths => { if (!_link.Files(paths)) _clip.FilesArrived(paths); };
-            _host.TransferProgress += t => _link.Transfer(t);
-            ServiceHost.Log("Agent hosting on port " + cfg.Port + ".");
+                try
+                {
+                    _host = new Host(cfg.Port, ServiceHost.Config.Open(cfg.PasswordEnc), ServiceHost.Config.Open(cfg.ListenPasswordEnc), ServiceHost.Log,
+                        string.IsNullOrEmpty(cfg.CaptureDevice) ? null : cfg.CaptureDevice)
+                    {
+                        SecureAttention = SendSecureAttention,
+                    };
+                    break;
+                }
+                catch (Exception e)
+                {
+                    if (e.Message != lastError) ServiceHost.Log("Not hosting yet: " + e.Message + " Trying again.");
+                    lastError = e.Message;
+                    Thread.Sleep(500);
+                }
+            }
+            if (_host == null) return;
+            // The TailRemote window, when open, does the clipboard and sends files through the service
+            // (ServiceLink), as the signed-in user; it must be in the session at the screen. Without a
+            // window, what the controlling PC sends goes onto the clipboard through the agent.
+            var link = new ServiceLink.Server(_host, NativeService.WTSGetActiveConsoleSessionId);
+            _host.ClipboardReceived += text => { if (!link.Text(text)) agent.Text(text); };
+            _host.ClipboardFilesReceived += paths => { if (!link.Files(paths)) agent.Files(paths); };
+            _host.TransferProgress += t => link.Transfer(t);
+            ServiceHost.Log("Hosting on port " + cfg.Port + ", from the service.");
+            // A virtual audio device set up earlier finishes being set up (renamed, made the default).
+            ThreadPool.QueueUserWorkItem(_ => { try { AudioSetup.FinishQuietly(); } catch { } });
         }
 
-        protected override void Dispose(bool disposing)
+        public static void StopHosting()
         {
-            if (disposing) _host.Dispose();
-            base.Dispose(disposing);
+            _stopping = true;
+            _host?.Dispose();
         }
 
-        private static void ChooseFolder()
+        /// <summary>Only a service may send Control Alt Delete; this is the service.</summary>
+        private static bool SendSecureAttention()
+        {
+            try { NativeService.SendSAS(false); ServiceHost.Log("Sent Control Alt Delete."); return true; }
+            catch { return false; }
+        }
+
+        /// <summary>Received files go into the folders of whoever is signed in at the screen (Public before anyone is).</summary>
+        private static void ChooseFolders()
         {
             uint session = NativeService.WTSGetActiveConsoleSessionId();
             string? profile = NativeService.UserProfile(session);
             string root = profile ?? Path.Combine(Environment.GetEnvironmentVariable("PUBLIC") ?? @"C:\Users\Public");
             // The signed-in user's own folders, wherever they really are (Downloads moved to another
-            // drive or OneDrive): the agent runs as SYSTEM, whose own folders are deep inside Windows
+            // drive or OneDrive): the service runs as SYSTEM, whose own folders are deep inside Windows
             // and which the user's Explorer could not paste from.
             string local = (profile != null ? NativeService.UserFolder(session, NativeService.FolderLocalAppData) : null) ?? Path.Combine(root, "AppData", "Local");
             string downloads = (profile != null ? NativeService.UserFolder(session, NativeService.FolderDownloads) : null) ?? Path.Combine(root, "Downloads");
@@ -73,11 +96,21 @@ namespace TailRemote
             FileChannel.DownloadsOverride = Path.Combine(downloads, "TailRemote");
         }
 
+        // ================= In the session at the screen (--agent) =================
+
+        public static int Run()
+        {
+            // Keys go to whichever desktop has the keyboard: the lock screen, sign-in and UAC prompts too.
+            Native.FollowInputDesktop = true;
+            var clip = new ClipboardSetter();
+            AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived);
+            return 0;
+        }
+
         /// <summary>
         /// Puts what arrives onto this PC's clipboard when no TailRemote window is open to do it.
-        /// On a thread of its own, set up for the clipboard (STA): the agent's main thread is not,
-        /// so every clipboard call made there used to fail without a word, and nothing that the
-        /// controlling PC sent could be pasted.
+        /// On a thread of its own, set up for the clipboard (STA): the main thread is not, and every
+        /// clipboard call made there used to fail without a word (nothing could be pasted).
         /// </summary>
         private sealed class ClipboardSetter
         {
@@ -85,9 +118,9 @@ namespace TailRemote
 
             public ClipboardSetter()
             {
-                var t = new System.Threading.Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
+                var t = new Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
                     { IsBackground = true, Name = "TailRemote agent clipboard" };
-                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.SetApartmentState(ApartmentState.STA);
                 t.Start();
             }
 
@@ -111,7 +144,7 @@ namespace TailRemote
                     catch (Exception e)
                     {
                         if (i == 4) { ServiceHost.Log("Could not put it on the clipboard: " + e.Message); return; }
-                        System.Threading.Thread.Sleep(100); // another program has it open
+                        Thread.Sleep(100); // another program has it open
                     }
                 }
             }

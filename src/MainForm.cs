@@ -67,7 +67,7 @@ namespace TailRemote
         private bool _connecting, _reconnecting;
         private int _attempt; // bumped to abandon a connection attempt still under way
         private readonly Timer _titleTimer = new() { Interval = 1000 };
-        private readonly Timer _retryTimer = new() { Interval = 3000 }; // Connect keeps trying every 3 seconds until Disconnect
+        private readonly Timer _retryTimer = new() { Interval = 1000 }; // Connect keeps trying every second until Disconnect (a PC coming back from a restart is caught at once)
         private bool _resumeRemote;     // was controlling the remote PC when the connection dropped
         private bool _quietModeChange;  // the reconnect message already says it
 
@@ -795,7 +795,7 @@ namespace TailRemote
             else t = "TailRemote";
             if (Text != t) Text = t;
             // The Streaming line, read with Tab: what is coming in right now.
-            string st = _client == null ? (_reconnecting ? "Not connected: trying again every 3 seconds" : "Not connected")
+            string st = _client == null ? (_reconnecting ? "Not connected: trying again every second" : "Not connected")
                 : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
                   (_client.LockedStep >= 0 ? ", locked" : ", variable") +
                   (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "") +
@@ -975,8 +975,11 @@ namespace TailRemote
                 _player.SpeedUp = _speedUp.Checked;
                 var player = _player;
                 int locked = _quality.SelectedIndex - 1; // from the very first sound
+                // Trying again: a short wait for an answer, so a PC that is starting up is caught the
+                // moment it hosts, instead of every 8 seconds or more.
+                int answerMs = _reconnecting ? 2500 : 8000;
                 var c = await System.Threading.Tasks.Task.Run(() =>
-                    Client.Connect(address, port, pw, player, msg => Later(() => Say(msg)), locked));
+                    Client.Connect(address, port, pw, player, msg => Later(() => Say(msg)), locked, answerMs));
                 if (attempt != _attempt || HostMode || _client != null)
                 {
                     // Stopped, switched to hosting, or already connected while this was under way.
@@ -1008,7 +1011,7 @@ namespace TailRemote
             }
             catch (Exception e) when (attempt == _attempt)
             {
-                // Keeps trying every 3 seconds until Disconnect, except when trying again
+                // Keeps trying every second until Disconnect, except when trying again
                 // cannot help (and a wrong password tried again gets this PC blocked).
                 // Only a wrong password stops it: the login is checked for damage, so that is real. A
                 // "different version" can also be a damaged first message, so it keeps trying.
@@ -1019,7 +1022,7 @@ namespace TailRemote
                     _reconnecting = true;
                     _retryTimer.Start();
                     Tone(Sounds.Tone.Error);
-                    Say("Could not connect: " + e.Message + " Trying again every 3 seconds until you press Disconnect.");
+                    Say("Could not connect: " + e.Message + " Trying again every second until you press Disconnect.");
                 }
             }
             catch { } // an abandoned attempt failing: nobody is waiting for it
@@ -1062,7 +1065,7 @@ namespace TailRemote
             }
             else
             {
-                // Dropped, or the host restarted after an update: try at once, then every 3 seconds.
+                // Dropped, or the host restarted after an update: try at once, then every second.
                 _reconnecting = true;
                 _retryTimer.Start();
                 Say(why + " Reconnecting.");

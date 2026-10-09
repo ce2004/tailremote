@@ -26,6 +26,37 @@ namespace TailRemote
         // window and the audio have always run this way, and the sound code shares Windows audio
         // objects between threads. Anything that needs STA (the clipboard, file and folder pickers)
         // runs on a thread of its own that is: MainForm.ClipboardJobs, PickFiles, Agent.ClipboardSetter.
+        /// <summary>
+        /// --capturetest FILE: records Windows' default output for 10 seconds and writes what it heard
+        /// (which session and account it ran as, how much sound, the loudest moment). For finding out
+        /// whether the service itself, in session 0 before anyone signs in, can capture the sound.
+        /// </summary>
+        private static int CaptureTest(string file)
+        {
+            var lines = new System.Collections.Generic.List<string>();
+            int ticks = 0, sound = 0, peak = 0;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            long firstSound = -1;
+            var cap = new LoopbackCapture((seq, pcm) =>
+            {
+                ticks++;
+                if (pcm == null) return;
+                sound++;
+                foreach (short s in pcm) peak = Math.Max(peak, Math.Abs((int)s));
+                if (firstSound < 0) firstSound = clock.ElapsedMilliseconds;
+            }, msg => { lock (lines) lines.Add(msg); }, null, 0);
+            System.Threading.Thread.Sleep(10_000);
+            cap.Stop();
+            using var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var report = "session " + System.Diagnostics.Process.GetCurrentProcess().SessionId + ", account " + me.Name +
+                Environment.NewLine + "device: " + LoopbackCapture.DeviceInfo +
+                Environment.NewLine + "ticks " + ticks + ", with sound " + sound + ", loudest " + peak + " of 32767" +
+                (firstSound >= 0 ? ", first sound after " + firstSound + " ms" : "") +
+                Environment.NewLine + "messages: " + string.Join(" | ", lines);
+            File.WriteAllText(file, report);
+            return 0;
+        }
+
         private static int Main(string[] args)
         {
             Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
@@ -58,6 +89,7 @@ namespace TailRemote
                 return args[1] == "install" ? ServiceHost.Install() : ServiceHost.Remove();
             if (args.Length == 1 && args[0] == "--service") return ServiceHost.RunService();
             if (args.Length == 1 && args[0] == "--agent") return Agent.Run();
+            if (args.Length == 2 && args[0] == "--capturetest") return CaptureTest(args[1]);
 
             if (args.Length == 1 && args[0] == "--remove-audio")
             {

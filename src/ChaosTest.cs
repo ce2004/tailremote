@@ -523,6 +523,27 @@ namespace TailRemote
                         : "FAIL: " + got.Count + " of 10 got it; the host said " + hostSaid.Count + " results, wrong: " + string.Join(" | ", wrong);
                 });
 
+                Scenario("hosting as the service: keys go from the host to the agent in the session (F24 only, recorded, never typed)", 30, () =>
+                {
+                    AgentLink.TestAnyOwner = true;
+                    var server = new AgentLink.Server();
+                    var got = new System.Collections.Concurrent.ConcurrentQueue<(ushort Vk, bool Up)>();
+                    string? text = null;
+                    new Thread(() => AgentLink.Run((vk, scan, up, ext) => got.Enqueue((vk, up)), t => text = t, _ => { })) { IsBackground = true }.Start();
+                    Thread.Sleep(1500); // the agent connects
+                    Native.KeySink = server.Key; // every key the host types goes to the agent from here
+                    try
+                    {
+                        const ushort F24 = 0x87; // does nothing on any PC
+                        for (int i = 0; i < 20; i++) { ctrl.SendKey(F24, 0, false, false); ctrl.SendKey(F24, 0, true, false); }
+                        server.Text("for the clipboard, with no window open");
+                        for (int i = 0; i < 150 && (got.Count < 40 || text == null); i++) Thread.Sleep(20);
+                    }
+                    finally { Native.KeySink = null; }
+                    bool ok = got.Count == 40 && got.All(k => k.Vk == 0x87) && text == "for the clipboard, with no window open";
+                    return ok ? "all 40 key presses and releases reached the agent, in order, and the clipboard text too" : "FAIL: " + got.Count + " of 40 keys, text " + (text ?? "none");
+                });
+
                 Scenario("hosting as the service: the window sends and receives through the agent", 60, () =>
                 {
                     ServiceLink.TestAnyOwner = true; // this test plays the agent itself, so its pipe is not SYSTEM's

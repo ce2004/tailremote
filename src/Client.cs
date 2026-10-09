@@ -59,7 +59,8 @@ namespace TailRemote
         /// opens or closes an audio device.
         /// </summary>
         /// <summary>lockedStep: the bitrate step to hold from the very first sound, or -1 for Variable.</summary>
-        public static Client Connect(string address, int port, string password, Player player, Action<string> status, int lockedStep = -1)
+        /// <summary>answerMs: how long to wait for the PC to answer at all (shorter while trying again).</summary>
+        public static Client Connect(string address, int port, string password, Player player, Action<string> status, int lockedStep = -1, int answerMs = 8000)
         {
             var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
             tcp.Client.DualMode = true;
@@ -74,7 +75,7 @@ namespace TailRemote
                         ? "Could not find " + address + ". Check the name or address."
                         : "Could not find " + address + ". If it is a Tailscale name, open Tailscale on this PC and sign in.");
                 bool done;
-                try { done = tcp.ConnectAsync(addrs, port).Wait(8000); }
+                try { done = tcp.ConnectAsync(addrs, port).Wait(answerMs); }
                 catch (AggregateException e) when (e.InnerException is SocketException se && se.SocketErrorCode == SocketError.ConnectionRefused)
                 {
                     throw new InvalidOperationException(address + " is on, but TailRemote is not hosting there. Start hosting on that PC.");

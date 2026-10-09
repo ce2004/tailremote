@@ -53,6 +53,8 @@ namespace TailRemote
             return _thread.Join(2000);
         }
 
+        private int _failures;
+
         private void Run()
         {
             Native.ProAudioThread();
@@ -71,7 +73,9 @@ namespace TailRemote
                     DiagLog.Write("host capture error: " + e);
                     if (msg != lastError) _status(msg);
                     lastError = msg;
-                    for (int i = 0; i < 20 && !_stop; i++) Thread.Sleep(100);
+                    // Quickly at first (at boot, Windows' audio may be a moment from ready: every quarter
+                    // second counts for hearing the startup sound), then every 2 seconds.
+                    for (int i = 0; i < (++_failures < 40 ? 3 : 20) && !_stop; i++) Thread.Sleep(100);
                 }
             }
         }
