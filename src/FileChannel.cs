@@ -66,6 +66,9 @@ namespace TailRemote
         /// <summary>Bytes a second this side may send right now (set from the audio ping).</summary>
         public Func<double>? Rate;
 
+        /// <summary>The other PC's address, shown with each transfer.</summary>
+        public volatile string PeerName = "";
+
         /// <summary>Identifies this channel to the host, so a new main connection gets the same transfers back.</summary>
         public readonly byte[] Id;
         /// <summary>Closed for good.</summary>
@@ -86,6 +89,8 @@ namespace TailRemote
             public bool Cancelled;
             /// <summary>No connection to the other PC right now: waiting for it to come back.</summary>
             public bool Waiting;
+            /// <summary>The other PC's address (several transfers can go at once, one per controlling PC).</summary>
+            public string Peer = "";
             public string What = "";
             public long Done, Total;
             /// <summary>Each file moving right now, with how far it has got (a fresh list each report).</summary>
@@ -597,7 +602,7 @@ namespace TailRemote
 
         private void Run(Out o)
         {
-            var t = new Transfer { Outgoing = true, What = o.What, Total = o.Total, Clipboard = o.Kind != KindDownloads };
+            var t = new Transfer { Outgoing = true, What = o.What, Total = o.Total, Clipboard = o.Kind != KindDownloads, Peer = PeerName };
             var clock = Stopwatch.StartNew();
             double lastReport = 0;
             Lane? offeredOn = null, askedOn = null;
@@ -870,6 +875,7 @@ namespace TailRemote
                     old = _in;
                     b = new In { Id = id, Kind = kind, Entries = new (string, long)?[count] };
                     b.T.Clipboard = kind != KindDownloads;
+                    b.T.Peer = PeerName;
                     if (kind == KindText) b.T.What = "clipboard text";
                     _in = b;
                 }
@@ -932,7 +938,8 @@ namespace TailRemote
                 if (b.Kind == KindFiles)
                 {
                     CleanStaging();
-                    b.Folder = Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+                    // Its own folder, even when several PCs send at the same moment.
+                    b.Folder = Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + b.Id.ToString("x8"));
                 }
                 else b.Folder = Downloads;
                 Directory.CreateDirectory(b.Folder);
@@ -947,7 +954,18 @@ namespace TailRemote
                     if (b.Kind == KindDownloads)
                     {
                         // Never over anything already in Downloads: "name (2).ext" and so on.
-                        if (!renamed.TryGetValue(top, out var fresh)) renamed[top] = fresh = Unique(b.Folder, top);
+                        if (!renamed.TryGetValue(top, out var fresh))
+                        {
+                            // Chosen and made in one step, under one lock for every transfer: two PCs
+                            // sending "report.bin" at once must never both get the same name and write
+                            // into one file (files are otherwise only made when their data arrives).
+                            lock (ReserveGate)
+                            {
+                                renamed[top] = fresh = Unique(b.Folder, top);
+                                if (rel == top && length >= 0) using (File.OpenHandle(Path.Combine(b.Folder, fresh), FileMode.CreateNew, FileAccess.Write)) { }
+                                else Directory.CreateDirectory(Path.Combine(b.Folder, fresh));
+                            }
+                        }
                         rel = fresh + rel[top.Length..];
                         top = fresh;
                     }
@@ -960,7 +978,7 @@ namespace TailRemote
                     {
                         string dir = Path.GetDirectoryName(path)!;
                         if (made.Add(dir)) Directory.CreateDirectory(dir); // each folder once, not once per file
-                        if (length == 0) using (File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write)) { }
+                        if (length == 0) using (File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.Write)) { } // may be reserved already (Downloads)
                     }
                     if (tops.Add(top)) b.Tops.Add(top); // this batch's own (a fresh name), so it is thrown away if the batch fails
                     b.Paths[i] = path;
@@ -1173,6 +1191,8 @@ namespace TailRemote
             }
         }
 
+        private static readonly object ReserveGate = new();
+
         /// <summary>A name that is not taken in the folder yet: name, name (2), name (3)...</summary>
         private static string Unique(string folder, string name)
         {
@@ -1195,14 +1215,18 @@ namespace TailRemote
             return full.StartsWith(Path.GetFullPath(folder) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? full : null;
         }
 
-        /// <summary>Keeps only the newest batch in the holding folder (the clipboard still points at it).</summary>
+        /// <summary>
+        /// Clears old batches out of the holding folder: never the newest (the clipboard points at
+        /// it), and never one from the last 10 minutes, which may still be arriving from another PC.
+        /// </summary>
         private static void CleanStaging()
         {
             try
             {
                 if (!Directory.Exists(Staging)) return;
+                var cutoff = DateTime.UtcNow.AddMinutes(-10);
                 foreach (var old in new DirectoryInfo(Staging).GetDirectories().OrderByDescending(d => d.Name).Skip(1))
-                    try { old.Delete(true); } catch { }
+                    if (old.CreationTimeUtc < cutoff) try { old.Delete(true); } catch { }
             }
             catch { }
         }

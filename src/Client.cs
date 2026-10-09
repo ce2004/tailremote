@@ -159,6 +159,7 @@ namespace TailRemote
                     c._files = files;
                     c._filesFor = to;
                     files.Rate = () => c._pace;
+                    files.PeerName = address.Trim();
                     files.TextReceived = text => c.ClipboardReceived?.Invoke(text);
                     files.FilesReceived = paths => c.ClipboardFilesReceived?.Invoke(paths);
                     files.Progress = t => c.TransferProgress?.Invoke(t);

@@ -466,6 +466,31 @@ namespace TailRemote
                     return ok && hostSays?.Failed == false && clientSays?.Failed == false ? "all ten arrived exactly, at " + mbs.ToString("0") + " MB/s on " + ctrl.Files!.TestLanes + " lanes, up to " + together + " files moving at once (" + togetherThere + " seen arriving at once)" : "FAIL: host said " + hostSays?.Result + ", client said " + clientSays?.Result;
                 });
 
+                Scenario("the host sends a file to 10 controlling PCs at once: every one gets it, and the host says so for each", 120, () =>
+                {
+                    var others = Enumerable.Range(0, 9).Select(_ => Connect(Password)).ToList();
+                    var everyone = new List<Client>(others) { ctrl };
+                    for (int i = 0; i < 200 && host.Connected.Controlling < 10; i++) Thread.Sleep(20);
+                    for (int i = 0; i < 200 && everyone.Any(c => c.Files!.TestLanes == 0); i++) Thread.Sleep(20);
+                    Thread.Sleep(500); // every controller's first lane has reached the host
+                    string file = Big("to-everyone.bin", 8);
+                    var got = new System.Collections.Concurrent.ConcurrentBag<string>();
+                    var handlers = everyone.Select(c => { Action<string[]> h = p => { if (Path.GetFileName(p[0]) == "to-everyone.bin" && Same(file, p[0])) got.Add(p[0]); }; c.ClipboardFilesReceived += h; return (c, h); }).ToList();
+                    var hostSaid = new System.Collections.Concurrent.ConcurrentBag<FileChannel.Transfer>();
+                    Action<FileChannel.Transfer> note = t => { if (t.Finished && t.Outgoing && t.What == "to-everyone.bin") hostSaid.Add(t); };
+                    host.TransferProgress += note;
+                    host.SendClipboardFiles(new[] { file });
+                    for (int i = 0; i < 3000 && (got.Count < 10 || hostSaid.Count < 10); i++) Thread.Sleep(20);
+                    host.TransferProgress -= note;
+                    foreach (var (c, h) in handlers) c.ClipboardFilesReceived -= h;
+                    int connectedThen = host.Connected.Controlling;
+                    foreach (var o in others) o.Dispose();
+                    var wrong = hostSaid.Where(t => t.Failed || t.Done != t.Total || t.Total != 8 << 20).Select(t => t.Result).ToList();
+                    return got.Count == 10 && hostSaid.Count == 10 && wrong.Count == 0
+                        ? "all 10 got it whole, and the host said sent, with its size, for every one (" + connectedThen + " controlling)"
+                        : "FAIL: " + got.Count + " of 10 got it; the host said " + hostSaid.Count + " results, wrong: " + string.Join(" | ", wrong);
+                });
+
                 Scenario("hosting as the service: the window sends and receives through the agent", 60, () =>
                 {
                     var server = new ServiceLink.Server(host);

@@ -166,6 +166,9 @@ namespace TailRemote
                 ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false, asUser); } catch { } });
         }
 
+        /// <summary>How many PCs are controlling and listening right now (for the window's title).</summary>
+        public (int Controlling, int Listening) Connected { get { lock (_gate) return (_controllers.Count, _listeners.Count); } }
+
         /// <summary>True while someone is controlling this PC (the only ones files and the clipboard can go to).</summary>
         public bool HasController => ControllerChannels().Length > 0;
 
@@ -423,6 +426,7 @@ namespace TailRemote
                             owner.Files = files;
                             var o = owner;
                             files.Rate = () => Volatile.Read(ref o.Pace);
+                            files.PeerName = owner.Address.ToString();
                         }
                     }
                     files.AddLane(tcp, new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true, FileChannel.LanePurpose(nonce, answer.AsSpan(28, 16))));

@@ -606,6 +606,8 @@ namespace TailRemote
         {
             if (_transferShown == null) return;
             _transferShown = null;
+            _going.Clear();
+            _ended.Clear();
             ShowFileBars(Array.Empty<(string, long, long)>());
             _transferStatus.Text = why;
             _transferBar.Value = 0;
@@ -613,31 +615,72 @@ namespace TailRemote
             IdleSoon();
         }
 
-        /// <summary>How a transfer is going, either way: the Files line and bar. Never spoken, so a lot of them cannot flood NVDA; the sounds say they started and ended.</summary>
+        // Every transfer going right now (several when this PC hosts many controlling PCs), and
+        // those that ended while others still went: the Files line sums them up once all are done.
+        private readonly System.Collections.Generic.Dictionary<int, FileChannel.Transfer> _going = new();
+        private readonly System.Collections.Generic.List<FileChannel.Transfer> _ended = new();
+
+        /// <summary>How transfers are going, either way: the Files line and bars. Never spoken, so a lot of them cannot flood NVDA; the sounds say they started and ended.</summary>
         private void ShowTransfer(FileChannel.Transfer t)
         {
-            if (!t.Finished && !ReferenceEquals(t, _transferShown)) _transferShown = t;
-            if (t.Finished)
+            if (t.Finished) { _going.Remove(t.Serial); if (!_ended.Contains(t)) _ended.Add(t); }
+            else _going[t.Serial] = t;
+            _transferShown = _going.Values.FirstOrDefault();
+            if (_going.Count == 0)
             {
-                if (_transferShown != null && !ReferenceEquals(t, _transferShown) && !_transferShown.Finished) return; // an older one ending: the newer one is what is going on
-                _transferShown = null;
+                // All ended: one line for all of them.
+                var ends = _ended.ToList();
+                _ended.Clear();
+                if (ends.Count == 0) return;
                 ShowFileBars(Array.Empty<(string, long, long)>());
-                _transferStatus.Text = t.Result ?? TransferIdle;
+                _transferStatus.Text = Summary(ends);
                 IdleSoon();
-                _transferBar.Value = t.Failed ? 0 : 100;
+                _transferBar.Value = ends.All(e => e.Failed) ? 0 : 100;
                 _transferStop.Enabled = false;
                 // The clipboard's own sounds play when it is sent and when it arrives; file sounds are
                 // for Send files only; and stopping (or replacing) on purpose is never an error.
-                if (t.Failed) { if (!t.Cancelled) Tone(Sounds.Tone.Error); }
-                else if (!t.Clipboard) Tone(t.Outgoing ? Sounds.Tone.FileSent : Sounds.Tone.FileReceived);
+                if (ends.Any(e => e.Failed && !e.Cancelled)) Tone(Sounds.Tone.Error);
+                else if (ends.Any(e => !e.Failed && !e.Clipboard)) Tone(ends[0].Outgoing ? Sounds.Tone.FileSent : Sounds.Tone.FileReceived);
                 return;
             }
-            string left = t.Left is TimeSpan l ? ", about " + (l.TotalSeconds < 60 ? Math.Max(1, (int)l.TotalSeconds) + " seconds" : (int)l.TotalMinutes + " minutes " + l.Seconds + " seconds") + " left" : "";
-            _transferStatus.Text = (t.Outgoing ? "Sending " : "Receiving ") + t.What + ": " + FileChannel.Size(t.Done) + " of " + FileChannel.Size(t.Total) +
-                (t.Waiting ? ", waiting for the connection to come back; it carries on from here." : ", " + FileChannel.Speed(t.BytesPerSecond) + left + ".");
-            _transferBar.Value = t.Total <= 0 ? 0 : (int)Math.Clamp(t.Done * 100 / t.Total, 0, 100);
-            ShowFileBars(t.Files);
+            var going = _going.Values.ToList();
+            if (going.Count == 1 && _ended.Count == 0)
+            {
+                var g = going[0];
+                string left = g.Left is TimeSpan l ? ", about " + (l.TotalSeconds < 60 ? Math.Max(1, (int)l.TotalSeconds) + " seconds" : (int)l.TotalMinutes + " minutes " + l.Seconds + " seconds") + " left" : "";
+                _transferStatus.Text = (g.Outgoing ? "Sending " : "Receiving ") + g.What + ": " + FileChannel.Size(g.Done) + " of " + FileChannel.Size(g.Total) +
+                    (g.Waiting ? ", waiting for the connection to come back; it carries on from here." : ", " + FileChannel.Speed(g.BytesPerSecond) + left + ".");
+                _transferBar.Value = g.Total <= 0 ? 0 : (int)Math.Clamp(g.Done * 100 / g.Total, 0, 100);
+                ShowFileBars(g.Files);
+            }
+            else
+            {
+                // Several at once (to or from several PCs): the totals, and one bar per PC.
+                var all = going.Concat(_ended).ToList();
+                long done = all.Sum(x => x.Finished ? x.Total : x.Done), total = all.Sum(x => x.Total);
+                bool outgoing = going.All(x => x.Outgoing), incoming = going.All(x => !x.Outgoing);
+                string names = string.Join(", ", going.Select(x => x.What).Distinct().Take(3));
+                _transferStatus.Text = (outgoing ? "Sending " + names + " to " + all.Count + " PCs" : incoming ? "Receiving " + names + " from " + all.Count + " PCs" : "Moving " + all.Count + " transfers") +
+                    (_ended.Count > 0 ? ", " + _ended.Count + " finished" : "") + ": " + FileChannel.Size(done) + " of " + FileChannel.Size(total) + ", " + FileChannel.Speed(going.Sum(x => x.BytesPerSecond)) + ".";
+                _transferBar.Value = total <= 0 ? 0 : (int)Math.Clamp(done * 100 / total, 0, 100);
+                ShowFileBars(going.Select(x => ((x.Peer.Length > 0 ? x.Peer + ", " : "") + x.What, x.Done, x.Total)).ToList());
+            }
             _transferStop.Enabled = true;
+        }
+
+        /// <summary>One line for transfers that all ended: the one result, or how many PCs got it and what went wrong.</summary>
+        private static string Summary(System.Collections.Generic.List<FileChannel.Transfer> ends)
+        {
+            if (ends.Count == 1) return ends[0].Result ?? TransferIdle;
+            var good = ends.Where(e => !e.Failed).ToList();
+            var bad = ends.Where(e => e.Failed).ToList();
+            string what = string.Join(", ", ends.Select(e => e.What).Distinct().Take(3));
+            string head = ends.All(e => e.Outgoing)
+                ? (bad.Count == 0 ? "Sent " + what + " to all " + ends.Count + " PCs" : "Sent " + what + " to " + good.Count + " of " + ends.Count + " PCs")
+                : (bad.Count == 0 ? "Received " + what + " from all " + ends.Count + " PCs" : "Received from " + good.Count + " of " + ends.Count + " PCs");
+            if (good.Count > 0) head += ", " + FileChannel.Size(good.Sum(e => e.Total)) + " in all";
+            if (bad.Count > 0) head += (bad[0].Outgoing ? ". Not sent to: " : ". Did not arrive from: ") + string.Join("; ", bad.Take(5).Select(e => (e.Peer.Length > 0 ? e.Peer + ": " : "") + e.Result));
+            return head + ".";
         }
 
         // ---- Saved PCs ----
@@ -732,7 +775,14 @@ namespace TailRemote
                 if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
             }
             else if (_reconnecting) t = "TailRemote - reconnecting";
-            else t = _host != null ? "TailRemote - hosting" : "TailRemote";
+            else if ((_host?.Connected ?? (_serviceLink?.Connected == true ? _serviceLink.Counts : null)) is (int controlling, int listening))
+            {
+                t = "TailRemote - hosting" + (_host == null ? " as the service" : "");
+                // More than one PC: how many, and what they are doing.
+                if (controlling + listening > 1)
+                    t += ", " + (controlling + listening) + " PCs connected (" + controlling + " controlling" + (listening > 0 ? ", " + listening + " listening" : "") + ")";
+            }
+            else t = "TailRemote";
             if (Text != t) Text = t;
             // The Streaming line, read with Tab: what is coming in right now.
             string st = _client == null ? (_reconnecting ? "Not connected: trying again every 3 seconds" : "Not connected")

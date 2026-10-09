@@ -59,7 +59,7 @@ namespace TailRemote
             var w = new BinaryWriter(ms);
             w.Write(t.Serial);
             w.Write(t.Outgoing); w.Write(t.Finished); w.Write(t.Failed); w.Write(t.Clipboard); w.Write(t.Cancelled); w.Write(t.Waiting);
-            w.Write(t.What); w.Write(t.Done); w.Write(t.Total); w.Write(t.BytesPerSecond);
+            w.Write(t.What); w.Write(t.Peer); w.Write(t.Done); w.Write(t.Total); w.Write(t.BytesPerSecond);
             w.Write(t.Result ?? ""); w.Write(t.Result != null);
             var files = t.Files;
             w.Write(files.Count);
@@ -128,12 +128,18 @@ namespace TailRemote
                     {
                         try
                         {
-                            bool? had = null;
+                            string? had = null;
                             while (pipe.IsConnected)
                             {
                                 if (outbox.TryTake(out var m, 1000)) Write(pipe, m.Item1, m.Item2);
-                                bool has = _host.HasController;
-                                if (has != had) { had = has; Write(pipe, Controller, new[] { (byte)(has ? 1 : 0) }); }
+                                // Whether anyone is controlling, and how many PCs control and listen (the window's title).
+                                var (controlling, listening) = _host.Connected;
+                                byte[] state = new byte[5];
+                                state[0] = (byte)(_host.HasController ? 1 : 0);
+                                BitConverter.TryWriteBytes(state.AsSpan(1), (ushort)controlling);
+                                BitConverter.TryWriteBytes(state.AsSpan(3), (ushort)listening);
+                                string key = Convert.ToHexString(state);
+                                if (key != had) { had = key; Write(pipe, Controller, state); }
                             }
                         }
                         catch { }
@@ -177,6 +183,8 @@ namespace TailRemote
 
             public bool Connected => _pipe?.IsConnected == true;
             public bool HasController { get; private set; }
+            /// <summary>How many PCs control and listen to the service's host.</summary>
+            public (int Controlling, int Listening) Counts { get; private set; }
 
             public Client() => new Thread(Loop) { IsBackground = true, Name = "TailRemote service link" }.Start();
 
@@ -217,7 +225,10 @@ namespace TailRemote
                             {
                                 case GotText: TextArrived?.Invoke(Encoding.UTF8.GetString(p)); break;
                                 case GotFiles: FilesArrived?.Invoke(Paths(p)); break;
-                                case Controller: HasController = p.Length == 1 && p[0] == 1; break;
+                                case Controller when p.Length == 5:
+                                    HasController = p[0] == 1;
+                                    Counts = (BitConverter.ToUInt16(p, 1), BitConverter.ToUInt16(p, 3));
+                                    break;
                                 case Progress: TransferProgress?.Invoke(Unpack(p)); break;
                             }
                         }
@@ -241,7 +252,7 @@ namespace TailRemote
                     _transfers[serial] = t = new FileChannel.Transfer();
                 }
                 t.Outgoing = r.ReadBoolean(); t.Finished = r.ReadBoolean(); t.Failed = r.ReadBoolean(); t.Clipboard = r.ReadBoolean(); t.Cancelled = r.ReadBoolean(); t.Waiting = r.ReadBoolean();
-                t.What = r.ReadString(); t.Done = r.ReadInt64(); t.Total = r.ReadInt64(); t.BytesPerSecond = r.ReadDouble();
+                t.What = r.ReadString(); t.Peer = r.ReadString(); t.Done = r.ReadInt64(); t.Total = r.ReadInt64(); t.BytesPerSecond = r.ReadDouble();
                 string result = r.ReadString();
                 t.Result = r.ReadBoolean() ? result : null;
                 int n = r.ReadInt32();

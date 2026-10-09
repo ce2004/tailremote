@@ -1,3 +1,8 @@
+1.8.20
+Bug fixed: sending files from the host with several PCs controlling it showed a muddle, such as 0 bytes sent, and never said whether every PC got them. The Files line now follows all of them together: Sending report.bin to 10 PCs, with a progress bar for each PC, then one line at the end, such as Sent report.bin to all 10 PCs, or which ones it could not reach and why.
+Bug fixed: when several PCs sent clipboard files to the host at once, one could clear another's files away before they had all arrived, and two PCs sending a file with the same name to Downloads at the same moment could end up writing into one file. Each now gets its own place and its own name.
+New feature: while hosting, the window's title says how many PCs are connected when there is more than one, and how many are controlling and listening.
+
 1.8.19
 Bug fixed: after sending or receiving a folder with a huge number of files, TailRemote kept using a lot of memory until you closed it. It now lets go of all of it and gives it back to Windows a second after the transfer ends.
 Changed: folders with many files go much faster. The receiving PC no longer makes every file one by one before anything is sent: files are made as they arrive, by all 16 connections side by side, and the sending PC no longer sends the whole list again while the other PC is still working through it. In testing, 100,000 files took 10 seconds.
