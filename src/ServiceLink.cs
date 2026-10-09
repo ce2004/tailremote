@@ -29,6 +29,12 @@ namespace TailRemote
         // Agent to window:
         private const byte GotText = (byte)'T', GotFiles = (byte)'F', Progress = (byte)'P', Controller = (byte)'H';
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetNamedPipeClientSessionId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint session);
+
+        /// <summary>Test only (--chaostest): the test itself plays the agent, so its pipe is not SYSTEM's.</summary>
+        internal static bool TestAnyOwner;
+
         private static void Write(Stream s, byte type, byte[] payload)
         {
             byte[] m = new byte[5 + payload.Length];
@@ -83,11 +89,13 @@ namespace TailRemote
             /// <summary>Hands something to every connected window; false if none is connected (the agent then does it itself).</summary>
             public bool Forward(byte type, byte[] payload, bool mayDrop = false)
             {
-                lock (_windows)
-                {
-                    foreach (var q in _windows) { if (!q.TryAdd((type, payload)) && !mayDrop) q.TryAdd((type, payload), 2000); }
-                    return _windows.Count > 0;
-                }
+                BlockingCollection<(byte, byte[])>[] windows;
+                lock (_windows) windows = _windows.ToArray();
+                // Outside the lock, and never long: a window that has stopped reading must not hold
+                // up a transfer (this runs on the file lanes' threads).
+                foreach (var q in windows)
+                    try { if (!q.TryAdd((type, payload)) && !mayDrop) q.TryAdd((type, payload), 250); } catch { } // a window that has just gone
+                return windows.Length > 0;
             }
 
             public bool Text(string text) => Forward(GotText, Encoding.UTF8.GetBytes(text));
@@ -98,19 +106,40 @@ namespace TailRemote
             {
                 // SYSTEM, and whoever is signed in at the PC itself: nobody over the network.
                 var sec = new PipeSecurity();
-                sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+                var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                sec.AddAccessRule(new PipeAccessRule(system, PipeAccessRights.FullControl, AccessControlType.Allow));
                 sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+                // Owned by SYSTEM, which the window checks: nobody else can pose as the service.
+                using (var me = WindowsIdentity.GetCurrent()) if (me.IsSystem) sec.SetOwner(system);
+                int mySession = System.Diagnostics.Process.GetCurrentProcess().SessionId;
+                bool first = true, warned = false;
                 while (true)
                 {
                     try
                     {
                         // Asynchronous: one thread reads while another writes. On a plain pipe Windows makes a
-                        // waiting read hold up every write, and nothing ever reached the window.
-                        var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.InOut, 4, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, sec);
+                        // waiting read hold up every write, and nothing ever reached the window. The first
+                        // one must be the first of its name: if another program made it first, it is not ours.
+                        var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
+                            PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : 0), 0, 0, sec);
+                        first = false;
                         pipe.WaitForConnection();
+                        // Only a window in this session (the one at the screen): never another account
+                        // that is also signed in, which would otherwise hear what arrives for the clipboard.
+                        if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out uint session) || session != mySession)
+                        {
+                            ServiceHost.Log("Service link: refused a TailRemote window from another session (" + session + ").");
+                            pipe.Dispose();
+                            continue;
+                        }
                         new Thread(() => Serve(pipe)) { IsBackground = true, Name = "TailRemote service link window" }.Start();
                     }
-                    catch (Exception e) { ServiceHost.Log("Service link: " + e.Message); Thread.Sleep(1000); }
+                    catch (Exception e)
+                    {
+                        if (!warned) ServiceHost.Log("Service link: " + e.Message + (first ? " Another program may hold the pipe TailRemoteFiles." : ""));
+                        warned = true; // said once, not every second
+                        Thread.Sleep(1000);
+                    }
                 }
             }
 
@@ -217,6 +246,16 @@ namespace TailRemote
                         // Impersonation allowed: the agent opens the files this user sends as this user.
                         var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
                         pipe.Connect(2000);
+                        // Really the service's agent: its pipe is owned by SYSTEM (or administrators). A
+                        // program of an ordinary user that made a pipe of this name first would get the
+                        // files and clipboard this window sends, and could put anything on this clipboard.
+                        var owner = pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+                        if (!TestAnyOwner && owner?.IsWellKnown(WellKnownSidType.LocalSystemSid) != true && owner?.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid) != true)
+                        {
+                            pipe.Dispose();
+                            Thread.Sleep(10_000);
+                            continue;
+                        }
                         _pipe = pipe;
                         while (!_stop)
                         {

@@ -105,7 +105,10 @@ namespace TailRemote
         /// <summary>The self-test receives into a temporary folder instead.</summary>
         public static string? StagingOverride;
         /// <summary>Where Send files puts what arrives: Downloads\TailRemote.</summary>
-        public static string Downloads => DownloadsOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "TailRemote");
+        public static string Downloads => DownloadsOverride ?? Path.Combine(MyDownloads.Value, "TailRemote");
+        // Where Downloads really is (moved to another drive or OneDrive included), not just the profile's.
+        private static readonly Lazy<string> MyDownloads = new(() =>
+            NativeService.MyFolder(NativeService.FolderDownloads) ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
         public static string? DownloadsOverride;
 
         /// <summary>The keys' purpose for one lane: both PCs' fresh values for it, so no two lanes ever share keys.</summary>

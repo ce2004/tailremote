@@ -14,7 +14,7 @@ namespace TailRemote
     internal sealed class Agent : ApplicationContext
     {
         private readonly Host _host;
-        private readonly ClipboardWindow _clip;
+        private readonly ClipboardSetter _clip;
         private readonly ServiceLink.Server _link;
         private readonly System.Windows.Forms.Timer _folderTimer = new() { Interval = 5000 };
 
@@ -45,7 +45,7 @@ namespace TailRemote
             // The TailRemote window, when open, does the clipboard and sends files through this
             // agent (ServiceLink), as the signed-in user. Without a window, what the controlling
             // PC sends still goes onto this PC's clipboard, from here.
-            _clip = new ClipboardWindow(_host, share: false);
+            _clip = new ClipboardSetter();
             _link = new ServiceLink.Server(_host);
             _host.ClipboardReceived += text => { if (!_link.Text(text)) _clip.Arrived(text); };
             _host.ClipboardFilesReceived += paths => { if (!_link.Files(paths)) _clip.FilesArrived(paths); };
@@ -55,115 +55,64 @@ namespace TailRemote
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { _host.Dispose(); _clip.DestroyHandle(); }
+            if (disposing) _host.Dispose();
             base.Dispose(disposing);
         }
 
         private static void ChooseFolder()
         {
-            string? profile = NativeService.UserProfile(NativeService.WTSGetActiveConsoleSessionId());
+            uint session = NativeService.WTSGetActiveConsoleSessionId();
+            string? profile = NativeService.UserProfile(session);
             string root = profile ?? Path.Combine(Environment.GetEnvironmentVariable("PUBLIC") ?? @"C:\Users\Public");
-            // The signed-in user's own holding folder: the agent runs as SYSTEM, whose folders
-            // the user's Explorer could not paste from.
-            FileChannel.StagingOverride = Path.Combine(root, "AppData", "Local", "TailRemote", "Clipboard");
-            // Send files too: the user's own Downloads, not SYSTEM's (deep inside Windows).
-            FileChannel.DownloadsOverride = Path.Combine(root, "Downloads", "TailRemote");
+            // The signed-in user's own folders, wherever they really are (Downloads moved to another
+            // drive or OneDrive): the agent runs as SYSTEM, whose own folders are deep inside Windows
+            // and which the user's Explorer could not paste from.
+            string local = (profile != null ? NativeService.UserFolder(session, NativeService.FolderLocalAppData) : null) ?? Path.Combine(root, "AppData", "Local");
+            string downloads = (profile != null ? NativeService.UserFolder(session, NativeService.FolderDownloads) : null) ?? Path.Combine(root, "Downloads");
+            FileChannel.StagingOverride = Path.Combine(local, "TailRemote", "Clipboard");
+            FileChannel.DownloadsOverride = Path.Combine(downloads, "TailRemote");
         }
 
-        /// <summary>A hidden window that hears clipboard changes and sets the clipboard on its own thread.</summary>
-        private sealed class ClipboardWindow : NativeWindow
+        /// <summary>
+        /// Puts what arrives onto this PC's clipboard when no TailRemote window is open to do it.
+        /// On a thread of its own, set up for the clipboard (STA): the agent's main thread is not,
+        /// so every clipboard call made there used to fail without a word, and nothing that the
+        /// controlling PC sent could be pasted.
+        /// </summary>
+        private sealed class ClipboardSetter
         {
-            private readonly Host _host;
-            private readonly bool _share;
-            private string? _lastIn, _lastFiles; // fingerprints, never the text itself
+            private readonly System.Collections.Concurrent.BlockingCollection<Action> _jobs = new(16);
 
-            private static string Print(string text) =>
-                text.Length + ":" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)), 0, 12);
-            private uint _own;
-            private long _ownAt;
-            private readonly System.Windows.Forms.Timer _gather = new() { Interval = 150 };
-            [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
-            private readonly Control _invoker = new();
-
-            public ClipboardWindow(Host host, bool share)
+            public ClipboardSetter()
             {
-                _host = host;
-                _share = share;
-                _invoker.CreateControl();
-                _gather.Tick += (_, _) => { _gather.Stop(); Settled(); };
-                CreateHandle(new CreateParams());
-                Native.AddClipboardFormatListener(Handle);
+                var t = new System.Threading.Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
+                    { IsBackground = true, Name = "TailRemote agent clipboard" };
+                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.Start();
             }
 
-            public void Arrived(string text)
+            public void Arrived(string text) => _jobs.TryAdd(() => Set(new DataObject(DataFormats.UnicodeText, text)));
+
+            public void FilesArrived(string[] paths) => _jobs.TryAdd(() =>
             {
-                if (!_invoker.IsHandleCreated) return;
-                _invoker.BeginInvoke(() =>
+                var list = new System.Collections.Specialized.StringCollection();
+                list.AddRange(paths);
+                var data = new DataObject();
+                data.SetFileDropList(list);
+                data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(2))); // paste moves them out of the holding folder: never twice the space
+                Set(data);
+            });
+
+            private static void Set(DataObject data)
+            {
+                for (int i = 0; ; i++)
                 {
-                    _lastIn = Print(text);
-                    for (int i = 0; i < 5; i++)
+                    try { Clipboard.SetDataObject(data, true, 2, 50); return; }
+                    catch (Exception e)
                     {
-                        try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(text, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }
-                        catch { System.Threading.Thread.Sleep(20); }
+                        if (i == 4) { ServiceHost.Log("Could not put it on the clipboard: " + e.Message); return; }
+                        System.Threading.Thread.Sleep(100); // another program has it open
                     }
-                });
-            }
-
-            public void FilesArrived(string[] paths)
-            {
-                if (!_invoker.IsHandleCreated) return;
-                _invoker.BeginInvoke(() =>
-                {
-                    _lastFiles = string.Join("|", paths);
-                    var list = new System.Collections.Specialized.StringCollection();
-                    list.AddRange(paths);
-                    var data = new DataObject();
-                    data.SetFileDropList(list);
-                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(2))); // paste moves them out of the holding folder: never twice the space
-                    for (int i = 0; i < 5; i++)
-                    {
-                        try { _ownAt = Environment.TickCount64; Clipboard.SetDataObject(data, true, 2, 50); _own = GetClipboardSequenceNumber(); _ownAt = Environment.TickCount64; return; }
-                        catch { System.Threading.Thread.Sleep(20); }
-                    }
-                });
-            }
-
-            protected override void WndProc(ref Message m)
-            {
-                if (m.Msg == 0x031D && _share) // WM_CLIPBOARDUPDATE, only while sharing
-                {
-                    // Not our own paste (0.6 s quiet after it), and only once the copying stops for 150 ms.
-                    if (Environment.TickCount64 - _ownAt >= 600) { _gather.Stop(); _gather.Start(); }
-                }
-                base.WndProc(ref m);
-            }
-
-            private void Settled()
-            {
-                {
-                    try
-                    {
-                        if (GetClipboardSequenceNumber() == _own || Environment.TickCount64 - _ownAt < 600) return; // what the agent itself just put there
-                        if (Clipboard.ContainsFileDropList())
-                        {
-                            var list = Clipboard.GetFileDropList();
-                            var files = new string[list.Count];
-                            list.CopyTo(files, 0);
-                            string key = string.Join("|", files);
-                            if (files.Length > 0 && key != _lastFiles) _host.SendClipboardFiles(files);
-                            _lastFiles = key;
-                            _lastIn = null;
-                        }
-                        else
-                        {
-                            string text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
-                            string print = Print(text);
-                            if (text.Length > 0 && print != _lastIn) _host.SendClipboard(text);
-                            _lastIn = print;
-                            _lastFiles = null;
-                        }
-                    }
-                    catch { }
                 }
             }
         }

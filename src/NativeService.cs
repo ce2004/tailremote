@@ -70,6 +70,36 @@ namespace TailRemote
         public const int TokenSessionId = 12, SecurityImpersonation = 2, TokenPrimary = 1;
         public const uint CREATE_NO_WINDOW = 0x08000000, CREATE_UNICODE_ENVIRONMENT = 0x400;
 
+        [DllImport("shell32.dll")]
+        private static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path);
+
+        public static readonly Guid FolderDownloads = new("374DE290-123F-4565-9164-39C4925E467B");
+        public static readonly Guid FolderLocalAppData = new("F1B32785-6FBA-4FCF-9D55-7B8E7F157091");
+
+        /// <summary>
+        /// Where the signed-in user's own folder really is (Downloads moved to another drive or
+        /// OneDrive included), or null if nobody is signed in or Windows does not say.
+        /// </summary>
+        public static string? UserFolder(uint session, Guid folder)
+        {
+            if (!WTSQueryUserToken(session, out IntPtr token)) return null;
+            try
+            {
+                if (SHGetKnownFolderPath(ref folder, 0, token, out IntPtr p) != 0) return null;
+                try { return Marshal.PtrToStringUni(p); }
+                finally { Marshal.FreeCoTaskMem(p); }
+            }
+            finally { CloseHandle(token); }
+        }
+
+        /// <summary>This user's own folder, wherever it really is, or null if Windows does not say.</summary>
+        public static string? MyFolder(Guid folder)
+        {
+            if (SHGetKnownFolderPath(ref folder, 0, IntPtr.Zero, out IntPtr p) != 0) return null;
+            try { return Marshal.PtrToStringUni(p); }
+            finally { Marshal.FreeCoTaskMem(p); }
+        }
+
         /// <summary>The signed-in user's profile folder in a session, or null if nobody is signed in.</summary>
         public static string? UserProfile(uint session)
         {

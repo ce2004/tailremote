@@ -485,6 +485,7 @@ namespace TailRemote
                     ctrl.TransferProgress += watch;
                     host.TransferProgress += watchThere;
                     ctrl.Files!.TestPause(300); // confirmations held up briefly, so the files are seen moving side by side
+                    ctrl.Files!.TestMostActive = 0; // counted for this transfer only
                     var clock = Stopwatch.StartNew();
                     var (hostSays, clientSays) = BothSay(host, ctrl, "10 items", () => ctrl.Files!.SendFiles(items));
                     ctrl.TransferProgress -= watch;
@@ -524,6 +525,7 @@ namespace TailRemote
 
                 Scenario("hosting as the service: the window sends and receives through the agent", 60, () =>
                 {
+                    ServiceLink.TestAnyOwner = true; // this test plays the agent itself, so its pipe is not SYSTEM's
                     var server = new ServiceLink.Server(host);
                     string? toWindow = null, toController = null;
                     string[]? windowFiles = null, controllerFiles = null;
@@ -555,9 +557,17 @@ namespace TailRemote
                     for (int i = 0; i < 500 && (windowFiles == null || windowSaw == null); i++) Thread.Sleep(20);
                     ctrl.ClipboardReceived -= took;
                     ctrl.ClipboardFilesReceived -= tookFiles;
+                    // A pipe of this name not owned by SYSTEM (as here, where the test plays the agent) is a
+                    // stand-in for an impostor: with the check on, the window must refuse it.
+                    ServiceLink.TestAnyOwner = false;
+                    using var fooled = new ServiceLink.Client();
+                    Thread.Sleep(3000);
+                    bool refusedImpostor = !fooled.Connected;
+                    ServiceLink.TestAnyOwner = true;
+                    if (!refusedImpostor) return "FAIL: the window linked up with a pipe that is not the service's";
                     bool ok = toController == "from the window, through the agent" && toWindow == "from the controller, to the window"
                         && sameFile && windowFiles != null && windowSaw != null;
-                    return ok ? "text both ways, a file each way, and the window saw the transfer finish"
+                    return ok ? "text both ways, a file each way, the window saw the transfer finish, and a pipe not owned by SYSTEM was refused"
                         : "FAIL: controller got " + toController + ", window got " + toWindow + ", files to controller " + (controllerFiles != null) + ", files to window " + (windowFiles != null) + ", window saw the end " + (windowSaw != null);
                 });
 

@@ -1,3 +1,10 @@
+1.8.22
+Bug fixed: with the service hosting and no TailRemote window open, what the controlling PC sent never reached the clipboard, so there was nothing to paste. The service now puts it there properly.
+Bug fixed: with a moved Downloads folder (on another drive, or in OneDrive), Send files saved into the default one instead. Files now go into your real Downloads, TailRemote, with or without the service.
+Bug fixed: another account signed in on the same PC could pick up what the controlling PC sent to your clipboard through the service, and a program running as an ordinary user could pretend to be the service. The service now only talks to the TailRemote window of the person at the screen, and the window checks it is really the service.
+Bug fixed: a TailRemote window that stopped responding could slow the service's file transfers.
+Changed: if the service has not updated to the window's version yet, Send the clipboard and Send files say so, and the update is started.
+
 1.8.21
 Bug fixed: the PC that received a folder kept a lot of memory in use afterwards. Each connection now reuses one buffer for everything it sends and receives, instead of a new one for every piece, lets go of it when nothing is moving, and the memory goes back to Windows after any transfer of more than 1,000 files or 32 MB. In testing, sending and receiving 500 MB together peaked at 84 MB.
 Bug fixed: rarely, when the connection broke in the middle of a transfer, one piece could be lost for good, and the transfer stopped moving and gave up a minute later. That piece is now always sent again.

@@ -380,7 +380,17 @@ namespace TailRemote
             link = HostMode && _service.Checked ? _serviceLink : null;
             if (link != null)
             {
-                if (!link.Connected) { Say("The TailRemote service is not answering. Check that it is running, or press Apply settings to the service."); return false; }
+                if (!link.Connected)
+                {
+                    // An older service has no link to this window yet: it updates itself to this version.
+                    if (ServiceHost.InstalledVersion() is Version v && v < Updater.Current)
+                    {
+                        OfferServiceUpdate();
+                        Say("The TailRemote service is still on version " + v + " and is updating itself to " + Updater.Current + ". Try again in a minute.");
+                    }
+                    else Say("The TailRemote service is not answering. Check that it is running, or press Apply settings to the service.");
+                    return false;
+                }
                 if (!link.HasController) { Say("No one is controlling this PC, so there is no one to send to."); return false; }
                 return true;
             }

@@ -7,7 +7,6 @@ namespace TailRemote
 {
     internal static class Program
     {
-        [STAThread]
         /// <summary>Writes an unexpected error to TailRemote-crash.txt next to the exe (and the log, if on).</summary>
         internal static void Crash(Exception? e) => CrashNote(e?.ToString() ?? "unknown error");
 
@@ -23,6 +22,10 @@ namespace TailRemote
             catch { }
         }
 
+        // Main is not [STAThread] (a stray one sat on Crash above for a long time, doing nothing): the
+        // window and the audio have always run this way, and the sound code shares Windows audio
+        // objects between threads. Anything that needs STA (the clipboard, file and folder pickers)
+        // runs on a thread of its own that is: MainForm.ClipboardJobs, PickFiles, Agent.ClipboardSetter.
         private static int Main(string[] args)
         {
             Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
