@@ -181,7 +181,7 @@ namespace TailRemote
         private static string? _keptFor;
         private string? _filesFor;
 
-        /// <summary>Disconnect pressed: transfers kept for a reconnection are stopped for good.</summary>
+        /// <summary>Stop pressed while not connected: transfers waiting for a reconnection are stopped for good.</summary>
         public static void ForgetTransfers()
         {
             lock (KeptGate) { _kept?.Dispose(); _kept = null; }
@@ -315,17 +315,15 @@ namespace TailRemote
             try { _udp.Dispose(); } catch { }
             if (_files != null)
             {
-                if (why == null) _files.Dispose(); // closed on purpose: transfers stop, and the host is told
-                else
+                // Transfers are never ended by the connection: dropped, they wait (their lanes may even
+                // carry on); disconnected on purpose, they pause. Either way they carry on where they
+                // were on the next connection to this host, however long that takes. Only Stop ends them.
+                if (why == null) _files.Pause(); else _files.Detach();
+                lock (KeptGate)
                 {
-                    // Dropped: transfers wait for the next connection to this host (a minute at most).
-                    _files.Detach();
-                    lock (KeptGate)
-                    {
-                        if (_kept != _files) _kept?.Dispose();
-                        _kept = _files;
-                        _keptFor = _filesFor;
-                    }
+                    if (_kept != _files) _kept?.Dispose();
+                    _kept = _files;
+                    _keptFor = _filesFor;
                 }
             }
             _wifi?.Dispose();

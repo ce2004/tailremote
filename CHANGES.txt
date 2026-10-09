@@ -1,3 +1,9 @@
+1.8.24
+Changed: a transfer is never thrown away when the connection breaks or you press Disconnect. Whatever has arrived stays where it is, the transfer waits (the Files line says so), and it carries on from where it was as soon as you are connected to that PC again, however long that takes. Only Stop the file transfer ends it.
+Changed: if a transfer is stopped part-way, everything that arrived is kept. Files that arrived whole stay as they are, and a file that only partly arrived is kept with (incomplete) in its name. The Files line says how many and where.
+New feature: Pick where received files go (Alt K) chooses the folder that files from Send files and Send a folder are saved in. Received files go to shows the folder in use; it starts as Downloads, TailRemote. This works with the service too.
+Changed: the time left now reads in hours and days for long transfers, such as about 2 days 3 hours left, and it follows the speed of the last few seconds, so it stays right after a pause.
+
 1.8.23
 Changed: the TailRemote service now hosts by itself, from the moment Windows starts it, before the sign-in screen even appears. The controlling PC can be connected and listening in time to hear the Windows startup sound, and the connection now carries on through signing in, signing out and switching user, instead of dropping each time. Keys are still typed on whatever screen is showing, the lock screen and UAC prompts included.
 Changed: when the connection drops, or the other PC is restarting, TailRemote tries again every second instead of every 3 seconds, and does not wait as long for a PC that is not answering yet, so it is back the moment the other PC is.

@@ -25,6 +25,8 @@ namespace TailRemote
         public string OutputDevice { get; set; } = "";
         /// <summary>Host: the output whose sound is sent ("" = Windows' default).</summary>
         public string CaptureDevice { get; set; } = "";
+        /// <summary>Where Send files and Send a folder from the other PC are saved; empty: Downloads\TailRemote.</summary>
+        public string ReceiveFolder { get; set; } = "";
         public string ListenPasswordEnc { get; set; } = "";
         public bool Logging { get; set; }
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>

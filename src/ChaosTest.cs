@@ -41,6 +41,17 @@ namespace TailRemote
             long memBefore = GC.GetTotalMemory(true);
             int threadsBefore = Process.GetCurrentProcess().Threads.Count;
 
+            Scenario("time left in words, up to days", 5, () =>
+            {
+                var cases = new (double Seconds, string Says)[]
+                {
+                    (12, "12 seconds"), (61, "1 minute 1 second"), (3600, "1 hour"), (3600 * 5 + 60 * 20, "5 hours 20 minutes"),
+                    (86_400 * 2 + 3600 * 3, "2 days 3 hours"), (86_400, "1 day"),
+                };
+                var wrong = cases.Where(c => MainForm.Duration(TimeSpan.FromSeconds(c.Seconds)) != c.Says).Select(c => c.Says + " came out as " + MainForm.Duration(TimeSpan.FromSeconds(c.Seconds))).ToList();
+                return wrong.Count == 0 ? "seconds, minutes, hours and days all read right" : "FAIL: " + string.Join("; ", wrong);
+            });
+
             Scenario("junk instead of a login, 50 times", 30, () =>
             {
                 var rnd = new Random(1);
@@ -618,21 +629,55 @@ namespace TailRemote
                     return ok ? "the transfer picked up on the new connection and arrived whole" : "FAIL: dropped " + dropped + ", same channel " + same + ", sender said " + sent?.Result + ", arrived " + (landed != null);
                 });
 
-                Scenario("the connection dying in the middle of 256 MB", 60, () =>
+                Scenario("pressing Stop part-way through a folder: what arrived is kept, and a cut-off file is marked incomplete", 120, () =>
                 {
-                    string big = Big("dies.bin", 256);
-                    var hostDied = new List<FileChannel.Transfer>();
-                    host.TransferProgress += t => { if (t.Finished && t.What == "dies.bin") lock (hostDied) hostDied.Add(t); };
-                    var c2 = Connect(Password); // a second controller, to be cut off
-                    for (int i = 0; i < 100 && c2.Files == null; i++) Thread.Sleep(50);
-                    var send = Task.Run(() => c2.Files!.SendFiles(new[] { big }));
-                    Thread.Sleep(400);
-                    c2.Dispose();
-                    send.Wait(10_000);
-                    Thread.Sleep(1500);
-                    var partial = Directory.Exists(FileChannel.Staging) ? Directory.EnumerateFiles(FileChannel.Staging, "dies.bin", SearchOption.AllDirectories).ToList() : new List<string>();
-                    bool receiverSaid = hostDied.Any(r => r.Failed);
-                    return partial.Count == 0 && receiverSaid ? "the receiving PC said it failed too, and threw the half-arrived file away" : "FAIL: partial left " + partial.Count + ", receiver said failed " + receiverSaid;
+                    string src = Path.Combine(Root, "src", "Stopped");
+                    Directory.CreateDirectory(src);
+                    for (int i = 0; i < 8; i++) File.Move(Big("stopped" + i + ".bin", 64), Path.Combine(src, "stopped" + i + ".bin"));
+                    FileChannel.Transfer? hostEnd = null;
+                    bool moving = false;
+                    Action<FileChannel.Transfer> note = t => { if (t.What == "Stopped") { if (t.Finished) hostEnd = t; else if (t.Done > 0) moving = true; } };
+                    host.TransferProgress += note;
+                    var send = Task.Run(() => ctrl.Files!.SendFiles(new[] { src }, toClipboard: false));
+                    for (int i = 0; i < 500 && !moving; i++) Thread.Sleep(5);
+                    ctrl.CancelTransfer();
+                    send.Wait(20_000);
+                    for (int i = 0; i < 250 && hostEnd == null; i++) Thread.Sleep(20);
+                    host.TransferProgress -= note;
+                    Thread.Sleep(1000); // a file still being written is marked incomplete a moment later
+                    string landed = Path.Combine(FileChannel.Downloads, "Stopped");
+                    var kept = Directory.Exists(landed) ? Directory.GetFiles(landed) : Array.Empty<string>();
+                    bool marked = kept.Any(f => f.Contains("(incomplete)")), empty = kept.Any(f => new FileInfo(f).Length == 0);
+                    bool ok = hostEnd?.Cancelled == true && kept.Length > 0 && !empty && (marked || kept.Length == 8);
+                    return ok ? "kept " + kept.Length + " files (" + kept.Count(f => f.Contains("(incomplete)")) + " marked incomplete); the receiver said: " + hostEnd!.Result
+                        : "FAIL: receiver said " + hostEnd?.Result + "; kept " + kept.Length + ", marked incomplete " + marked + ", empty ones left " + empty;
+                });
+
+                Scenario("disconnecting in the middle of a 512 MB folder: what arrived stays, and it carries on when connected again", 120, () =>
+                {
+                    string src = Path.Combine(Root, "src", "Resume");
+                    Directory.CreateDirectory(src);
+                    for (int i = 0; i < 8; i++) File.Move(Big("resume" + i + ".bin", 64), Path.Combine(src, "resume" + i + ".bin"));
+                    FileChannel.Transfer? hostEnd = null;
+                    bool moving = false;
+                    Action<FileChannel.Transfer> note = t => { if (t.What == "Resume") { if (t.Finished) hostEnd = t; else if (t.Done > 0) moving = true; } };
+                    host.TransferProgress += note;
+                    var c2 = Connect(Password); // a second controller, disconnected part-way
+                    for (int i = 0; i < 100 && c2.Files!.TestLanes == 0; i++) Thread.Sleep(50);
+                    var files = c2.Files!;
+                    var send = Task.Run(() => files.SendFiles(new[] { src }, toClipboard: false));
+                    for (int i = 0; i < 500 && !moving; i++) Thread.Sleep(5);
+                    c2.Dispose(); // Disconnect pressed
+                    Thread.Sleep(2000);
+                    string landed = Path.Combine(FileChannel.Downloads, "Resume");
+                    bool waited = hostEnd == null && !send.IsCompleted && Directory.Exists(landed);
+                    using var c3 = Connect(Password); // connected again
+                    send.Wait(60_000);
+                    for (int i = 0; i < 500 && hostEnd == null; i++) Thread.Sleep(20);
+                    host.TransferProgress -= note;
+                    bool whole = Enumerable.Range(0, 8).All(i => File.Exists(Path.Combine(landed, "resume" + i + ".bin")) && Same(Path.Combine(src, "resume" + i + ".bin"), Path.Combine(landed, "resume" + i + ".bin")));
+                    return waited && hostEnd?.Failed == false && whole ? "it waited through the disconnection with what had arrived, then finished all 8 files exactly"
+                        : "FAIL: waited " + waited + ", receiver said " + hostEnd?.Result + ", all 8 whole " + whole;
                 });
             }
 

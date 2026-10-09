@@ -59,7 +59,10 @@ namespace TailRemote
             // The TailRemote window, when open, does the clipboard and sends files through the service
             // (ServiceLink), as the signed-in user; it must be in the session at the screen. Without a
             // window, what the controlling PC sends goes onto the clipboard through the agent.
-            var link = new ServiceLink.Server(_host, NativeService.WTSGetActiveConsoleSessionId);
+            var link = new ServiceLink.Server(_host, NativeService.WTSGetActiveConsoleSessionId)
+            {
+                FolderChosen = folder => { _windowFolder = folder; ChooseFolders(); }, // picked in the window, checked as its user
+            };
             _host.ClipboardReceived += text => { if (!link.Text(text)) agent.Text(text); };
             _host.ClipboardFilesReceived += paths => { if (!link.Files(paths)) agent.Files(paths); };
             _host.TransferProgress += t => link.Transfer(t);
@@ -93,8 +96,11 @@ namespace TailRemote
             string local = (profile != null ? NativeService.UserFolder(session, NativeService.FolderLocalAppData) : null) ?? Path.Combine(root, "AppData", "Local");
             string downloads = (profile != null ? NativeService.UserFolder(session, NativeService.FolderDownloads) : null) ?? Path.Combine(root, "Downloads");
             FileChannel.StagingOverride = Path.Combine(local, "TailRemote", "Clipboard");
-            FileChannel.DownloadsOverride = Path.Combine(downloads, "TailRemote");
+            FileChannel.DownloadsOverride = _windowFolder ?? Path.Combine(downloads, "TailRemote");
         }
+
+        /// <summary>Where the TailRemote window says received files go; null: the signed-in user's Downloads\TailRemote.</summary>
+        private static volatile string? _windowFolder;
 
         // ================= In the session at the screen (--agent) =================
 

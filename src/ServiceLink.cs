@@ -25,7 +25,7 @@ namespace TailRemote
     {
         private const string PipeName = "TailRemoteFiles";
         // Window to agent:
-        private const byte SendText = (byte)'t', SendClipFiles = (byte)'f', SendDownloads = (byte)'d', CancelAll = (byte)'x';
+        private const byte SendText = (byte)'t', SendClipFiles = (byte)'f', SendDownloads = (byte)'d', CancelAll = (byte)'x', ReceiveIn = (byte)'o';
         // Agent to window:
         private const byte GotText = (byte)'T', GotFiles = (byte)'F', Progress = (byte)'P', Controller = (byte)'H';
 
@@ -106,6 +106,34 @@ namespace TailRemote
             public bool Text(string text) => Forward(GotText, Encoding.UTF8.GetBytes(text));
             public bool Files(string[] paths) => Forward(GotFiles, Paths(paths));
             public void Transfer(FileChannel.Transfer t) => Forward(Progress, Pack(t), mayDrop: !t.Finished);
+
+            /// <summary>The window's choice of where received files go (null: the usual place). Set by the service.</summary>
+            public Action<string?>? FolderChosen;
+
+            /// <summary>
+            /// The window's user picked a folder for received files. The service writes there as SYSTEM, so
+            /// it is only taken if that user could write there themselves: nobody can use it to put files
+            /// where they could not.
+            /// </summary>
+            private void ChooseFolder(string folder, WindowsIdentity? user)
+            {
+                if (folder.Length == 0) { FolderChosen?.Invoke(null); return; }
+                bool allowed = false;
+                if (user != null)
+                    WindowsIdentity.RunImpersonated(user.AccessToken, () =>
+                    {
+                        try
+                        {
+                            string probe = Path.Combine(folder, ".tailremote-" + Guid.NewGuid().ToString("N"));
+                            File.WriteAllBytes(probe, Array.Empty<byte>());
+                            File.Delete(probe);
+                            allowed = true;
+                        }
+                        catch { }
+                    });
+                if (allowed) FolderChosen?.Invoke(folder);
+                else ServiceHost.Log("Service link: " + user?.Name + " cannot write to " + folder + ", so received files stay where they were.");
+            }
 
             private void AcceptLoop()
             {
@@ -188,6 +216,7 @@ namespace TailRemote
                             case SendClipFiles: _host.SendClipboardFiles(Paths(p), asUser); break;
                             case SendDownloads: _host.SendFiles(Paths(p), asUser); break;
                             case CancelAll: _host.CancelTransfer(); break;
+                            case ReceiveIn: ChooseFolder(Encoding.UTF8.GetString(p), asUser); break;
                         }
                     }
                 }
@@ -227,6 +256,15 @@ namespace TailRemote
                 try { _pipe?.Dispose(); } catch { }
             }
 
+            private volatile string _folder = "";
+
+            /// <summary>Where the service should save received files (empty: the usual Downloads, TailRemote). Told to it now, and on every connection.</summary>
+            public string ReceiveFolder
+            {
+                get => _folder;
+                set { _folder = value ?? ""; Send(ReceiveIn, Encoding.UTF8.GetBytes(_folder)); }
+            }
+
             public void SendClipboard(string text) => Send(SendText, Encoding.UTF8.GetBytes(text));
             public void SendClipboardFiles(IReadOnlyList<string> paths) => Send(SendClipFiles, Paths(paths));
             public void SendFiles(IReadOnlyList<string> paths) => Send(SendDownloads, Paths(paths));
@@ -261,6 +299,7 @@ namespace TailRemote
                             continue;
                         }
                         _pipe = pipe;
+                        if (_folder.Length > 0) Send(ReceiveIn, Encoding.UTF8.GetBytes(_folder)); // the service may have restarted since
                         while (!_stop)
                         {
                             var (type, p) = Read(pipe);

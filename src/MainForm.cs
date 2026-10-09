@@ -32,6 +32,9 @@ namespace TailRemote
         private readonly TextBox _transferStatus = new() { ReadOnly = true, TabStop = true };
         private readonly ProgressBar _transferBar = new() { Height = 22, Maximum = 100, AccessibleName = "File transfer progress" };
         private readonly Button _transferStop = new() { Text = "Stop the file transfer", AutoSize = true, Enabled = false };
+        // Where Send files and Send a folder from the other PC are saved.
+        private readonly TextBox _receiveFolder = new() { ReadOnly = true, TabStop = true };
+        private readonly Button _pickReceiveFolder = new() { Text = "Pic&k where received files go", AutoSize = true };
         private readonly CheckBox _logging = new() { Text = "Enable lo&gging (writes TailRemote-log.txt next to TailRemote)", AutoSize = true };
         private readonly Button _sounds = new() { Text = "Sounds for connecting, clipboard and fi&les", AutoSize = true };
         private readonly CheckBox _speedUp = new() { Text = "Catch up b&y fast-forwarding the sound at 2x or 4x, same pitch (otherwise it skips ahead)", AutoSize = true, MaximumSize = new Size(560, 0) };
@@ -108,6 +111,9 @@ namespace TailRemote
             AddRow(table, "File transfer progress", _transferBar);
             table.Controls.Add(_fileBars); table.SetColumnSpan(_fileBars, 2);
             table.Controls.Add(_transferStop); table.SetColumnSpan(_transferStop, 2);
+            AddRow(table, "Received files go to", _receiveFolder);
+            table.Controls.Add(_pickReceiveFolder); table.SetColumnSpan(_pickReceiveFolder, 2);
+            _pickReceiveFolder.Click += (_, _) => PickReceiveFolder();
             _transferBar.Dock = DockStyle.Fill;
             _captureLabel = AddRow(table, "C&apture sound from (the output other PCs hear)", _captureFrom);
             table.Controls.Add(_logging); table.SetColumnSpan(_logging, 2);
@@ -147,6 +153,7 @@ namespace TailRemote
             _listenPassword.Text = _settings.ListenPassword;
             _logging.Checked = _settings.Logging;
             _speedUp.Checked = _settings.CatchUpBySpeed;
+            ApplyReceiveFolder();
             Sounds.Key = Math.Clamp(_settings.SoundKey, 0, 11);
             Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && (s == Sounds.RandomName || Sounds.All.Contains(s)) ? s : Sounds.DefaultName;
             _sounds.Click += (_, _) =>
@@ -316,7 +323,7 @@ namespace TailRemote
             bool want = HostMode && _service.Checked;
             if (want && _serviceLink == null)
             {
-                var link = new ServiceLink.Client();
+                var link = new ServiceLink.Client { ReceiveFolder = _settings.ReceiveFolder };
                 link.TextArrived += text => Later(() => ClipboardArrived(text));
                 link.FilesArrived += paths => Later(() => ClipboardFilesArrived(paths));
                 link.TransferProgress += t => Later(() => ShowTransfer(t));
@@ -470,6 +477,53 @@ namespace TailRemote
             t.SetApartmentState(System.Threading.ApartmentState.STA);
             t.Start();
             return done.Task;
+        }
+
+        /// <summary>Received files go where the setting says (Downloads\TailRemote when it is empty), here and in the service.</summary>
+        private void ApplyReceiveFolder()
+        {
+            string folder = _settings.ReceiveFolder;
+            FileChannel.DownloadsOverride = folder.Length > 0 ? folder : null;
+            _receiveFolder.Text = FileChannel.Downloads;
+            if (_serviceLink != null) _serviceLink.ReceiveFolder = folder;
+        }
+
+        private bool _pickingFolder;
+
+        /// <summary>Pick where received files go: a folder picker on its own thread, like Send a folder.</summary>
+        private async void PickReceiveFolder()
+        {
+            Doing("picking where received files go");
+            if (_pickingFolder) return;
+            _pickingFolder = true;
+            try
+            {
+                var done = new System.Threading.Tasks.TaskCompletionSource<string?>();
+                var t = new System.Threading.Thread(() =>
+                {
+                    try
+                    {
+                        using var pick = new FolderBrowserDialog
+                        {
+                            Description = "Choose where files from the other PC are saved",
+                            UseDescriptionForTitle = true,
+                            SelectedPath = FileChannel.Downloads,
+                        };
+                        done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? pick.SelectedPath : null);
+                    }
+                    catch (Exception e) { done.TrySetException(e); }
+                }) { IsBackground = true, Name = "TailRemote folder picker" };
+                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.Start();
+                string? chosen = await done.Task;
+                if (chosen == null) return;
+                _settings.ReceiveFolder = chosen;
+                SaveSettings();
+                ApplyReceiveFolder();
+                Say("Received files will go to " + chosen + ".");
+            }
+            catch (Exception e) { Say("Could not choose the folder: " + e.Message); }
+            finally { _pickingFolder = false; }
         }
 
         private async void SendFiles(bool folder)
@@ -657,7 +711,7 @@ namespace TailRemote
             if (going.Count == 1 && _ended.Count == 0)
             {
                 var g = going[0];
-                string left = g.Left is TimeSpan l ? ", about " + (l.TotalSeconds < 60 ? Math.Max(1, (int)l.TotalSeconds) + " seconds" : (int)l.TotalMinutes + " minutes " + l.Seconds + " seconds") + " left" : "";
+                string left = g.Left is TimeSpan l ? ", about " + Duration(l) + " left" : "";
                 _transferStatus.Text = (g.Outgoing ? "Sending " : "Receiving ") + g.What + ": " + FileChannel.Size(g.Done) + " of " + FileChannel.Size(g.Total) +
                     (g.Waiting ? ", waiting for the connection to come back; it carries on from here." : ", " + FileChannel.Speed(g.BytesPerSecond) + left + ".");
                 _transferBar.Value = g.Total <= 0 ? 0 : (int)Math.Clamp(g.Done * 100 / g.Total, 0, 100);
@@ -671,11 +725,28 @@ namespace TailRemote
                 bool outgoing = going.All(x => x.Outgoing), incoming = going.All(x => !x.Outgoing);
                 string names = string.Join(", ", going.Select(x => x.What).Distinct().Take(3));
                 _transferStatus.Text = (outgoing ? "Sending " + names + " to " + all.Count + " PCs" : incoming ? "Receiving " + names + " from " + all.Count + " PCs" : "Moving " + all.Count + " transfers") +
-                    (_ended.Count > 0 ? ", " + _ended.Count + " finished" : "") + ": " + FileChannel.Size(done) + " of " + FileChannel.Size(total) + ", " + FileChannel.Speed(going.Sum(x => x.BytesPerSecond)) + ".";
+                    (_ended.Count > 0 ? ", " + _ended.Count + " finished" : "") + ": " + FileChannel.Size(done) + " of " + FileChannel.Size(total) + ", " + FileChannel.Speed(going.Sum(x => x.BytesPerSecond)) +
+                    // They go side by side, so the slowest one says when all are done.
+                    (going.Select(x => x.Left).Where(x => x != null).Max() is TimeSpan most ? ", about " + Duration(most) + " left" : "") + ".";
                 _transferBar.Value = total <= 0 ? 0 : (int)Math.Clamp(done * 100 / total, 0, 100);
                 ShowFileBars(going.Select(x => ((x.Peer.Length > 0 ? x.Peer + ", " : "") + x.What, x.Done, x.Total)).ToList());
             }
             _transferStop.Enabled = true;
+        }
+
+        /// <summary>
+        /// How long, in words, with the two largest parts that matter: "2 days 3 hours",
+        /// "1 hour 20 minutes", "4 minutes 10 seconds", "12 seconds".
+        /// </summary>
+        internal static string Duration(TimeSpan t)
+        {
+            static string Part(long n, string unit) => n + " " + unit + (n == 1 ? "" : "s");
+            long seconds = Math.Max(1, (long)Math.Round(t.TotalSeconds));
+            long days = seconds / 86_400, hours = seconds / 3600 % 24, minutes = seconds / 60 % 60, secs = seconds % 60;
+            if (days > 0) return Part(days, "day") + (hours > 0 ? " " + Part(hours, "hour") : "");
+            if (hours > 0) return Part(hours, "hour") + (minutes > 0 ? " " + Part(minutes, "minute") : "");
+            if (minutes > 0) return Part(minutes, "minute") + (secs > 0 ? " " + Part(secs, "second") : "");
+            return Part(secs, "second");
         }
 
         /// <summary>One line for transfers that all ended: the one result, or how many PCs got it and what went wrong.</summary>
@@ -1038,13 +1109,9 @@ namespace TailRemote
 
         private void Disconnect(string why, bool byUser)
         {
-            // Pressing Disconnect stops transfers; a dropped connection does not: they carry on
-            // when it reconnects (and say so on the Files line meanwhile).
-            if (byUser)
-            {
-                Client.ForgetTransfers();
-                TransferEnded("Stopped: you disconnected.");
-            }
+            // Transfers never end with the connection, dropped or disconnected: they wait (the Files
+            // line says so) and carry on where they were on the next connection to this PC. Only
+            // Stop the file transfer ends them.
             Doing("disconnecting");
             if (_client == null) return;
             // Keys come back to this PC while the connection is down, so nothing is

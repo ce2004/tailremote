@@ -75,7 +75,7 @@ namespace TailRemote
         public bool Gone => _closed;
 
         /// <summary>True while a batch is going either way (the client then measures its ping more often).</summary>
-        public bool Busy => _out != null || _in != null;
+        public bool Busy => _out != null || (_in is In b && Now - b.LastActivity < 60_000); // a receiver waiting for its sender to come back is not busy
 
         public sealed class Transfer
         {
@@ -152,12 +152,23 @@ namespace TailRemote
 
         /// <summary>
         /// The main connection is gone. The lanes stay (they may still work) and so do the
-        /// transfers: a new connection picks them up. Closed after a minute without one.
+        /// transfers: a new connection picks them up, however long that takes. With nothing
+        /// going, closed after a minute without one.
         /// </summary>
         public void Detach()
         {
             _dial = null;
             Interlocked.Exchange(ref _detachedAt, Now);
+        }
+
+        /// <summary>
+        /// Disconnect pressed: the transfers wait (their lanes close, so nothing moves) and carry
+        /// on where they were on the next connection to the same PC. Only Stop ends them.
+        /// </summary>
+        public void Pause()
+        {
+            Detach();
+            foreach (var l in _lanes) Kill(l);
         }
 
         /// <summary>Closed on purpose: whatever is going is stopped, and the other PC told so.</summary>
@@ -297,11 +308,16 @@ namespace TailRemote
                     }
                     foreach (var l in stalled) { DiagLog.Write("files: a lane stalled; closing it, its pieces go again"); Kill(l); }
                 }
-                if (_in is In b && now - b.LastActivity > GiveUpMs)
-                    EndIn(b, EndedBadly, "Nothing came from the other PC for a minute, so " + b.T.What + " was stopped. Send it again.",
-                        "The other PC heard nothing for a minute and gave up.", null, tell: true);
+                // Nothing arriving: never given up on (it carries on when the other PC is back), but
+                // the Files line says it is waiting rather than look stuck.
+                if (_in is In b && b.Prepared && !b.Ended)
+                {
+                    bool waiting = now - b.LastActivity > 10_000;
+                    if (waiting != b.T.Waiting) { b.T.Waiting = waiting; try { Progress?.Invoke(b.T); } catch { } }
+                }
+                // Detached with nothing going: nothing to carry on with, so closed after a minute.
                 long d = Interlocked.Read(ref _detachedAt);
-                if (d != 0 && now - d > GiveUpMs + 10_000 && (_lanes.Length == 0 || (_out == null && _in == null))) { Dispose(); return false; }
+                if (d != 0 && now - d > GiveUpMs + 10_000 && _out == null && _in == null) { Dispose(); return false; }
             }
             return true;
         }
@@ -455,7 +471,6 @@ namespace TailRemote
             public volatile bool Ready, Ended;
             public byte Outcome;
             public string Why = "";
-            public long LastProgress = Now;
             // Under Gate:
             public readonly Queue<PieceRef> Retry = new();
             public long[] Next = Array.Empty<long>();         // per file: the next offset to hand out
@@ -633,7 +648,8 @@ namespace TailRemote
         {
             var t = new Transfer { Outgoing = true, What = o.What, Total = o.Total, Clipboard = o.Kind != KindDownloads, Peer = PeerName };
             var clock = Stopwatch.StartNew();
-            double lastReport = 0;
+            double lastReport = 0, speed = 0, moving = 0;
+            long lastDone = 0;
             Lane? offeredOn = null, askedOn = null;
             long askedAt = 0, allAt = 0;
             DiagLog.Write("files: sending " + o.What + ", " + o.Entries.Count + " entries, " + o.Total + " bytes");
@@ -669,24 +685,28 @@ namespace TailRemote
                         Tell(askedOn, IdMessage(Ask, o.Id));
                     }
                 }
-                if (now - Interlocked.Read(ref o.LastProgress) > GiveUpMs)
-                {
-                    EndOut(o, EndedBadly, "Nothing got through to the other PC for a minute, so " + o.What + " was not sent. Send it again.", tell: true);
-                    break;
-                }
+                // Never given up on: with no connection it waits (the Files line says so) and carries
+                // on where it was when the connection comes back. Only Stop ends it.
                 double s = clock.Elapsed.TotalSeconds;
                 if (s - lastReport >= 0.25)
                 {
+                    long done = Interlocked.Read(ref o.Acked);
+                    double dt = s - lastReport;
+                    if (done > lastDone) moving += dt;
+                    // The speed lately, not since the start: after a pause the time left would be far off.
+                    double rate = (done - lastDone) / dt;
+                    speed = speed == 0 ? rate : speed * 0.7 + rate * 0.3;
+                    lastDone = done;
                     lastReport = s;
-                    t.Done = Interlocked.Read(ref o.Acked);
-                    t.BytesPerSecond = t.Done / Math.Max(0.001, s);
+                    t.Done = done;
+                    t.BytesPerSecond = speed;
                     t.Waiting = lanes.Length == 0;
                     lock (o.Gate) if (!o.Ended) t.Files = o.Active.Take(32).Select(i => (o.Entries[i].Rel, o.EntryAcked[i], o.Entries[i].Length)).ToArray();
                     Progress?.Invoke(t);
                 }
             }
             t.Done = o.Outcome == EndedWell ? o.Total : Interlocked.Read(ref o.Acked); // the receiver has it all, whatever confirmations are still on their way
-            t.BytesPerSecond = t.Done / Math.Max(0.001, clock.Elapsed.TotalSeconds);
+            t.BytesPerSecond = t.Done / Math.Max(0.001, moving > 0.5 ? moving : clock.Elapsed.TotalSeconds); // over the time it was moving, not any waiting
             t.Finished = true;
             t.Waiting = false;
             t.Files = Array.Empty<(string, long, long)>();
@@ -722,7 +742,6 @@ namespace TailRemote
         private void OnReady(uint id)
         {
             if (_out is not Out o || o.Id != id || o.Ready) return;
-            Interlocked.Exchange(ref o.LastProgress, Now);
             o.Ready = true;
             o.Changed.Set();
             foreach (var l in _lanes) l.Wake.Set();
@@ -827,7 +846,6 @@ namespace TailRemote
                 if (entryDone) o.Active.Remove(e);
                 all = o.Acked == o.Total;
             }
-            Interlocked.Exchange(ref o.LastProgress, Now);
             if (entryDone) o.Close(e);
             lane.Wake.Set();
             if (all) o.Changed.Set();
@@ -874,7 +892,8 @@ namespace TailRemote
             public readonly SortedSet<int> Active = new(); // files partly arrived (for the per-file progress)
             public readonly object[] Making = Enumerable.Range(0, 64).Select(_ => new object()).ToArray(); // a file being made holds one of these, not the whole batch
             public long Total, Done;
-            public double LastReport;
+            public double LastReport, Speed, Moving; // speed lately, and the time data was really arriving
+            public long LastDone;
 
             public long Length(int i) => Entries[i]!.Value.Length;
         }
@@ -1103,8 +1122,15 @@ namespace TailRemote
                     double s = b.Clock.Elapsed.TotalSeconds;
                     if (s - b.LastReport >= 0.25)
                     {
+                        double dt = s - b.LastReport;
+                        // A gap (waiting for the other PC) is not counted as time spent moving.
+                        b.Moving += Math.Min(dt, 1);
+                        double rate = (b.Done - b.LastDone) / dt;
+                        b.Speed = b.Speed == 0 ? rate : b.Speed * 0.7 + rate * 0.3;
+                        b.LastDone = b.Done;
                         b.LastReport = s;
-                        b.T.BytesPerSecond = b.Done / Math.Max(0.001, s);
+                        b.T.BytesPerSecond = b.Speed;
+                        b.T.Waiting = false;
                         b.T.Files = b.Active.Take(32).Select(i => (b.Text != null ? "clipboard text" : Path.GetRelativePath(b.Folder!, b.Paths[i]), b.Got[i], b.Length(i))).ToArray();
                         report = true;
                     }
@@ -1133,7 +1159,7 @@ namespace TailRemote
             t.Finished = true;
             t.Files = Array.Empty<(string, long, long)>();
             t.Done = b.Done;
-            t.BytesPerSecond = b.Done / Math.Max(0.001, b.Clock.Elapsed.TotalSeconds);
+            t.BytesPerSecond = b.Done / Math.Max(0.001, b.Moving > 0.5 ? b.Moving : b.Clock.Elapsed.TotalSeconds);
             string? text = null;
             string[]? paths = null;
             if (b.Kind == KindFiles)
@@ -1141,7 +1167,7 @@ namespace TailRemote
                 paths = b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray();
                 t.Result = "The other PC sent " + t.What + Summary(b.Entries.Select(e => e!.Value)) + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
             }
-            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + ", at " + Speed(t.BytesPerSecond) + ". It is in Downloads, TailRemote.";
+            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + ", at " + Speed(t.BytesPerSecond) + ". It is in " + Where(b.Folder!) + ".";
             else
             {
                 text = Encoding.UTF8.GetString(b.Text!);
@@ -1162,8 +1188,8 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// A batch being received ends without arriving: what it made is thrown away and both PCs
-        /// say so. why: for this PC; whyThere: for the sender. tell: send the sender the outcome.
+        /// A batch being received ends without arriving: what did arrive is kept, and both PCs say
+        /// so. why: for this PC; whyThere: for the sender. tell: send the sender the outcome.
         /// </summary>
         private void EndIn(In b, byte outcome, string why, string whyThere, Lane? lane, bool tell)
         {
@@ -1174,7 +1200,13 @@ namespace TailRemote
                 for (int i = 0; i < b.Handles.Length; i++) { b.Handles[i]?.Dispose(); b.Handles[i] = null; }
                 b.Text = null;
             }
-            ThrowAway(b, 0);
+            // Nothing that arrived is thrown away (Conner): finished files stay as they are, a file cut
+            // off part-way is kept and named "(incomplete)", and the Files line says where they are.
+            var (whole, files, part) = KeepWhatArrived(b);
+            if (whole + part > 0)
+                why += " What had arrived was kept: " + whole + " of " + files + (files == 1 ? " file" : " files") +
+                    (part > 0 ? ", and " + part + " only partly, marked incomplete" : "") +
+                    (b.Kind == KindFiles ? ", on your clipboard." : ", in " + Where(b.Folder!) + ".");
             lock (_inGate)
             {
                 if (_in == b) _in = null;
@@ -1193,25 +1225,54 @@ namespace TailRemote
             t.Cancelled = outcome == EndedStopped;
             t.Result = why;
             try { Progress?.Invoke(t); } catch { }
+            // Clipboard files: whatever arrived goes onto the clipboard, as a finished batch would.
+            if (b.Kind == KindFiles && whole + part > 0) try { FilesReceived?.Invoke(b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray()); } catch { }
             GiveBackMemory(b.Entries.Length, b.Total);
         }
 
         /// <summary>
-        /// Deletes what a batch that did not arrive made: its own holding folder, or in Downloads only
-        /// what it made. A lane may still be finishing a write, so it tries again a few times.
+        /// A batch that did not finish: everything that arrived stays. A file that only partly arrived
+        /// gets "(incomplete)" in its name; an empty one made ahead for a file that never got anything
+        /// goes. Returns the files that arrived whole, all the files, and those kept part-received.
+        /// A lane may still be finishing a write, so a file that is busy is tried again a few times.
         /// </summary>
-        private static void ThrowAway(In b, int attempt)
+        private static (int Whole, int Files, int Part) KeepWhatArrived(In b)
         {
-            if (b.Folder == null) return;
-            bool left = false;
-            var targets = b.Kind == KindDownloads ? b.Tops.Select(t => Path.Combine(b.Folder, t)).ToList() : new List<string> { b.Folder };
-            foreach (string p in targets)
+            if (b.Folder == null || b.Kind == KindText || !b.Prepared) return (0, 0, 0);
+            int whole = 0, files = 0, part = 0;
+            for (int i = 0; i < b.Entries.Length; i++)
             {
-                try { if (Directory.Exists(p)) Directory.Delete(p, true); else if (File.Exists(p)) File.Delete(p); }
-                catch { left = true; }
+                long length = b.Length(i), got = b.Got[i];
+                if (length < 0) continue; // a folder
+                files++;
+                if (got >= length) { whole++; continue; }
+                if (got > 0) part++;
+                string path = b.Paths[i];
+                FixUp(path, got > 0, 0);
             }
-            if (left && attempt < 10) ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(200); ThrowAway(b, attempt + 1); });
+            return (whole, files, part);
+
+            static void FixUp(string path, bool someArrived, int attempt)
+            {
+                try
+                {
+                    if (!File.Exists(path)) return;
+                    if (!someArrived) { if (new FileInfo(path).Length == 0) File.Delete(path); return; }
+                    string dir = Path.GetDirectoryName(path)!;
+                    File.Move(path, Path.Combine(dir, Unique(dir, Path.GetFileNameWithoutExtension(path) + " (incomplete)" + Path.GetExtension(path))));
+                }
+                catch when (attempt < 10)
+                {
+                    ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(200); FixUp(path, someArrived, attempt + 1); });
+                }
+                catch { }
+            }
         }
+
+        /// <summary>A folder as the Files line says it: "Downloads, TailRemote" for the usual one.</summary>
+        private static string Where(string folder) =>
+            string.Equals(Path.GetFullPath(folder).TrimEnd('\\'), Path.GetFullPath(Path.Combine(MyDownloads.Value, "TailRemote")).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+                ? "Downloads, TailRemote" : folder;
 
         private void OnStop(uint id)
         {
