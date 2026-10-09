@@ -1,3 +1,6 @@
+1.8.26
+Bug fixed: starting to host (as administrator, or as the service) renamed a VB-Cable output to TailRemote and made it Windows' default playback device, by itself, every time. That broke other programs using that device, and programs set to Windows default were silently moved onto it. TailRemote now never changes audio settings or device names on its own. Only Set up audio device does that, when you press it, and it says exactly what it will do first.
+
 1.8.25
 Bug fixed: if the connection broke while you were holding a key, that key stayed held down on the other PC until you reconnected and pressed it again. While you hold keys, your PC now tells the other PC several times a second that it is still there; if that stops for a second and a half, the other PC lets every held key go. Reconnecting also clears the broken connection's keys at once.
 New feature: closing the window while you are connected no longer disconnects. TailRemote goes to the notification area, stays connected, and you keep hearing the other PC. Your keyboard comes back to this PC first. Press Windows B to find it again; its menu has Disconnect and exit.

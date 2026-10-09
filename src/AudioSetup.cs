@@ -76,16 +76,6 @@ namespace TailRemote
             catch { return false; }
         }
 
-        /// <summary>
-        /// For a host running as administrator: if VB-Cable is there but not yet
-        /// named and default (say, it needed a restart), finish without asking.
-        /// </summary>
-        public static bool FinishQuietly()
-        {
-            if (IsReady() || FindCable() == null || !Startup.IsElevated()) return false;
-            try { Configure(); return true; } catch { return false; }
-        }
-
         /// <summary>Starts the elevated setup window and waits for it. False if refused or it failed.</summary>
         public static async Task<bool> RunElevatedAsync()
         {
@@ -133,7 +123,7 @@ namespace TailRemote
                 if (FindCable() == null)
                 {
                     if (DriverInstalled())
-                        throw new InvalidOperationException("VB-Cable is installed, but Windows needs a restart to finish. Restart, then start hosting: TailRemote finishes the setup by itself.");
+                        throw new InvalidOperationException("VB-Cable is installed, but Windows needs a restart to finish. Restart, then press Set up audio device again to finish.");
                     throw new InvalidOperationException("VB-Cable was not installed. Press Set up audio device to try again, and press Install Driver in its window.");
                 }
             }

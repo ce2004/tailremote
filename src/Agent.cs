@@ -67,8 +67,7 @@ namespace TailRemote
             _host.ClipboardFilesReceived += paths => { if (!link.Files(paths)) agent.Files(paths); };
             _host.TransferProgress += t => link.Transfer(t);
             ServiceHost.Log("Hosting on port " + cfg.Port + ", from the service.");
-            // A virtual audio device set up earlier finishes being set up (renamed, made the default).
-            ThreadPool.QueueUserWorkItem(_ => { try { AudioSetup.FinishQuietly(); } catch { } });
+            // Audio settings and device names are never touched here: only Set up audio device, when pressed.
         }
 
         public static void StopHosting()

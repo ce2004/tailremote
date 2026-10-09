@@ -956,13 +956,10 @@ namespace TailRemote
                 _host.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
                 _host.TransferProgress += t => Later(() => ShowTransfer(t));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));
-                if (AudioSetup.FinishQuietly()) Log("Finished setting up the TailRemote audio device.");
-                else if (Wasapi.OutputDevices().Count == 0)
-                {
-                    // No sound output: nothing could be heard. Set one up straight away.
-                    Log("This PC has no sound output, so setting up the TailRemote audio device.");
-                    SetUpAudio();
-                }
+                // Audio settings and device names are never changed by themselves (they are other
+                // programs' too): only Set up audio device does that, when pressed.
+                if (Wasapi.OutputDevices().Count == 0)
+                    Say("This PC has no sound output, so the other PC will hear nothing. Press Set up audio device if you want TailRemote to add one.");
                 if (!Startup.IsElevated()) Log("Not running as administrator, so keys cannot reach administrator windows. Start hosting when Windows starts runs it as administrator.");
             }
             catch (Exception e) { Say("Could not start hosting: " + e.Message); }
