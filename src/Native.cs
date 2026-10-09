@@ -9,6 +9,24 @@ namespace TailRemote
 
         [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr AvSetMmThreadCharacteristicsW(string task, ref uint index);
+        [DllImport("avrt.dll")]
+        private static extern bool AvRevertMmThreadCharacteristics(IntPtr avrtHandle);
+
+        /// <summary>
+        /// Releases the MMCSS handle a thread was given by ProAudioThread() when that thread
+        /// actually terminates, instead of leaking it for the rest of the process. Nothing calls
+        /// AvRevertMmThreadCharacteristics directly: the handle lives in a [ThreadStatic] field
+        /// inside an object with a finalizer, so once the thread that owns it exits (and nothing
+        /// else can be holding a live ThreadStatic slot for a dead thread), the sentinel becomes
+        /// collectible and its finalizer reverts the handle on the next GC.
+        /// </summary>
+        private sealed class AvrtSentinel
+        {
+            public IntPtr Handle;
+            ~AvrtSentinel() { if (Handle != IntPtr.Zero) try { AvRevertMmThreadCharacteristics(Handle); } catch { } }
+        }
+
+        [ThreadStatic] private static AvrtSentinel? _avrtSentinel;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct PROCESS_POWER_THROTTLING_STATE { public uint Version, ControlMask, StateMask; }
@@ -33,11 +51,20 @@ namespace TailRemote
             catch { }
         }
 
-        /// <summary>Puts the calling thread in the "Pro Audio" scheduling class.</summary>
+        /// <summary>
+        /// Puts the calling thread in the "Pro Audio" scheduling class. The handle this hands the
+        /// thread is released automatically once the thread ends (see AvrtSentinel above), so
+        /// repeatedly promoting new threads (e.g. on every reconnect) does not leak a handle per call.
+        /// </summary>
         public static void ProAudioThread()
         {
             uint i = 0;
-            try { AvSetMmThreadCharacteristicsW("Pro Audio", ref i); } catch { }
+            try
+            {
+                IntPtr h = AvSetMmThreadCharacteristicsW("Pro Audio", ref i);
+                if (h != IntPtr.Zero) _avrtSentinel = new AvrtSentinel { Handle = h };
+            }
+            catch { }
         }
 
         // ---- Keyboard hook ----

@@ -349,7 +349,6 @@ namespace TailRemote
             }
             _deviceRate = fmt.Rate;
 
-            var enumerator = Wasapi.Enumerator();
             long lastDeviceCheck = Environment.TickCount64;
             client.Start();
             try
@@ -368,12 +367,14 @@ namespace TailRemote
                     }
 
                     long now = Environment.TickCount64;
-                    if (followDefault && now - lastDeviceCheck > 1000)
+                    if (now - lastDeviceCheck > 1000)
                     {
                         lastDeviceCheck = now;
-                        enumerator.GetDefaultAudioEndpoint(Wasapi.eRender, Wasapi.eConsole, out var cur);
-                        cur.GetId(out string curId);
-                        if (curId != devId) return;
+                        // Reopen when the default output changes (if following it), or when
+                        // the chosen output that was missing comes back.
+                        var want = Wasapi.OutputDevice(_deviceId);
+                        want.GetId(out string curId);
+                        if (curId != devId && (followDefault || curId == _deviceId)) return;
                     }
                 }
             }
@@ -437,6 +438,7 @@ namespace TailRemote
                 {
                     _avgMs += 0.02 * (levelMs - _avgMs);
                     double over = levelMs - target;
+                    if (!SpeedUp && _ff > 0) _ff = 0; // the setting was turned off mid fast-forward: stop at once, whatever the buffer level
                     if (SpeedUp && over < 300)
                     {
                         // Fast-forward: on at 4 ms behind on average (or 10 at once); 1.5x,

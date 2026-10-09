@@ -184,11 +184,21 @@ namespace TailRemote
             }
 
             // Ctrl+Alt+End stands for Ctrl+Alt+Del, which never reaches a hook (as in Remote Desktop).
-            if (k.vkCode == VK_END && up && _swallowEndUp) { _swallowEndUp = false; return 1; }
+            if (k.vkCode == VK_END && up && _swallowEndUp)
+            {
+                _swallowEndUp = false;
+                lock (_held) _held.Remove((VK_END, true));
+                return 1;
+            }
             if (k.vkCode == VK_END && !up && ctrl && alt && !shift && !win && _client is Client sas)
             {
                 _swallowEndUp = true;
-                if (!_held.Contains((VK_END, true))) sas.SendSecureAttention();
+                // Add first, then only send if this key-down was not already held: an OS auto-repeat
+                // tick re-fires the same key-down while it is held, and Add returns false for it, so
+                // SendSecureAttention() fires once per press rather than on every repeat.
+                bool firstDown;
+                lock (_held) firstDown = _held.Add((VK_END, true));
+                if (firstDown) sas.SendSecureAttention();
                 return 1;
             }
 

@@ -190,12 +190,14 @@ namespace TailRemote
                     Directory.CreateDirectory(Path.Combine(src, "empty folder"));
                     string[]? landed = null;
                     string? said = null;
-                    host.ClipboardFilesReceived += p => landed = p;
+                    Action<string[]> gotFiles = p => landed = p;
+                    host.ClipboardFilesReceived += gotFiles;
                     Action<FileChannel.Transfer> note = t => { if (t.Finished && t.What == "Mess") said = t.Result; };
                     host.TransferProgress += note;
                     ctrl.Files!.SendFiles(new[] { src });
                     for (int i = 0; i < 1000 && landed == null; i++) Thread.Sleep(20);
                     host.TransferProgress -= note;
+                    host.ClipboardFilesReceived -= gotFiles;
                     Console.WriteLine("the receiving PC said: " + said);
                     if (landed == null) return "FAIL: nothing arrived";
                     var got = Directory.EnumerateFiles(landed[0], "*", SearchOption.AllDirectories).ToList();
@@ -536,6 +538,7 @@ namespace TailRemote
 
                 Scenario("the connection going silent while a key is held: the host lets it go within 2 seconds (F24 only, recorded, never typed)", 30, () =>
                 {
+                    long gen = CurrentGeneration; // so a late finally (this scenario timed out but keeps running) does not clobber a later one
                     var pressed = new System.Collections.Concurrent.ConcurrentQueue<(ushort Vk, bool Up, long At)>();
                     var clock = Stopwatch.StartNew();
                     Native.KeySink = (vk, scan, up, ext) => { pressed.Enqueue((vk, up, clock.ElapsedMilliseconds)); return true; };
@@ -555,11 +558,12 @@ namespace TailRemote
                             ? "held while the connection was alive, and let go " + (at - silentAt) + " ms after it went quiet"
                             : "FAIL: held while alive " + stillHeld + ", released " + (release is long a ? (a - silentAt) + " ms after going quiet" : "never");
                     }
-                    finally { Native.KeySink = null; c5.Dispose(); }
+                    finally { if (CurrentGeneration == gen) Native.KeySink = null; c5.Dispose(); }
                 });
 
                 Scenario("hosting as the service: keys go from the host to the agent in the session (F24 only, recorded, never typed)", 30, () =>
                 {
+                    long gen = CurrentGeneration; // so a late finally (this scenario timed out but keeps running) does not clobber a later one
                     AgentLink.TestAnyOwner = true;
                     var server = new AgentLink.Server();
                     var got = new System.Collections.Concurrent.ConcurrentQueue<(ushort Vk, bool Up)>();
@@ -574,7 +578,7 @@ namespace TailRemote
                         server.Text("for the clipboard, with no window open");
                         for (int i = 0; i < 150 && (got.Count < 40 || text == null); i++) Thread.Sleep(20);
                     }
-                    finally { Native.KeySink = null; }
+                    finally { if (CurrentGeneration == gen) Native.KeySink = null; }
                     bool ok = got.Count == 40 && got.All(k => k.Vk == 0x87) && text == "for the clipboard, with no window open";
                     return ok ? "all 40 key presses and releases reached the agent, in order, and the clipboard text too" : "FAIL: " + got.Count + " of 40 keys, text " + (text ?? "none");
                 });
@@ -815,9 +819,18 @@ namespace TailRemote
 
         private static readonly string? Only = Environment.GetEnvironmentVariable("CHAOS_ONLY");
 
+        // task.Wait(timeout) does not cancel a timed-out scenario's body: it keeps running in the
+        // background. A couple of scenarios reset shared test-only statics (Native.KeySink, for one)
+        // in a finally once they finish; if that finally fires late, after a later scenario has
+        // already started and set up its own state, it can wipe that out. CurrentGeneration lets such
+        // a finally tell whether it is still the scenario running "now" before it resets anything.
+        private static long _generation;
+        public static long CurrentGeneration => Interlocked.Read(ref _generation);
+
         private static void Scenario(string name, int seconds, Func<string> body)
         {
             if (Only != null && !name.Contains(Only, StringComparison.OrdinalIgnoreCase)) return;
+            Interlocked.Increment(ref _generation);
             var clock = Stopwatch.StartNew();
             var task = Task.Run(() => { try { return body(); } catch (Exception e) { return "FAIL: " + e.GetType().Name + ": " + e.Message; } });
             string result = task.Wait(TimeSpan.FromSeconds(seconds)) ? task.Result : "FAIL: FROZE (no answer in " + seconds + " seconds)";

@@ -89,6 +89,8 @@ namespace TailRemote
             var stream = tcp.GetStream();
             stream.ReadTimeout = 8000;
             UdpClient? udp = null;
+            FileChannel? files = null;
+            string? filesTo = null;
             try
             {
                 byte[] hello = new byte[Protocol.HelloBytes];
@@ -149,7 +151,6 @@ namespace TailRemote
                     // The same channel as before a dropped connection to this host, so what was
                     // going carries on; anywhere else, a new one.
                     string to = address.Trim().ToLowerInvariant() + ":" + port;
-                    FileChannel? files;
                     lock (KeptGate)
                     {
                         files = _kept != null && _keptFor == to && !_kept.Gone ? _kept : null;
@@ -157,6 +158,7 @@ namespace TailRemote
                         _kept = null;
                     }
                     files ??= new FileChannel();
+                    filesTo = to;
                     c._files = files;
                     c._filesFor = to;
                     files.Rate = () => c._pace;
@@ -171,8 +173,16 @@ namespace TailRemote
                 c.Start();
                 return c;
             }
-            catch (System.IO.IOException) { udp?.Dispose(); tcp.Dispose(); throw new InvalidOperationException("The host closed the connection."); }
-            catch { udp?.Dispose(); tcp.Dispose(); throw; }
+            catch (System.IO.IOException)
+            {
+                if (files != null) lock (KeptGate) { _kept = files; _keptFor = filesTo; }
+                udp?.Dispose(); tcp.Dispose(); throw new InvalidOperationException("The host closed the connection.");
+            }
+            catch
+            {
+                if (files != null) lock (KeptGate) { _kept = files; _keptFor = filesTo; }
+                udp?.Dispose(); tcp.Dispose(); throw;
+            }
         }
 
         // A file channel whose main connection dropped, kept for the next connection to the same host.

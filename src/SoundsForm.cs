@@ -17,6 +17,7 @@ namespace TailRemote
         private readonly ComboBox _key = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, AccessibleName = "Key" };
         private readonly int _keyBefore;
         private bool _ready;
+        private bool _saved; // OK was pressed and the settings (and key) were saved
 
         public SoundsForm(Settings settings)
         {
@@ -68,7 +69,6 @@ namespace TailRemote
             var ok = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
             var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
             ok.Click += (_, _) => Save();
-            cancel.Click += (_, _) => Sounds.Key = _keyBefore; // Cancel puts the key back
             buttons.Controls.Add(ok);
             buttons.Controls.Add(cancel);
             table.Controls.Add(buttons);
@@ -84,6 +84,17 @@ namespace TailRemote
             _ready = true;
         }
 
+        /// <summary>
+        /// Changing the selected key plays a live preview by setting Sounds.Key at once. Closing
+        /// without saving - Cancel, the title bar X, Alt+F4 - must put it back, so the static
+        /// Sounds.Key stays in sync with the actually-saved setting for the rest of the session.
+        /// </summary>
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            base.OnFormClosing(e);
+            if (!_saved) Sounds.Key = _keyBefore;
+        }
+
         private void Save()
         {
             _settings.SoundKey = _key.SelectedIndex;
@@ -92,6 +103,7 @@ namespace TailRemote
             foreach (var (t, list) in _lists)
                 if (list.SelectedItem is string s && s != Sounds.DefaultName) _settings.SoundChoices[t.ToString()] = s;
             try { _settings.Save(); } catch { }
+            _saved = true;
         }
     }
 }

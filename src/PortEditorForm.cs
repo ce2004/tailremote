@@ -121,7 +121,9 @@ namespace TailRemote
             _open.Enabled = _close.Enabled = _add.Enabled = false;
             bool ok = await Firewall.SetAsync(p, open);
             if (IsDisposed) return;
-            _state[p] = Firewall.IsOpen(p);
+            // Checking takes a moment; do it off the window's thread, as OnShown does.
+            _state[p] = await Task.Run(() => Firewall.IsOpen(p));
+            if (IsDisposed) return;
             Refill();
             _add.Enabled = true;
             _list.Focus();

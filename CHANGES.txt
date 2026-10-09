@@ -1,3 +1,14 @@
+1.8.27
+Bug fixed: turning on Run as a Windows service skipped the listen-only password's own checks (long enough, and different from the main password), so a weak or duplicate listen-only password could reach the service unchecked. It is checked the same way everywhere now.
+Bug fixed: the service's own update channel accepted a request from any signed-in account on the PC, not just an administrator, letting any local account force an update and drop every connection. Only administrators and the system itself can do that now.
+Bug fixed: two files or folders sent in the same batch with names that differed only by letter case could land on top of each other and corrupt both. A repeated name is refused instead.
+Bug fixed: holding Control Alt End kept sending Control Alt Delete to the other PC over and over instead of once.
+Bug fixed: sending the clipboard right as a connection dropped could fail with no message at all; it now says so.
+Bug fixed: removing the Windows service left its firewall port open and did not turn the sign-in option back on, so hosting could stop entirely without you noticing.
+Changed: catching up by fast-forwarding now always stops the moment you turn it off, instead of sometimes continuing until the sound ran dry.
+Changed: picking a specific output device that was unplugged when you connected, then plugging it back in, now switches playback back to it instead of staying on the fallback forever.
+Also: settings are now saved in a way that cannot be half-written by a crash, overlapping event sounds no longer cut each other off, and several smaller reliability and resource-leak fixes.
+
 1.8.26
 Bug fixed: starting to host (as administrator, or as the service) renamed a VB-Cable output to TailRemote and made it Windows' default playback device, by itself, every time. That broke other programs using that device, and programs set to Windows default were silently moved onto it. TailRemote now never changes audio settings or device names on its own. Only Set up audio device does that, when you press it, and it says exactly what it will do first.
 

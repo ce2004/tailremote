@@ -72,13 +72,17 @@ namespace TailRemote
                         throw new InvalidOperationException("The download was damaged. Nothing was changed.");
                     await File.WriteAllBytesAsync(fresh, data);
                 }
-                // The running copy is moved aside (Windows lets a running program be renamed, not
-                // deleted). If an older leftover cannot be deleted (a TailRemote still running from
-                // it, or a virus scan holding it), it is left alone and this copy gets a new name:
-                // that used to stop the update with "Access to the path ... .old is denied".
+                // The running copy is swapped for the new one (Windows lets a running program be
+                // renamed or replaced, not deleted). If an older leftover cannot be deleted (a
+                // TailRemote still running from it, or a virus scan holding it), it is left alone
+                // and this copy gets a new name: that used to stop the update with "Access to the
+                // path ... .old is denied".
                 if (!TryDelete(old)) old = exe + ".old-" + DateTime.Now.ToString("yyyyMMddHHmmss");
-                File.Move(exe, old);
-                File.Move(fresh, exe);
+                // File.Replace (Win32 ReplaceFile) does the swap as one filesystem operation instead
+                // of two separate File.Move calls, so a kill between steps can no longer leave no exe
+                // at all behind. It deletes/overwrites the backup path itself if one already exists,
+                // so it does not need "old" to be absent first.
+                File.Replace(fresh, exe, old, ignoreMetadataErrors: true);
             }
             catch
             {
@@ -87,7 +91,19 @@ namespace TailRemote
                 try { File.Delete(fresh); } catch { }
                 throw;
             }
-            Process.Start(new ProcessStartInfo(exe, args + " --after-update " + Environment.ProcessId) { UseShellExecute = false });
+            try
+            {
+                Process.Start(new ProcessStartInfo(exe, args + " --after-update " + Environment.ProcessId) { UseShellExecute = false });
+            }
+            catch (Exception e)
+            {
+                // The swap already succeeded: the exe on disk is the new, valid version. Rolling it
+                // back would only undo a working update for no benefit, so it is left as is; the
+                // caller just needs a clear, user-facing explanation instead of a raw Process.Start
+                // failure or a silent crash.
+                throw new InvalidOperationException("Updated to version " + r.Version +
+                    ", but it could not restart automatically (" + e.Message + "). Please start TailRemote yourself.", e);
+            }
         }
 
         /// <summary>At startup after an update: wait for the old copy to exit, then delete every leftover it can.</summary>

@@ -172,6 +172,11 @@ namespace TailRemote
                     using var k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true);
                     k?.DeleteValue("SoftwareSASGeneration", false);
                 }
+
+                // Undo what Install() did: close the port it opened, and bring
+                // back the at-sign-in task the service had replaced.
+                Firewall.Apply(false, cfg?.Port ?? Protocol.DefaultPort);
+                Startup.Apply(true);
                 for (int i = 0; i < 20; i++)
                 {
                     try
@@ -410,7 +415,8 @@ namespace TailRemote
         {
             var sec = new PipeSecurity();
             sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
-            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+            sec.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
             long last = -60_000;
             while (!Stop.WaitOne(0))
             {

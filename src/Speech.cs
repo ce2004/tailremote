@@ -13,7 +13,7 @@ namespace TailRemote
     /// </summary>
     internal static unsafe class Speech
     {
-        private static bool _init;
+        private static int _init; // 0 = not yet started; CompareExchange below makes the check-then-set atomic
         private static delegate* unmanaged[Stdcall]<char*, int> _speakText;
         private static delegate* unmanaged[Stdcall]<int> _cancelSpeech;
 
@@ -23,8 +23,9 @@ namespace TailRemote
 
         public static void Init()
         {
-            if (_init) return;
-            _init = true;
+            // Atomic check-then-set: two near-simultaneous callers must never both pass this,
+            // which would double-load the native DLL and start two Pump threads on one queue.
+            if (Interlocked.CompareExchange(ref _init, 1, 0) != 0) return;
             Load();
             if (_speakText == null) return;
             new Thread(Pump) { IsBackground = true, Name = "TailRemote speech" }.Start();

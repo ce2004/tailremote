@@ -65,10 +65,16 @@ namespace TailRemote
                 if (_writer.BaseStream.Length > MaxBytes)
                 {
                     _writer.Dispose();
-                    string old = Path.ChangeExtension(FilePath, ".old.txt");
-                    File.Delete(old);
-                    File.Move(FilePath, old);
+                    _writer = null; // never leave it pointing at a disposed writer, even if rotation below fails
+                    try
+                    {
+                        string old = Path.ChangeExtension(FilePath, ".old.txt");
+                        File.Delete(old);
+                        File.Move(FilePath, old);
+                    }
+                    catch { /* rotation failed (file locked, etc.): still try to reopen below, rather than go dark */ }
                     Open();
+                    if (_writer == null) _enabled = false; // nothing could be reopened: stop claiming logging is on
                 }
             }
             catch { }

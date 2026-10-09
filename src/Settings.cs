@@ -64,6 +64,9 @@ namespace TailRemote
 
         private static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
         private static string FilePath => Path.Combine(Dir, "settings.json");
+        // Save() writes here first, then atomically replaces FilePath, so a crash or power loss
+        // mid-write can never leave a half-written settings.json as the live file.
+        private static string TempPath => FilePath + ".tmp";
 
         [JsonIgnore]
         public string Password
@@ -75,7 +78,15 @@ namespace TailRemote
         public static Settings Load()
         {
             try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings(); }
-            catch { return new Settings(); }
+            catch
+            {
+                // The main file is missing, empty or corrupt - possibly from a crash or power loss
+                // mid-write before Save() below wrote atomically. A temp file left over from such an
+                // interrupted save might still be a complete, valid settings file: try it once before
+                // giving up and starting fresh.
+                try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(TempPath)) ?? new Settings(); }
+                catch { return new Settings(); }
+            }
         }
 
         public void Save()
@@ -83,7 +94,12 @@ namespace TailRemote
             try
             {
                 Directory.CreateDirectory(Dir);
-                File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+                string json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(TempPath, json);
+                // Atomic: the live settings file is either the old complete one or the new complete
+                // one, never a half-written mix, even if this process is killed partway through.
+                if (File.Exists(FilePath)) File.Replace(TempPath, FilePath, null);
+                else File.Move(TempPath, FilePath);
             }
             catch { }
         }

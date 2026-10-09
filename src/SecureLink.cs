@@ -149,9 +149,17 @@ namespace TailRemote
             return message;
         }
 
+        // The audio nonce is the wire sequence number (a u32), and the audio key never rotates, so
+        // reusing a nonce under AES-GCM would be catastrophic. At typical packet rates the real
+        // wraparound is many months away, but refuse well before that rather than silently reuse one:
+        // the caller (Host.cs) already wraps SealAudio in try/catch and drops the packet on failure.
+        private const uint AudioSeqWrapGuard = 0xF0000000;
+
         /// <summary>Seals an audio packet in place: [type][u32 seq][payload][tag]. Capture thread only.</summary>
         public void SealAudio(byte[] packet, int payloadLength)
         {
+            uint seq = BitConverter.ToUInt32(packet, 1);
+            if (seq >= AudioSeqWrapGuard) throw new InvalidOperationException("Audio key must be refreshed before the nonce counter wraps.");
             Span<byte> nonce = stackalloc byte[12];
             nonce.Clear();
             packet.AsSpan(1, 4).CopyTo(nonce);

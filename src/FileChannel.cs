@@ -1001,6 +1001,11 @@ namespace TailRemote
                 var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var tops = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var made = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                // Two different entries (whatever their index) must never resolve to the same file: on
+                // case-insensitive NTFS that includes paths that only differ by case. Without this, both
+                // would get their own handle and RandomAccess.Write would interleave into one physical
+                // file, silently corrupting it.
+                var filePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < count; i++)
                 {
                     var (rel, length) = b.Entries[i]!.Value;
@@ -1016,10 +1021,21 @@ namespace TailRemote
                             // into one file (files are otherwise only made when their data arrives).
                             lock (ReserveGate)
                             {
-                                renamed[top] = fresh = Unique(b.Folder, top);
-                                if (rel == top && length >= 0) using (File.OpenHandle(Path.Combine(b.Folder, fresh), FileMode.CreateNew, FileAccess.Write)) { }
-                                else Directory.CreateDirectory(Path.Combine(b.Folder, fresh));
+                                while (true)
+                                {
+                                    fresh = Unique(b.Folder, top);
+                                    string chosen = Path.Combine(b.Folder, fresh);
+                                    if (rel == top && length >= 0) { using (File.OpenHandle(chosen, FileMode.CreateNew, FileAccess.Write)) { } break; }
+                                    // Directory.CreateDirectory is not exclusive (a no-op if the name is
+                                    // already there), so something else racing the exact chosen name
+                                    // between Unique()'s check and here would otherwise be silently
+                                    // merged into. Detect that and pick another name instead.
+                                    bool existed = Directory.Exists(chosen);
+                                    Directory.CreateDirectory(chosen);
+                                    if (!existed) break;
+                                }
                             }
+                            renamed[top] = fresh;
                         }
                         rel = fresh + rel[top.Length..];
                         top = fresh;
@@ -1031,6 +1047,7 @@ namespace TailRemote
                     if (length < 0) { if (made.Add(path)) Directory.CreateDirectory(path); }
                     else
                     {
+                        if (!filePaths.Add(path)) throw new InvalidDataException("the same file sent twice in one offer");
                         string dir = Path.GetDirectoryName(path)!;
                         if (made.Add(dir)) Directory.CreateDirectory(dir); // each folder once, not once per file
                         if (length == 0) using (File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.Write)) { } // may be reserved already (Downloads)
@@ -1067,7 +1084,11 @@ namespace TailRemote
                 lock (b.Gate)
                 {
                     if (b.Ended || !b.Prepared) return;
-                    if ((uint)e >= (uint)b.Entries.Length || offset < 0 || offset + n > b.Length(e)) throw new InvalidDataException("a piece that does not fit");
+                    // Written without "offset + n > length": offset is peer-controlled and near
+                    // long.MaxValue would overflow that sum, wrapping it negative and passing the
+                    // check despite being nonsensical. n and length are both small/non-negative here,
+                    // so "length - n" cannot itself go negative in a confusing way once guarded first.
+                    if ((uint)e >= (uint)b.Entries.Length || offset < 0 || n < 0 || n > b.Length(e) || offset > b.Length(e) - n) throw new InvalidDataException("a piece that does not fit");
                     // A piece sent again (its confirmation was lost with a lane): confirmed, not written twice.
                     repeat = b.Got[e] >= b.Length(e) || !(b.Claimed[e] ??= new HashSet<long>()).Add(offset);
                     h = repeat || b.Text != null ? null : b.Handles[e];

@@ -142,10 +142,19 @@ namespace TailRemote
         public const int MinAudioPacketBytes = 5 + 1 + SecureLink.TagSize;
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Keys = new();
+        private const int MaxCachedKeys = 256; // a modest bound; only local password guesses ever add to this
 
         /// <summary>Slow on purpose (200,000 rounds), so it is worked out once per password and kept.</summary>
-        public static byte[] DeriveKey(string password) => Keys.GetOrAdd(password, p =>
-            Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(p), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32));
+        public static byte[] DeriveKey(string password)
+        {
+            // Simple fixed bound instead of unbounded growth: a long-lived process that has had many
+            // different passwords typed at it (host or client) should not keep every derived key
+            // forever. Exceeding the cap just starts the cache over; a race here only costs an extra
+            // (slow, by design) derivation, never correctness.
+            if (Keys.Count >= MaxCachedKeys) Keys.Clear();
+            return Keys.GetOrAdd(password, p =>
+                Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(p), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32));
+        }
 
         public static byte[] Proof(byte[] key, char side, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)
         {

@@ -371,7 +371,20 @@ namespace TailRemote
         private static System.Collections.Concurrent.BlockingCollection<Action> StartClipboardThread()
         {
             var jobs = new System.Collections.Concurrent.BlockingCollection<Action>(64);
-            var t = new System.Threading.Thread(() => { foreach (var job in jobs.GetConsumingEnumerable()) try { job(); } catch { } })
+            var t = new System.Threading.Thread(() =>
+            {
+                foreach (var job in jobs.GetConsumingEnumerable())
+                {
+                    try { job(); }
+                    catch (Exception e)
+                    {
+                        // Speech.Speak and DiagLog.Write are both thread-safe from any thread: a
+                        // failed clipboard send must not vanish silently.
+                        DiagLog.Write("clipboard job: " + e);
+                        Speech.Speak("Could not finish the clipboard action: " + e.Message);
+                    }
+                }
+            })
                 { IsBackground = true, Name = "TailRemote clipboard" };
             t.SetApartmentState(System.Threading.ApartmentState.STA); // the clipboard needs it
             t.Start();
@@ -410,11 +423,12 @@ namespace TailRemote
         private void SendClipboard()
         {
             Doing("sending the clipboard");
-            if (!CanSend(out var client, out var host, out var link)) return;
+            if (!CanSend(out _, out _)) return;
             ClipboardJobs.TryAdd(() =>
             {
                 string[]? files = null;
                 string? text = null;
+                bool inaccessible = false;
                 for (int i = 0; i < 5; i++)
                 {
                     try
@@ -426,25 +440,35 @@ namespace TailRemote
                             list.CopyTo(files, 0);
                         }
                         else if (Clipboard.ContainsText()) text = Clipboard.GetText();
+                        inaccessible = false;
                         break;
                     }
-                    catch { System.Threading.Thread.Sleep(50); } // another program has it open
+                    catch { inaccessible = true; System.Threading.Thread.Sleep(50); } // another program has it open
                 }
                 if (files is { Length: > 0 })
                 {
-                    client?.SendClipboardFiles(files);
-                    host?.SendClipboardFiles(files);
-                    link?.SendClipboardFiles(files);
-                    Later(() => Tone(Sounds.Tone.ClipboardSent)); // the Files line says the rest, without speaking
+                    Later(() =>
+                    {
+                        if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
+                        client?.SendClipboardFiles(files);
+                        host?.SendClipboardFiles(files);
+                        link?.SendClipboardFiles(files);
+                        Tone(Sounds.Tone.ClipboardSent); // the Files line says the rest, without speaking
+                    });
                 }
                 else if (!string.IsNullOrEmpty(text))
                 {
                     if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); return; }
-                    client?.SendClipboard(text);
-                    host?.SendClipboard(text);
-                    link?.SendClipboard(text);
-                    Later(() => Tone(Sounds.Tone.ClipboardSent));
+                    Later(() =>
+                    {
+                        if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
+                        client?.SendClipboard(text);
+                        host?.SendClipboard(text);
+                        link?.SendClipboard(text);
+                        Tone(Sounds.Tone.ClipboardSent);
+                    });
                 }
+                else if (inaccessible) Later(() => Say("Could not read the clipboard: try again."));
                 else Later(() => Say("The clipboard is empty: copy something first."));
             });
         }
@@ -936,16 +960,8 @@ namespace TailRemote
             Doing("starting hosting");
             if (ServiceHost.IsInstalled()) { Say("The TailRemote service is hosting this PC. Use Apply settings to the service instead."); return; }
             if (!CheckPassword()) return;
+            if (!CheckListenPassword()) return;
             string listen = _listenPassword.Text;
-            if (listen.Length > 0 && (listen.Length < MinPasswordLength || listen == _password.Text))
-            {
-                Say(listen == _password.Text
-                    ? "The listen-only password must be different from the main password, or empty."
-                    : "The listen-only password needs at least " + MinPasswordLength + " characters, or leave it empty.");
-                _listenPassword.Focus();
-                _listenPassword.SelectAll();
-                return;
-            }
             if (!CheckPort(out int port)) return;
             PortEditorForm.Remember(_settings, port);
             try
@@ -994,6 +1010,24 @@ namespace TailRemote
                        : "The password needs at least " + MinPasswordLength + " characters. It has " + n + ".");
             _password.Focus();
             _password.SelectAll();
+            return false;
+        }
+
+        /// <summary>
+        /// Refuses a listen-only password shorter than 5 characters, or the same as the main
+        /// password. Empty is fine: it means no listen-only password. Shared by StartHost and the
+        /// service paths (ServiceChanged/ApplyService), so the service cannot be enabled or applied
+        /// with a listen-only password that hosting itself would refuse.
+        /// </summary>
+        private bool CheckListenPassword()
+        {
+            string listen = _listenPassword.Text;
+            if (listen.Length == 0 || (listen.Length >= MinPasswordLength && listen != _password.Text)) return true;
+            Say(listen == _password.Text
+                ? "The listen-only password must be different from the main password, or empty."
+                : "The listen-only password needs at least " + MinPasswordLength + " characters, or leave it empty.");
+            _listenPassword.Focus();
+            _listenPassword.SelectAll();
             return false;
         }
 
@@ -1239,7 +1273,7 @@ namespace TailRemote
                 : "Remove the TailRemote service? This PC stops hosting until you start hosting here again. Windows asks for administrator permission.";
             if (MessageBox.Show(this, plan, want ? "Run as a Windows service" : "Remove the service", MessageBoxButtons.OKCancel,
                     want ? MessageBoxIcon.Warning : MessageBoxIcon.Question) != DialogResult.OK
-                || (want && (!CheckPassword() || !CheckPort(out _))))
+                || (want && (!CheckPassword() || !CheckPort(out _) || !CheckListenPassword())))
             {
                 SetServiceBox(!want);
                 return;
@@ -1260,7 +1294,7 @@ namespace TailRemote
 
         private async void ApplyService()
         {
-            if (!CheckPassword() || !CheckPort(out _)) return;
+            if (!CheckPassword() || !CheckPort(out _) || !CheckListenPassword()) return;
             SaveSettings();
             Say("Giving the service these settings. Windows asks for administrator permission.");
             Say(await ServiceHost.SetAsync(true)
@@ -1363,11 +1397,17 @@ namespace TailRemote
             _settings.ResumeState = _host != null ? "host" : _client != null || _reconnecting ? "connect" : "";
             SaveSettings();
             _retryTimer.Stop();
+            _retryTimer.Dispose();
+            _titleTimer.Stop();
+            _titleTimer.Dispose();
+            _idleTimer?.Stop();
+            _idleTimer?.Dispose();
             _keys?.SetClient(null);
             _client?.Dispose();
             _player?.Dispose();
             _host?.Dispose();
             _keys?.Dispose();
+            _serviceLink?.Dispose();
             base.OnFormClosing(e);
         }
     }

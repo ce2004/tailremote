@@ -225,6 +225,7 @@ namespace TailRemote
                 {
                     lock (_windows) _windows.Remove(outbox);
                     outbox.CompleteAdding();
+                    outbox.Dispose();
                     try { pipe.Dispose(); } catch { }
                 }
             }

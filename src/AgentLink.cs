@@ -73,11 +73,16 @@ namespace TailRemote
                 bool first = true, warned = false;
                 while (true)
                 {
+                    // Claimed before the attempt, win or lose: if Create throws (something else is
+                    // squatting on the name at that moment), later retries must stop demanding
+                    // FirstPipeInstance too, or they would keep failing forever even after the
+                    // squatter is gone.
+                    bool useFirst = first;
+                    first = false;
                     try
                     {
                         var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.Out, 2, PipeTransmissionMode.Byte,
-                            first ? PipeOptions.FirstPipeInstance : PipeOptions.None, 0, 0, sec);
-                        first = false;
+                            useFirst ? PipeOptions.FirstPipeInstance : PipeOptions.None, 0, 0, sec);
                         pipe.WaitForConnection();
                         // The newest agent (the session now at the screen) takes over; anything queued for the old one goes.
                         var old = Interlocked.Exchange(ref _pipe, pipe);
@@ -87,7 +92,7 @@ namespace TailRemote
                     }
                     catch (Exception e)
                     {
-                        if (!warned) ServiceHost.Log("Agent link: " + e.Message + (first ? " Another program may hold the pipe " + PipeName + "." : ""));
+                        if (!warned) ServiceHost.Log("Agent link: " + e.Message + (useFirst ? " Another program may hold the pipe " + PipeName + "." : ""));
                         warned = true;
                         Thread.Sleep(1000);
                     }

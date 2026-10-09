@@ -162,7 +162,11 @@ namespace TailRemote
         }
 
         private static readonly Dictionary<string, byte[]> Cache = new();
-        private static SoundPlayer? _playing; // kept alive while it plays
+        // Every sound currently playing, kept alive until it is done: a single static field was
+        // overwritten by the next sound (rapid connect/disconnect, clipboard events...), leaving
+        // the one before it unreferenced and liable to be finalised mid-playback, cutting it off.
+        private static readonly List<SoundPlayer> Playing = new();
+        private static readonly object PlayingGate = new();
 
         /// <summary>Plays an event's sound. Built and started in the background: the window never waits on a sound.</summary>
         public static void Play(Tone t)
@@ -174,14 +178,27 @@ namespace TailRemote
         /// <summary>Plays a sound by name, in the background (the Sounds window previews with it).</summary>
         public static void PlayNamed(string name) => System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
+            SoundPlayer? player = null;
             try
             {
                 if (Get(name) is not byte[] wav) return;
-                var player = new SoundPlayer(new MemoryStream(wav));
+                player = new SoundPlayer(new MemoryStream(wav));
+                lock (PlayingGate) Playing.Add(player);
                 player.Play();
-                _playing = player;
+                // SoundPlayer has no "done playing" event of its own: the wav is 16-bit stereo
+                // PCM after a 44-byte header, so its length gives how long Play() will run for.
+                int ms = Math.Max(50, (int)((long)(wav.Length - 44) * 1000 / (Rate * 4)));
+                System.Threading.Thread.Sleep(ms);
             }
             catch { }
+            finally
+            {
+                if (player != null)
+                {
+                    lock (PlayingGate) Playing.Remove(player);
+                    try { player.Dispose(); } catch { }
+                }
+            }
         });
 
         public static void PlayNamedAndWait(string name)
