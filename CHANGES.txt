@@ -1,3 +1,10 @@
+2.2.0
+Changed: logging in is much harder to attack when your PC is open to the internet. Every connection now makes its own one-time keys, so someone who records your traffic can no longer try passwords against it, and even if your password leaks later, recorded sessions stay locked.
+Changed: each host now uses its own random value to protect the password, instead of one shared by every copy of TailRemote, so guessing work done against one PC is no use against another.
+Changed: the sound can only be sent where the PC that logged in asks for it. Someone who sees your traffic can no longer redirect it.
+Changed: passwords now need at least 6 characters. If yours is shorter, choose a longer one on both PCs.
+Changed: every PC must update to 2.2.0. Older versions cannot connect to it and say the other PC has a different version. Update PCs you only reach remotely first: connect to each one with your current version and use Check for updates on that PC (File, Update the remote PC cannot do it this one time), then update this PC.
+
 2.1.9
 New feature: send files to a folder of your choice on the remote PC. In Get files from the remote PC, open the folder you want, then choose Send files here (Alt S) or Send a folder here (Alt D). Nothing there is ever overwritten: a file with the same name arrives as name (2).
 

@@ -18,6 +18,10 @@ namespace TailRemote
     {
         public const int MaxListeners = 100;
 
+        // The password keys, from this host's own salt (sent in every hello). New each time hosting
+        // starts: a reconnecting PC works its key out again once, and nothing precomputed for one
+        // host, or for an earlier run of this one, is any use.
+        private readonly byte[] _salt = RandomNumberGenerator.GetBytes(Protocol.SaltBytes);
         private readonly byte[] _key;
         private readonly byte[]? _listenKey;
         private readonly Action<string> _status;
@@ -76,6 +80,7 @@ namespace TailRemote
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
             public volatile IPEndPoint? AudioTo;
             public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
+            public long HelloStamp = long.MinValue; // the newest UDP hello's stamp (UdpLoop only): an older one is a replay
             public readonly long Since = Environment.TickCount64;
             public long LastMessage = Environment.TickCount64; // anything at all from it (it pings several times a second while holding keys)
             public bool WarnedNoUdp;
@@ -91,8 +96,8 @@ namespace TailRemote
         public Host(int port, string password, string? listenPassword, Action<string> status, string? captureDevice = null)
         {
             _captureDevice = captureDevice;
-            _key = Protocol.DeriveKey(password);
-            _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword);
+            _key = Protocol.DeriveKey(password, _salt);
+            _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword, _salt);
             _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
             new Thread(LogLoop) { IsBackground = true, Name = "TailRemote host log" }.Start();
             new Thread(KeySafety) { IsBackground = true, Name = "TailRemote key safety" }.Start();
@@ -448,9 +453,12 @@ namespace TailRemote
                 stream.ReadTimeout = 3_000; // a login that says nothing is dropped after 3 seconds
 
                 byte[] nonce = RandomNumberGenerator.GetBytes(16);
+                using var exchange = Protocol.NewExchange();
                 byte[] hello = new byte[Protocol.HelloBytes];
                 Protocol.Magic.CopyTo(hello, 0);
                 nonce.CopyTo(hello, 4);
+                _salt.CopyTo(hello, Protocol.HelloSaltAt);
+                Protocol.WritePublic(exchange, hello.AsSpan(Protocol.HelloPublicAt, Protocol.PublicKeyBytes));
                 Protocol.AddCheck(hello);
                 stream.Write(hello);
 
@@ -512,12 +520,23 @@ namespace TailRemote
                 byte[] clientNonce = answer[4..20];
                 byte role = 0;
                 byte[]? key = null;
-                if (answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic))
+                // An answer that passed the check but is not a valid key exchange is junk or a forgery:
+                // treated exactly like a wrong password (slowed, counted), never as damage.
+                byte[]? shared = answer.AsSpan(0, 4).SequenceEqual(Protocol.Magic)
+                    ? Protocol.SharedSecret(exchange, answer.AsSpan(Protocol.AnswerPublicAt, Protocol.PublicKeyBytes))
+                    : null;
+                exchange.Dispose(); // this login's private key is done with: nothing can recreate the secret now
+                if (shared != null)
                 {
-                    if (CryptographicOperations.FixedTimeEquals(answer.AsSpan(20, 32), Protocol.Proof(_key, 'C', nonce, clientNonce)))
-                    { role = Protocol.RoleControl; key = _key; }
-                    else if (_listenKey != null && CryptographicOperations.FixedTimeEquals(answer.AsSpan(20, 32), Protocol.Proof(_listenKey, 'C', nonce, clientNonce)))
-                    { role = Protocol.RoleListen; key = _listenKey; }
+                    var head = answer.AsSpan(0, Protocol.AnswerProofAt);
+                    var proof = answer.AsSpan(Protocol.AnswerProofAt, 32);
+                    byte[] control = Protocol.SessionKey(_key, shared, hello, head);
+                    byte[]? listen = _listenKey == null ? null : Protocol.SessionKey(_listenKey, shared, hello, head);
+                    CryptographicOperations.ZeroMemory(shared);
+                    if (CryptographicOperations.FixedTimeEquals(proof, Protocol.Proof(control, 'C', nonce, clientNonce)))
+                    { role = Protocol.RoleControl; key = control; }
+                    else if (listen != null && CryptographicOperations.FixedTimeEquals(proof, Protocol.Proof(listen, 'C', nonce, clientNonce)))
+                    { role = Protocol.RoleListen; key = listen; }
                 }
                 if (key == null)
                 {
@@ -861,20 +880,24 @@ namespace TailRemote
                 byte[] d;
                 try { d = _udp.Receive(ref any); }
                 catch { if (_stop) return; continue; }
-                if ((d.Length != 9 && d.Length != 17) || d[0] != Protocol.UdpHello) continue;
+                if (d.Length != Protocol.UdpHelloBytes || d[0] != Protocol.UdpHello) continue;
                 Session? s;
                 s = Array.Find(AllSessions(), x => d.AsSpan(1, 8).SequenceEqual(x.Token));
                 if (s == null) continue;
                 var from = any.Address.IsIPv4MappedToIPv6 ? any.Address.MapToIPv4() : any.Address;
                 if (!from.Equals(s.Address)) continue;
+                // Only the PC that logged in can make a hello, and only a newer one counts (the stamp
+                // is its own clock, which only goes forward), so a recorded hello played back from
+                // another port cannot send the sound there.
+                if (!s.Link.HelloOk(d)) continue;
+                long stamp = BitConverter.ToInt64(d, 9);
+                if (stamp <= s.HelloStamp) continue;
+                s.HelloStamp = stamp;
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);
                 Volatile.Write(ref s.HeardAt, Environment.TickCount64);
-                if (d.Length == 17)
-                {
-                    // Straight back, on the same path the sound takes: the client's audio ping.
-                    d[8] = Protocol.UdpPong;
-                    try { _udp.Send(d.AsSpan(8, 9), s.AudioTo); } catch { }
-                }
+                // Straight back, on the same path the sound takes: the client's audio ping.
+                d[8] = Protocol.UdpPong;
+                try { _udp.Send(d.AsSpan(8, 9), s.AudioTo); } catch { }
             }
         }
     }

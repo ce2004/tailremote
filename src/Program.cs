@@ -498,7 +498,7 @@ namespace TailRemote
 
             // Audio encryption: a sealed packet opens on the other side; a changed one does not.
             {
-                byte[] k = Protocol.DeriveKey("secret"), n1 = new byte[16], n2 = new byte[16];
+                byte[] k = Protocol.DeriveKey("secret", new byte[Protocol.SaltBytes]), n1 = new byte[16], n2 = new byte[16];
                 n2[0] = 1;
                 using var hostLink = new SecureLink(k, n1, n2, isHost: true);
                 using var clientLink = new SecureLink(k, n1, n2, isHost: false);

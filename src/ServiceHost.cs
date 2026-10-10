@@ -103,7 +103,7 @@ namespace TailRemote
             try
             {
                 var s = Settings.Load();
-                if (s.Password.Length < MainForm.MinPasswordLength) return Fail("Set a password of at least 5 characters first.");
+                if (s.Password.Length < MainForm.MinPasswordLength) return Fail("Set a password of at least " + MainForm.MinPasswordLength + " characters first.");
 
                 RunHidden("sc.exe", "stop " + Name);
                 WaitForStopped();

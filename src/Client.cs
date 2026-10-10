@@ -107,13 +107,23 @@ namespace TailRemote
                         : "That is not a TailRemote host, or the connection damaged its first message.");
                 Protocol.ReadExactly(stream, hello.AsSpan(4));
                 if (!Protocol.CheckOk(hello)) throw new InvalidOperationException(Protocol.DamagedLogin);
-                byte[] key = Protocol.DeriveKey(password);
                 byte[] hostNonce = hello[4..20];
+                byte[] passwordKey = Protocol.DeriveKey(password, hello.AsSpan(Protocol.HelloSaltAt, Protocol.SaltBytes));
                 byte[] myNonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
                 byte[] answer = new byte[Protocol.AnswerBytes];
                 Protocol.Magic.CopyTo(answer, 0);
                 myNonce.CopyTo(answer, 4);
-                Protocol.Proof(key, 'C', hostNonce, myNonce).CopyTo(answer, 20);
+                byte[] key;
+                using (var exchange = Protocol.NewExchange())
+                {
+                    byte[] shared = Protocol.SharedSecret(exchange, hello.AsSpan(Protocol.HelloPublicAt, Protocol.PublicKeyBytes))
+                        ?? throw new InvalidOperationException("That is not a TailRemote host, or the connection damaged its first message.");
+                    Protocol.WritePublic(exchange, answer.AsSpan(Protocol.AnswerPublicAt, Protocol.PublicKeyBytes));
+                    key = Protocol.SessionKey(passwordKey, shared, hello, answer.AsSpan(0, Protocol.AnswerProofAt));
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(shared);
+                }
+                // Still the client that proves first: the host gives nothing away to a wrong password.
+                Protocol.Proof(key, 'C', hostNonce, myNonce).CopyTo(answer, Protocol.AnswerProofAt);
                 Protocol.AddCheck(answer);
                 stream.Write(answer);
 
@@ -206,6 +216,8 @@ namespace TailRemote
         /// <summary>
         /// One more file lane. Its keys mix in fresh random values from both PCs, so no two
         /// lanes ever encrypt with the same key and counter. Null if it could not be opened.
+        /// key is the main login's session key; the host's value is the nonce in this lane's own
+        /// hello (bytes 4 to 20), the same bytes the host uses, never the main login's.
         /// </summary>
         private static (TcpClient, SecureLink)? OpenLane(IPEndPoint host, byte[] token, byte[] channel, byte[] key, byte[] hostNonce, byte[] myNonce)
         {
@@ -1043,7 +1055,7 @@ namespace TailRemote
 
         private void Heartbeat()
         {
-            byte[] hello = new byte[17];
+            byte[] hello = new byte[Protocol.UdpHelloBytes];
             hello[0] = Protocol.UdpHello;
             _token.CopyTo(hello, 1);
             byte[] ping = new byte[9];
@@ -1072,6 +1084,7 @@ namespace TailRemote
                 {
                     lastHello = now;
                     BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back
+                    _link.SignHello(hello); // the host ignores a hello without it
                     try { _udp.Send(hello, hello.Length, _hostUdp); } catch { }
                 }
                 bool holding;

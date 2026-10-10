@@ -9,7 +9,8 @@ namespace TailRemote
     /// with or without Tailscale.
     ///
     /// Each direction and each transport gets its own AES-GCM key, derived with
-    /// HKDF from the password key and both sides' login nonces, so keys are new
+    /// HKDF from the login's session key (the key exchange salted with the
+    /// password key, see Protocol) and both sides' login nonces, so keys are new
     /// for every connection. TCP frames use a counter as the nonce (TCP keeps
     /// order). Audio packets use their sequence number, which never repeats in
     /// a session; the packet type and number travel in the clear but are
@@ -39,6 +40,29 @@ namespace TailRemote
             _send = new AesGcm(isHost ? toClient : toHost, TagSize);
             _recv = new AesGcm(isHost ? toHost : toClient, TagSize);
             _audio = new AesGcm(Derive("TailRemote audio"), TagSize);
+            _helloKey = Derive("TailRemote udp hello");
+        }
+
+        // The UDP hello tells the host where to send the sound. Its token used to be enough, and
+        // the token travels in the clear, so anyone who saw one could send the audio elsewhere.
+        private readonly byte[] _helloKey;
+        public const int HelloMacBytes = 16;
+
+        /// <summary>Fills the last HelloMacBytes of a UDP hello with a MAC of everything before them.</summary>
+        public void SignHello(byte[] hello)
+        {
+            Span<byte> mac = stackalloc byte[32];
+            HMACSHA256.HashData(_helloKey, hello.AsSpan(0, hello.Length - HelloMacBytes), mac);
+            mac[..HelloMacBytes].CopyTo(hello.AsSpan(hello.Length - HelloMacBytes));
+        }
+
+        /// <summary>True if a UDP hello's MAC is right: it came from the PC that logged in on this link.</summary>
+        public bool HelloOk(ReadOnlySpan<byte> hello)
+        {
+            if (hello.Length <= HelloMacBytes) return false;
+            Span<byte> mac = stackalloc byte[32];
+            HMACSHA256.HashData(_helloKey, hello[..^HelloMacBytes], mac);
+            return CryptographicOperations.FixedTimeEquals(mac[..HelloMacBytes], hello[^HelloMacBytes..]);
         }
 
         public void Dispose()

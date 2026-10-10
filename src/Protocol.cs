@@ -14,27 +14,36 @@ namespace TailRemote
     /// in order. UDP carries the audio: a late audio packet is worthless, so it is
     /// never waited for or resent.
     ///
-    /// Handshake, where key = PBKDF2-SHA256(password, 200000 rounds), slow on
-    /// purpose so a recorded handshake cannot be guessed quickly:
-    ///   host:   "TRM5" + host nonce (16)
-    ///   client: "TRM5" + client nonce (16) + HMAC(key, "C" + host nonce + client nonce)
-    ///   host:   0 after a 2 s pause (wrong password), or
-    ///           1 + role (1) + session token (8) + HMAC(key, "H" + client nonce + host nonce)
+    /// Handshake (every login message ends with a 4-byte damage check, see AddCheck):
+    ///   host:   "TRM8" + host nonce (16) + salt (16) + host P-256 public key (65)
+    ///   client: "TRM8" + client nonce (16) + client P-256 public key (65)
+    ///           + HMAC(session, "C" + host nonce + client nonce)
+    ///   host:   0 after a 2 s pause (wrong password, same size), or
+    ///           1 + role (1) + session token (8) + HMAC(session, "H" + client nonce + host nonce)
+    /// where
+    ///   password key = PBKDF2-SHA256(password, the host's salt, 200000 rounds)
+    ///   session      = HKDF(ECDH shared secret, salt: password key,
+    ///                       info: SHA-256 of the host's whole hello + the client's answer up to its proof)
+    /// Both public keys are fresh for every login and thrown away after it, so a
+    /// recording of the traffic is no help in guessing the password (nothing in it
+    /// can be checked without the shared secret), and a password that leaks later
+    /// does not unlock recorded sessions. The salt is random each time hosting
+    /// starts, so no work done against one host carries over to another.
     /// The role is Control or Listen, decided by which of the host's two
     /// passwords the client proved. Then each side sends Features: the extras
     /// it supports. Unknown message types are ignored, so newer versions can
     /// add messages without breaking older ones.
     /// The client checks the host's proof too, so a PC that does not know the
     /// password never receives a single key. After that, everything is
-    /// encrypted by SecureLink, so the connection is private without Tailscale.
-    /// After that both sides send encrypted frames of [type][payload].
+    /// encrypted by SecureLink, keyed from the session, so the connection is
+    /// private without Tailscale. Both sides send encrypted frames of [type][payload].
     /// </summary>
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM7"u8.ToArray(); // 7: login messages carry a check (1.8.5); 6 was Opus audio
-        /// <summary>A file lane (FileChannel): "TRF8", session token (8), channel id (16), the lane's fresh random value (16), padded, then the check.</summary>
-        public static readonly byte[] FileMagic = "TRF8"u8.ToArray();
+        public static readonly byte[] Magic = "TRM8"u8.ToArray(); // 8: key exchange and per-host salt (2.2.0); 7 added the login check
+        /// <summary>A file lane (FileChannel): "TRF9", session token (8), channel id (16), the lane's fresh random value (16), padded, then the check.</summary>
+        public static readonly byte[] FileMagic = "TRF9"u8.ToArray();
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -71,7 +80,8 @@ namespace TailRemote
         public const byte LeavingUpdating = 1, LeavingRestarting = 2, LeavingStopped = 3, LeavingShutdown = 4;
 
         // UDP
-        public const byte UdpHello = 0xA0;  // token[8] stamp[8], client to host, every second
+        public const byte UdpHello = 0xA0;  // token[8] stamp[8] mac[16] (SecureLink.SignHello), client to host, every second
+        public const int UdpHelloBytes = 1 + 8 + 8 + SecureLink.HelloMacBytes;
         public const byte UdpPong = 0xA8;   // stamp[8], host to client: the hello's stamp straight back, so the audio path's own ping is measured
         // 0xA1 to 0xA5 were the lossless formats (up to 1.7): never reuse them
         public const byte UdpOpus = 0xA6; // u32 sequence (5 ms ticks), then sealed: u8 ticks, Opus packet
@@ -120,8 +130,11 @@ namespace TailRemote
         // the host counted it toward blocking the address. Every login message now ends
         // with a 4-byte check of the rest. A wrong check means damage: never counted as a
         // wrong password, and the client simply tries again.
-        public const int HelloBytes = 24;  // magic 4, host nonce 16, check 4
-        public const int AnswerBytes = 56; // magic 4, client nonce 16, proof 32, check 4 (file lanes: magic, token 8, channel 16, lane value 16, zeros)
+        public const int SaltBytes = 16, PublicKeyBytes = 65; // P-256, uncompressed: 4, X, Y
+        public const int HelloSaltAt = 20, HelloPublicAt = 36;
+        public const int HelloBytes = HelloPublicAt + PublicKeyBytes + 4;    // magic 4, host nonce 16, salt 16, public key 65, check 4
+        public const int AnswerPublicAt = 20, AnswerProofAt = AnswerPublicAt + PublicKeyBytes;
+        public const int AnswerBytes = AnswerProofAt + 32 + 4; // magic 4, client nonce 16, public key 65, proof 32, check 4 (file lanes: magic, token 8, channel 16, lane value 16, zeros)
         public const int ReplyBytes = 46;  // ok 1, role 1, token 8, host proof 32, check 4 (a refusal is the same size)
 
         /// <summary>Fills the last 4 bytes with a check of everything before them.</summary>
@@ -176,16 +189,66 @@ namespace TailRemote
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Keys = new();
         private const int MaxCachedKeys = 256; // a modest bound; only local password guesses ever add to this
 
-        /// <summary>Slow on purpose (200,000 rounds), so it is worked out once per password and kept.</summary>
-        public static byte[] DeriveKey(string password)
+        /// <summary>
+        /// Slow on purpose (200,000 rounds), so it is worked out once per password and host salt
+        /// and kept. The salt is the host's own (random each time it starts hosting): with one
+        /// fixed salt for every install, a table of guesses built once worked against them all.
+        /// </summary>
+        public static byte[] DeriveKey(string password, ReadOnlySpan<byte> salt)
         {
             // Simple fixed bound instead of unbounded growth: a long-lived process that has had many
-            // different passwords typed at it (host or client) should not keep every derived key
-            // forever. Exceeding the cap just starts the cache over; a race here only costs an extra
-            // (slow, by design) derivation, never correctness.
+            // different passwords (or hosts' salts) at it should not keep every derived key forever.
+            // Exceeding the cap just starts the cache over; a race here only costs an extra (slow, by
+            // design) derivation, never correctness. The salt is fixed-length hex, so the two parts
+            // of the cache key can never run into each other.
             if (Keys.Count >= MaxCachedKeys) Keys.Clear();
-            return Keys.GetOrAdd(password, p =>
-                Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(p), "TailRemote-v3"u8.ToArray(), 200_000, HashAlgorithmName.SHA256, 32));
+            byte[] s = salt.ToArray();
+            return Keys.GetOrAdd(Convert.ToHexString(s) + ":" + password, _ =>
+                Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), s, 200_000, HashAlgorithmName.SHA256, 32));
+        }
+
+        /// <summary>A fresh key pair for one login's key exchange; disposed as soon as the session key exists.</summary>
+        public static ECDiffieHellman NewExchange() => ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+
+        /// <summary>Writes this side's public key (uncompressed: 4, X, Y) into the login message.</summary>
+        public static void WritePublic(ECDiffieHellman mine, Span<byte> to)
+        {
+            var q = mine.ExportParameters(false).Q;
+            to[0] = 4;
+            q.X.AsSpan().CopyTo(to[1..33]);
+            q.Y.AsSpan().CopyTo(to[33..65]);
+        }
+
+        /// <summary>The shared secret with the other side's public key, or null if it is not a valid P-256 point.</summary>
+        public static byte[]? SharedSecret(ECDiffieHellman mine, ReadOnlySpan<byte> theirs)
+        {
+            if (theirs.Length != PublicKeyBytes || theirs[0] != 4) return null;
+            try
+            {
+                // Importing checks the point is on the curve, so a forged key cannot pull out a weak secret.
+                using var other = ECDiffieHellman.Create(new ECParameters
+                {
+                    Curve = ECCurve.NamedCurves.nistP256,
+                    Q = new ECPoint { X = theirs[1..33].ToArray(), Y = theirs[33..65].ToArray() },
+                });
+                return mine.DeriveRawSecretAgreement(other.PublicKey);
+            }
+            catch (CryptographicException) { return null; }
+        }
+
+        /// <summary>
+        /// The login's session key: the key exchange's secret, salted with the password key, bound
+        /// to every byte both sides sent before the proofs (the host's hello, the client's answer up
+        /// to its proof), so nothing in the login can be swapped without the proofs failing. The
+        /// proofs and every SecureLink key come from this, never from the password key alone.
+        /// </summary>
+        public static byte[] SessionKey(byte[] passwordKey, byte[] shared, ReadOnlySpan<byte> hello, ReadOnlySpan<byte> answerHead)
+        {
+            using var h = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            h.AppendData("TailRemote login 8 "u8);
+            h.AppendData(hello);
+            h.AppendData(answerHead);
+            return HKDF.DeriveKey(HashAlgorithmName.SHA256, shared, 32, passwordKey, h.GetHashAndReset());
         }
 
         public static byte[] Proof(byte[] key, char side, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)

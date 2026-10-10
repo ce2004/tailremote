@@ -14,7 +14,7 @@ namespace TailRemote
         private readonly MenuChoice _mode = new("&Mode");
         private readonly MenuText _address = new("&Address", "The other PC's Tailscale name, IP address or internet address:");
         private readonly MenuText _port = new("&Port", "The port (the same on both PCs; 47120 unless you changed it):");
-        private readonly MenuText _password = new("Pass&word", "The password (at least 5 characters, the same on both PCs):", secret: true);
+        private readonly MenuText _password = new("Pass&word", "The password (at least 6 characters, the same on both PCs):", secret: true);
         private readonly MenuChoice _device = new("&Output device");
         private readonly MenuChoice _quality = new("Sound &quality");
         private readonly MenuStatus _streaming = new("Not connected");
@@ -1519,9 +1519,9 @@ namespace TailRemote
             Say(await Firewall.SetAsync(port, true) ? "Port " + port + " is open." : "Port " + port + " was not opened: administrator permission was not given.");
         }
 
-        public const int MinPasswordLength = 5;
+        public const int MinPasswordLength = 6;
 
-        /// <summary>Refuses a password shorter than 5 characters.</summary>
+        /// <summary>Refuses a password shorter than 6 characters.</summary>
         private bool CheckPassword()
         {
             int n = _password.Text.Length;
@@ -1533,7 +1533,7 @@ namespace TailRemote
         }
 
         /// <summary>
-        /// Refuses a listen-only password shorter than 5 characters, or the same as the main
+        /// Refuses a listen-only password shorter than 6 characters, or the same as the main
         /// password. Empty is fine: it means no listen-only password. Shared by StartHost and the
         /// service paths (ServiceChanged/ApplyService), so the service cannot be enabled or applied
         /// with a listen-only password that hosting itself would refuse.
