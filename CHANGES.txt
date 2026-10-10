@@ -1,3 +1,6 @@
+2.1.9
+New feature: send files to a folder of your choice on the remote PC. In Get files from the remote PC, open the folder you want, then choose Send files here (Alt S) or Send a folder here (Alt D). Nothing there is ever overwritten: a file with the same name arrives as name (2).
+
 2.1.8
 Bug fixed: pressing Get the remote PC's clipboard many times quickly could make the app on the other PC stop responding. Rapid presses are now limited so it stays smooth.
 Changed: confirmation prompts that do something big, like restarting the remote PC or removing the audio device, now start on the safe choice, so a stray Enter cancels instead of confirming.
