@@ -566,7 +566,7 @@ namespace TailRemote
         /// add-on as it opens, and a slow one froze TailRemote when it ran on the window's
         /// thread (1.8.4, Brock). Null: nothing chosen.
         /// </summary>
-        private static System.Threading.Tasks.Task<string[]?> PickFiles(bool folder)
+        internal static System.Threading.Tasks.Task<string[]?> PickFiles(bool folder)
         {
             var done = new System.Threading.Tasks.TaskCompletionSource<string[]?>();
             var t = new System.Threading.Thread(() =>
@@ -1175,6 +1175,8 @@ namespace TailRemote
         /// <summary>How transfers are going, either way: the Files line and bars. Never spoken, so a lot of them cannot flood NVDA; the sounds say they started and ended.</summary>
         /// <summary>A transfer of files coming to this PC ended (RemoteFilesForm marks what it asked for).</summary>
         internal static event Action<FileChannel.Transfer>? IncomingFilesEnded;
+        /// <summary>Files sent from this PC (not the clipboard) finished going (RemoteFilesForm shows what it sent into a folder).</summary>
+        internal static event Action<FileChannel.Transfer>? OutgoingFilesEnded;
 
         private void ShowTransfer(FileChannel.Transfer t)
         {
@@ -1194,6 +1196,7 @@ namespace TailRemote
                 var arrived = ends.Where(e => !e.Outgoing && !e.Clipboard).ToList();
                 if (arrived.Count > 0) Say(Summary(arrived));
                 foreach (var e in arrived) IncomingFilesEnded?.Invoke(e);
+                foreach (var e in ends.Where(e => e.Outgoing && !e.Clipboard)) OutgoingFilesEnded?.Invoke(e);
                 Remember(_transferStatus.Text);
                 _transferStop.Enabled = false;
                 // The clipboard's own sounds play when it is sent and when it arrives; file sounds are

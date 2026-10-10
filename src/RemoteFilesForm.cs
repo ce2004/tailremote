@@ -10,7 +10,8 @@ namespace TailRemote
     /// Backspace goes up, Space (or Enter on a file) checks files and folders, in as many
     /// folders as you like, and only Get brings the checked ones here, all at once, into the
     /// received files folder. Each one then says ", getting", then ", got" (or ", failed"), and
-    /// TailRemote says when they have arrived.
+    /// TailRemote says when they have arrived. The other way, Send files here and Send a folder
+    /// here send files from this PC into the remote folder that is open.
     /// </summary>
     internal sealed class RemoteFilesForm : Form
     {
@@ -23,6 +24,8 @@ namespace TailRemote
             Width = 640, Height = 360, AccessibleName = "Files and folders",
         };
         private readonly Button _get = new() { Text = "&Get the checked files and folders", AutoSize = true };
+        private readonly Button _sendHere = new() { Text = "&Send files here...", AutoSize = true };
+        private readonly Button _sendFolderHere = new() { Text = "Send a fol&der here...", AutoSize = true };
         private readonly Button _up = new() { Text = "&Up one folder (Backspace)", AutoSize = true };
         private readonly Button _close = new() { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel };
         private string _path = "";
@@ -33,6 +36,9 @@ namespace TailRemote
         private readonly Dictionary<string, string> _state = new(StringComparer.OrdinalIgnoreCase);
         // The ones on their way now (one Get at a time: the remote PC replaces a sending with a newer one).
         private List<Entry>? _pending;
+        // The remote folder files are being sent into now (one at a time: a newer sending replaces it).
+        private string? _sentInto;
+        private bool _picking;
 
         private sealed record Entry(bool Folder, string Path, string Name, long Bytes, long Ticks);
 
@@ -56,6 +62,8 @@ namespace TailRemote
             flow.Controls.Add(_list);
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_get);
+            buttons.Controls.Add(_sendHere);
+            buttons.Controls.Add(_sendFolderHere);
             buttons.Controls.Add(_up);
             buttons.Controls.Add(_close);
             flow.Controls.Add(buttons);
@@ -63,6 +71,8 @@ namespace TailRemote
             CancelButton = _close;
             _get.Click += (_, _) => Get();
             _up.Click += (_, _) => Up();
+            _sendHere.Click += (_, _) => SendHere(folder: false);
+            _sendFolderHere.Click += (_, _) => SendHere(folder: true);
             _list.KeyDown += (_, e) =>
             {
                 if (e.KeyCode == Keys.Enter) { e.Handled = e.SuppressKeyPress = true; Open(); }
@@ -75,7 +85,8 @@ namespace TailRemote
                 if (e.Item.Checked) _chosen[en.Path] = en; else _chosen.Remove(en.Path);
             };
             MainForm.IncomingFilesEnded += Arrived;
-            FormClosed += (_, _) => MainForm.IncomingFilesEnded -= Arrived;
+            MainForm.OutgoingFilesEnded += Sent;
+            FormClosed += (_, _) => { MainForm.IncomingFilesEnded -= Arrived; MainForm.OutgoingFilesEnded -= Sent; };
             Shown += async (_, _) => await LoadFolder("", null);
             Menus.FocusWhenShown(this, () => _list);
         }
@@ -110,6 +121,37 @@ namespace TailRemote
             foreach (var e in _pending) _state[e.Path] = t.Failed ? "failed" : "got";
             _pending = null;
             Relabel();
+        }
+
+        /// <summary>Send files here / Send a folder here: chosen on this PC, sent into the remote folder open now.</summary>
+        private async void SendHere(bool folder)
+        {
+            // The drives and usual folders are a list, not a folder anything can go into.
+            if (_path.Length == 0) { _say("Open a folder on the remote PC first."); return; }
+            if (_client() is not Client c) { _say("Not connected to the remote PC."); return; }
+            if (!c.CanSendTo) { _say("The remote PC has an older TailRemote that cannot take files into a folder. Update it first."); return; }
+            if (_picking) { _say("The file picker is already open."); return; }
+            if (_sentInto != null) { _say("Still sending the last ones into " + _sentInto + ". Send more when they have gone."); return; }
+            string into = _path;
+            string[]? paths;
+            _picking = true;
+            try { paths = await MainForm.PickFiles(folder); } // its own thread: this window keeps answering
+            catch (Exception e) { if (!IsDisposed) _say("Could not choose what to send: " + e.Message); return; }
+            finally { _picking = false; }
+            if (IsDisposed || paths == null || paths.Length == 0) return;
+            if (_client() is not Client now || !now.SendFilesTo(paths, into)) { _say("Not connected to the remote PC, so nothing was sent."); return; }
+            _sentInto = into;
+            string what = paths.Length == 1 ? System.IO.Path.GetFileName(paths[0].TrimEnd('\\')) : paths.Length + " items";
+            _say("Sending " + what + " into " + into + " on the remote PC. TailRemote says when it has gone.");
+        }
+
+        /// <summary>Files sent from here finished going: said, and the folder they went into shows them.</summary>
+        private async void Sent(FileChannel.Transfer t)
+        {
+            if (IsDisposed || _sentInto is not string into) return;
+            _sentInto = null;
+            if (t.Result != null) _say(t.Result);
+            if (!t.Failed && string.Equals(_path, into, StringComparison.OrdinalIgnoreCase)) await LoadFolder(_path, Current?.Path);
         }
 
         private async void Up()

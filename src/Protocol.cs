@@ -86,6 +86,10 @@ namespace TailRemote
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
         public const uint FeatureRemoteTools = 128;    // UpdateTo, ListFolder, Fetch, InfoRequest
+        // Send files into a folder the controller chose (FileChannel's KindTo). An older host ignores
+        // an offer of a kind it does not know without answering, so the controller only sends one to
+        // a host that says it takes them.
+        public const uint FeatureSendTo = 256;
 
         /// <summary>
         /// The bitrate steps, best first. 5 ms packets down to 128 kbit/s (Opus's
@@ -107,7 +111,7 @@ namespace TailRemote
         public static int WireKbps(int step) => OpusSteps[step].Kbps + 1000 / OpusSteps[step].Ms * PacketOverheadBytes * 8 / 1000;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureRemoteTools;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureRemoteTools | FeatureSendTo;
 
 
         // ---- The login, damage-proof ----

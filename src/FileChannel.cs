@@ -39,7 +39,7 @@ namespace TailRemote
     {
         // Wire messages, each one encrypted frame, on any lane:
         private const byte Ping = 0x60;     // nothing: this quiet lane still works
-        private const byte Offer = 0x61;    // u32 id, u8 kind, u32 entries, u64 total, u32 first entry, then per entry: i64 length (-1: a folder), u16 path bytes, UTF-8 path
+        private const byte Offer = 0x61;    // u32 id, u8 kind, u32 entries, u64 total, u32 first entry, [KindTo: u16 folder bytes, UTF-8 folder], then per entry: i64 length (-1: a folder), u16 path bytes, UTF-8 path
         private const byte Ready = 0x62;    // u32 id: the receiver has made the files; send the pieces
         private const byte Piece = 0x63;    // u32 id, u32 entry, i64 offset, then the bytes
         private const byte Got = 0x64;      // u32 id, u32 entry, i64 offset, u32 length: that piece is on disk
@@ -47,6 +47,7 @@ namespace TailRemote
         private const byte Stop = 0x66;     // u32 id: the sender stopped it
         private const byte Ask = 0x67;      // u32 id: how did it end? (the answer was lost with a lane)
         private const byte KindFiles = 1, KindText = 2, KindDownloads = 3; // clipboard files, clipboard text, Send files
+        private const byte KindTo = 4; // Send files into a folder the controller chose in Get files (the offer carries it)
         private const byte EndedWell = 0, EndedBadly = 1, EndedStopped = 2;
 
         /// <summary>The most lanes at once.</summary>
@@ -65,6 +66,11 @@ namespace TailRemote
         public Action<Transfer>? Progress;
         /// <summary>Bytes a second this side may send right now (set from the audio ping).</summary>
         public Func<double>? Rate;
+        /// <summary>
+        /// May the other PC send files into a folder of its choosing here? Only the host sets it, true
+        /// while that PC is controlling (never a listener); unset, such offers are refused.
+        /// </summary>
+        public Func<bool>? MayChooseFolder;
 
         /// <summary>The other PC's address, shown with each transfer.</summary>
         public volatile string PeerName = "";
@@ -465,6 +471,7 @@ namespace TailRemote
             public required string What;
             public required volatile List<Entry> Entries;
             public long Total;
+            public string? Into; // KindTo: the folder on the other PC
             public System.Security.Principal.WindowsIdentity? AsUser; // opens files as this user (the service's agent)
             public readonly object Gate = new();
             public readonly ManualResetEventSlim Changed = new();
@@ -524,6 +531,13 @@ namespace TailRemote
                     var part = new MemoryStream();
                     var w = new BinaryWriter(part);
                     w.Write(Offer); w.Write(Id); w.Write(Kind); w.Write(Entries.Count); w.Write(Total); w.Write(i);
+                    if (Kind == KindTo)
+                    {
+                        // In every part: whichever part arrives first must say where it all goes.
+                        byte[] into = Encoding.UTF8.GetBytes(Into!);
+                        w.Write((ushort)into.Length);
+                        w.Write(into);
+                    }
                     for (; i < Entries.Count && part.Length < OfferPartBytes; i++)
                     {
                         byte[] path = Encoding.UTF8.GetBytes(Entries[i].Rel);
@@ -545,10 +559,12 @@ namespace TailRemote
         /// <summary>
         /// Sends files and folders. toClipboard: onto the other PC's clipboard (Send clipboard), ready for
         /// Control V; otherwise into its Downloads\TailRemote (Send files). Blocking: run it off the
-        /// window's thread. Replaces any batch still going.
+        /// window's thread. Replaces any batch still going. into: instead, into this folder on the other
+        /// PC (a controller sending into the folder it has open in Get files; the host checks it).
         /// </summary>
-        public void SendFiles(IReadOnlyList<string> items, bool toClipboard = true, System.Security.Principal.WindowsIdentity? asUser = null)
+        public void SendFiles(IReadOnlyList<string> items, bool toClipboard = true, System.Security.Principal.WindowsIdentity? asUser = null, string? into = null)
         {
+            if (into != null && (into.Length == 0 || Encoding.UTF8.GetByteCount(into) > ushort.MaxValue)) return;
             // The service's agent runs as SYSTEM: it lists and opens what the window's user asked for
             // as that user, so nothing they could not open themselves can be sent.
             List<Entry>? listed = null;
@@ -556,7 +572,7 @@ namespace TailRemote
             else listed = List(items);
             if (listed!.Count == 0) return;
             string what = items.Count == 1 ? Path.GetFileName(items[0].TrimEnd('\\', '/')) : items.Count + " items";
-            SendBatch(toClipboard ? KindFiles : KindDownloads, what, listed, asUser);
+            SendBatch(into != null ? KindTo : toClipboard ? KindFiles : KindDownloads, what, listed, asUser, into);
         }
 
         private static List<Entry> List(IReadOnlyList<string> items)
@@ -610,7 +626,7 @@ namespace TailRemote
             if (_in is In b) EndIn(b, EndedStopped, "Stopped receiving " + b.T.What + ".", "The other PC stopped receiving " + b.T.What + ".", null, tell: true);
         }
 
-        private void SendBatch(byte kind, string what, List<Entry> entries, System.Security.Principal.WindowsIdentity? asUser = null)
+        private void SendBatch(byte kind, string what, List<Entry> entries, System.Security.Principal.WindowsIdentity? asUser = null, string? into = null)
         {
             // Text's length is its bytes'.
             for (int i = 0; i < entries.Count; i++) if (entries[i].Data is byte[] d) entries[i] = entries[i] with { Length = d.Length };
@@ -618,7 +634,7 @@ namespace TailRemote
             {
                 Id = Interlocked.Increment(ref _nextId), Kind = kind, What = what, Entries = entries,
                 Total = entries.Sum(e => Math.Max(0, e.Length)),
-                AsUser = asUser,
+                AsUser = asUser, Into = into,
             };
             o.EntryAcked = new long[entries.Count];
             o.Next = new long[entries.Count];
@@ -646,7 +662,7 @@ namespace TailRemote
 
         private void Run(Out o)
         {
-            var t = new Transfer { Outgoing = true, What = o.What, Total = o.Total, Clipboard = o.Kind != KindDownloads, Peer = PeerName };
+            var t = new Transfer { Outgoing = true, What = o.What, Total = o.Total, Clipboard = o.Kind is KindFiles or KindText, Peer = PeerName };
             var clock = Stopwatch.StartNew();
             double lastReport = 0, speed = 0, moving = 0;
             long lastDone = 0;
@@ -876,6 +892,7 @@ namespace TailRemote
             public required uint Id;
             public required byte Kind;
             public required (string Rel, long Length)?[] Entries;
+            public string? Into; // KindTo: the folder the controller chose, already checked
             public readonly object Gate = new();
             public readonly Transfer T = new() { What = "files" };
             public readonly Stopwatch Clock = new();
@@ -918,7 +935,30 @@ namespace TailRemote
             byte kind = m[5];
             int count = BitConverter.ToInt32(m, 6);
             int first = BitConverter.ToInt32(m, 18);
-            if (kind is < KindFiles or > KindDownloads || count < 1 || count > 1_000_000 || first < 0 || first >= count) return;
+            if (count < 1 || count > 1_000_000 || first < 0 || first >= count) return;
+            int start = 22;
+            string? into = null, refusal = null;
+            if (kind is < KindFiles or > KindTo)
+                // A kind this version does not know (from a newer PC): refused out loud, so its sender is
+                // not left waiting, and nothing is written anywhere.
+                refusal = "The other PC could not take this: its TailRemote is too old for it. Update TailRemote there.";
+            else if (kind == KindTo)
+            {
+                if (m.Length < 24) return;
+                int n = BitConverter.ToUInt16(m, 22);
+                if (24 + n > m.Length) return;
+                into = Encoding.UTF8.GetString(m, 24, n);
+                start = 24 + n;
+                // Only a controlling PC (never a listener, never this host's own sends coming back) may
+                // choose where files go, and only into a folder that is really there. Asked out here:
+                // the host's own lock is never taken inside this channel's (the host closes channels
+                // while holding it).
+                bool may = MayChooseFolder?.Invoke() == true;
+                string? folder = may ? Destination(into) : null;
+                if (!may) refusal = "The remote PC only takes files into a folder of your choosing from a PC controlling it.";
+                else if (folder == null) refusal = "The remote PC did not take the files: " + into + " is not a folder there.";
+                into = folder;
+            }
             In b;
             In? old = null;
             lock (_inGate)
@@ -927,9 +967,17 @@ namespace TailRemote
                 if (_in is In cur && cur.Id == id) b = cur;
                 else
                 {
+                    // A part of a batch already taken is never refused (its controller may be reconnecting).
+                    if (refusal != null)
+                    {
+                        DiagLog.Write("files: refused an offer of kind " + kind + ": " + refusal);
+                        Remember(id, EndedBadly, refusal);
+                        Tell(lane, FinishedMessage(id, EndedBadly, refusal));
+                        return;
+                    }
                     old = _in;
-                    b = new In { Id = id, Kind = kind, Entries = new (string, long)?[count] };
-                    b.T.Clipboard = kind != KindDownloads;
+                    b = new In { Id = id, Kind = kind, Entries = new (string, long)?[count], Into = into };
+                    b.T.Clipboard = kind is KindFiles or KindText;
                     b.T.Peer = PeerName;
                     if (kind == KindText) b.T.What = "clipboard text";
                     _in = b;
@@ -946,7 +994,7 @@ namespace TailRemote
                     if (b.Prepared) ready = true;
                     else
                     {
-                        int pos = 22;
+                        int pos = start;
                         for (int i = first; pos < m.Length; i++)
                         {
                             if (i >= count || pos + 10 > m.Length) throw new InvalidDataException("a damaged list of files");
@@ -996,8 +1044,11 @@ namespace TailRemote
                     // Its own folder, even when several PCs send at the same moment.
                     b.Folder = Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + b.Id.ToString("x8"));
                 }
+                else if (b.Kind == KindTo)
+                    // Checked again now the whole list is here; never made if it has gone meanwhile.
+                    b.Folder = Destination(b.Into) ?? throw new InvalidDataException((b.Into ?? "the folder") + " is not a folder here.");
                 else b.Folder = Downloads;
-                Directory.CreateDirectory(b.Folder);
+                if (b.Kind != KindTo) Directory.CreateDirectory(b.Folder);
                 var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var tops = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var made = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1011,9 +1062,9 @@ namespace TailRemote
                     var (rel, length) = b.Entries[i]!.Value;
                     if (SafePath(b.Folder, rel) == null) throw new InvalidDataException("a path that leaves the folder");
                     string top = rel.Split('\\', '/')[0];
-                    if (b.Kind == KindDownloads)
+                    if (b.Kind is KindDownloads or KindTo)
                     {
-                        // Never over anything already in Downloads: "name (2).ext" and so on.
+                        // Never over anything already in Downloads (or the chosen folder): "name (2).ext" and so on.
                         if (!renamed.TryGetValue(top, out var fresh))
                         {
                             // Chosen and made in one step, under one lock for every transfer: two PCs
@@ -1188,7 +1239,7 @@ namespace TailRemote
                 paths = b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray();
                 t.Result = "The other PC sent " + t.What + Summary(b.Entries.Select(e => e!.Value)) + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
             }
-            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + At(t) + ". It is in " + Where(b.Folder!) + ".";
+            else if (b.Kind is KindDownloads or KindTo) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + At(t) + ". It is in " + Where(b.Folder!) + ".";
             else
             {
                 text = Encoding.UTF8.GetString(b.Text!);
@@ -1331,7 +1382,47 @@ namespace TailRemote
             foreach (string part in rel.Split('\\', '/'))
                 if (part.Length == 0 || part == "." || part == ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
             string full = Path.GetFullPath(Path.Combine(folder, rel));
-            return full.StartsWith(Path.GetFullPath(folder) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? full : null;
+            // Trimmed first: a drive's root ("D:\") already ends in the separator.
+            return full.StartsWith(Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? full : null;
+        }
+
+        private static readonly string[] Reserved =
+        {
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+            "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM\u00b9", "COM\u00b2", "COM\u00b3",
+            "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3",
+        };
+
+        /// <summary>
+        /// The folder a controller chose to send into, if files may go there: an existing folder on
+        /// one of this PC's drives, by its full plain path ("D:\Music\New"). Anything else is null:
+        /// relative paths, devices and the like (\\.\, \\?\, \??\), shares, streams (a second colon),
+        /// wildcards, ".." or a name Windows would quietly change, and reserved names such as CON or
+        /// NUL. What goes inside is then kept inside by SafePath, entry by entry.
+        /// </summary>
+        internal static string? Destination(string? path)
+        {
+            if (string.IsNullOrEmpty(path) || path.Length > 32_000) return null;
+            if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\') return null;
+            if (path.IndexOf(':', 2) >= 0 || path.IndexOfAny(Path.GetInvalidPathChars()) >= 0 || path.IndexOfAny(new[] { '/', '*', '?', '"', '<', '>', '|' }) >= 0) return null;
+            string rest = path[3..];
+            if (rest.EndsWith('\\')) rest = rest[..^1];
+            if (rest.Length > 0)
+                foreach (string part in rest.Split('\\'))
+                {
+                    if (part.Length == 0 || part == "." || part == ".." || part.EndsWith('.') || part.EndsWith(' ')) return null;
+                    string stem = part.Split('.')[0].TrimEnd(' ');
+                    if (Reserved.Contains(stem, StringComparer.OrdinalIgnoreCase)) return null;
+                }
+            try
+            {
+                string full = Path.GetFullPath(path);
+                // Windows read it as something else than it says: not what was chosen.
+                if (!string.Equals(full.TrimEnd('\\'), path.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return null;
+                if (!Directory.Exists(full) || (File.GetAttributes(full) & FileAttributes.Directory) == 0) return null;
+                return full.Length > 3 ? full.TrimEnd('\\') : full;
+            }
+            catch { return null; }
         }
 
         /// <summary>

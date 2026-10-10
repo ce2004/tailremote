@@ -248,6 +248,21 @@ namespace TailRemote
             ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
         }
 
+        /// <summary>Whether the host takes files into a folder chosen here (Get files' Send files here).</summary>
+        public bool CanSendTo => !ListenOnly && (_peerFeatures & Protocol.FeatureSendTo) != 0;
+
+        /// <summary>
+        /// Send files into this folder on the host (the one open in Get files). Never waits. False when
+        /// nothing was sent: not connected, listening only, or a host too old to take them.
+        /// </summary>
+        public bool SendFilesTo(IReadOnlyList<string> paths, string folder)
+        {
+            var files = _files;
+            if (_closed || !CanSendTo || files == null) return false;
+            ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false, into: folder); } catch { } });
+            return true;
+        }
+
         /// <summary>Stops what is going to or coming from the host.</summary>
         public void CancelTransfer() => _files?.CancelSending();
 

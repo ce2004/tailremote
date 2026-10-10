@@ -650,10 +650,40 @@ namespace TailRemote
             string got = Path.Combine(dir, "got", "loose file.bin");
             if (fetched == null || fetched.Failed || !File.Exists(got) || !File.ReadAllBytes(got).AsSpan().SequenceEqual(content))
                 return Fail("get files from the remote PC: " + (fetched?.Result ?? "nothing arrived"));
+
+            // Send files here: into the remote folder open in Get files, never over what is there;
+            // a destination that is not an existing folder is refused, and nothing is written.
+            if (!c.CanSendTo) return Fail("send files here: the host did not say it takes them");
+            string into = Path.Combine(dir, "into");
+            Directory.CreateDirectory(into);
+            File.WriteAllText(Path.Combine(into, "loose file.bin"), "already here");
+            FileChannel.Transfer? sentTo = null;
+            Action<FileChannel.Transfer> noteSent = t => { if (t.Finished && t.Outgoing && !t.Clipboard) sentTo = t; };
+            c.TransferProgress += noteSent;
+            FileChannel.Transfer? SendTo(string folder)
+            {
+                sentTo = null;
+                if (!c.SendFilesTo(new[] { loose }, folder)) return null;
+                for (int i = 0; i < 300 && sentTo == null; i++) System.Threading.Thread.Sleep(20);
+                return sentTo;
+            }
+            var toFolder = SendTo(into);
+            string arrivedTo = Path.Combine(into, "loose file (2).bin");
+            if (toFolder == null || toFolder.Failed || !File.Exists(arrivedTo) || !File.ReadAllBytes(arrivedTo).AsSpan().SequenceEqual(content)
+                || File.ReadAllText(Path.Combine(into, "loose file.bin")) != "already here")
+                return Fail("send files into a remote folder: " + (toFolder?.Result ?? "nothing happened"));
+            foreach (string bad in new[] { Path.Combine(dir, "no such folder"), Path.Combine(into, "loose file.bin"), "relative\\folder", @"\\?\" + into, @"\\.\" + into, Path.Combine(into, "CON") })
+            {
+                var refused = SendTo(bad);
+                if (refused == null || !refused.Failed) return Fail("send files into " + bad + ": " + (refused?.Result ?? "no answer") + " (it should have been refused)");
+            }
+            if (Directory.GetFileSystemEntries(into).Length != 2 || Directory.Exists(Path.Combine(dir, "no such folder")))
+                return Fail("a refused send files here still wrote something");
+            c.TransferProgress -= noteSent;
             c.RequestUpdate(new Version(99, 0, 0));
             for (int i = 0; i < 100 && !log.Any(l => l.Contains("cannot update itself")); i++) System.Threading.Thread.Sleep(20);
             if (!log.Any(l => l.Contains("cannot update itself"))) return Fail("the update request got no answer");
-            lossless += " | remote folders, info, get files, update answer";
+            lossless += " | remote folders, info, get files, send files into a folder, update answer";
 
             // A host that updates says so: the controlling PC reports the update, never a broken connection.
             string? goneWhy = null;

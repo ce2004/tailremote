@@ -498,6 +498,10 @@ namespace TailRemote
                             owner.Files = files;
                             var o = owner;
                             files.Rate = () => Volatile.Read(ref o.Pace);
+                            // Sending into a folder of its choosing is for a PC still controlling this one,
+                            // like every other remote tool. (When this is the service, the files are written
+                            // as the service, exactly as Send files writes into Downloads, TailRemote.)
+                            files.MayChooseFolder = () => IsController(o);
                             files.PeerName = owner.Address.ToString();
                         }
                     }
