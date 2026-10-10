@@ -434,6 +434,28 @@ namespace TailRemote
         private readonly ConcurrentDictionary<uint, TaskCompletionSource<string>> _folderRequests = new();
         private int _nextRequest;
         private TaskCompletionSource<string>? _infoRequest;
+        private TaskCompletionSource<string>? _speedRequest;
+
+        /// <summary>The host's internet speed test (SpeedTest.RunAsync there). Fails after 90 seconds.</summary>
+        public Task<string> RequestSpeedTestAsync()
+        {
+            var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Interlocked.Exchange(ref _speedRequest, wait)?.TrySetCanceled();
+            Write(stackalloc byte[] { Protocol.SpeedTestRequest });
+            return wait.Task.WaitAsync(TimeSpan.FromSeconds(90));
+        }
+
+        /// <summary>
+        /// A connection waiting in the background (several PCs at once): its sound is not played
+        /// (the PC in front is the one heard), and it starts afresh when it comes to the front.
+        /// </summary>
+        public volatile bool Muted;
+
+        /// <summary>Back to the best sound at once (coming to the front), unless the quality is locked.</summary>
+        public void StartBest()
+        {
+            if (_lockedStep < 0) lock (_stepGate) SetStep(0);
+        }
 
         /// <summary>A folder's contents on the host (see RemoteTools.ListFolder), or "" for the drives. Fails after 15 seconds.</summary>
         public async System.Threading.Tasks.Task<string> ListFolderAsync(string path)
@@ -504,6 +526,8 @@ namespace TailRemote
                         uint id = BitConverter.ToUInt32(m, 1);
                         if (_folderRequests.TryRemove(id, out var wait)) wait.TrySetResult(System.Text.Encoding.UTF8.GetString(m, 5, m.Length - 5));
                     }
+                    else if (m.Length >= 1 && m[0] == Protocol.SpeedResult)
+                        Interlocked.Exchange(ref _speedRequest, null)?.TrySetResult(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     else if (m.Length >= 1 && m[0] == Protocol.Info)
                         Interlocked.Exchange(ref _infoRequest, null)?.TrySetResult(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
                     else if (m.Length >= 2 && m[0] == Protocol.Leaving)
@@ -664,6 +688,12 @@ namespace TailRemote
             }
             if (d.Length < Protocol.MinAudioPacketBytes || d[0] != Protocol.UdpOpus) return;
             if (!_link.OpenAudio(d, d.Length)) { Interlocked.Increment(ref _rxDamaged); return; } // changed on the way (or not for us): counts as lost
+            if (Muted)
+            {
+                // In the background: nothing is played, and nothing old is kept for when it comes back.
+                if (_haveNext) { _queue.Clear(); _haveNext = false; }
+                return;
+            }
             Interlocked.Increment(ref _qPackets);
             Interlocked.Add(ref _qBytes, d.Length);
             if (d[5] is >= 1 and <= 24) Interlocked.Add(ref _qTicks, d[5]);

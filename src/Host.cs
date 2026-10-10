@@ -645,6 +645,14 @@ namespace TailRemote
                             try { s.Link.Send(s.Stream, Protocol.TextMessage(Protocol.Info, text)); } catch { }
                         });
                         break;
+                    case Protocol.SpeedTestRequest when IsController(s):
+                        _ = System.Threading.Tasks.Task.Run(async () =>
+                        {
+                            _status("Running an internet speed test, as the controlling PC asked.");
+                            string text = await SpeedTest.RunAsync();
+                            try { s.Link.Send(s.Stream, Protocol.TextMessage(Protocol.SpeedResult, text)); } catch { }
+                        });
+                        break;
                     case Protocol.RestartPc when IsController(s):
                         _status("Restarting this PC, as the controlling PC asked.");
                         Leave(Protocol.LeavingRestarting);

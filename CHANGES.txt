@@ -1,3 +1,8 @@
+2.1.0
+New feature: several PCs at once. Control 1 to 9, or File, Switch to PC, brings another saved PC to the front and keeps the one you were on connected in the background: silent, using almost nothing, its file transfers still going. Switching back is instant, with no new login. Switch to PC says which PCs are in front, in the background or not connected, and can disconnect the ones in the background.
+New feature: File, Internet speed test on this PC, and Internet speed test on the remote PC. About 20 seconds later a window shows the download and upload speed, ping and jitter, the Cloudflare data centre it tested against, your internet address and how much data the test used (at most about 1.5 gigabytes, even on a very fast line), a line each.
+New feature: Settings, Back up settings to a file, and Restore settings from a backup. Every setting and every saved PC with its password goes into one file, locked with a password you choose, so a new PC is set up in seconds.
+
 2.0.0
 New feature: a menu bar, and nothing else. The window is blank until you press Alt; then Right Arrow moves between File, Clipboard, Settings and About, and Down Arrow goes through each. Alt then Enter connects (or starts hosting).
 New feature: the address, port and passwords are File menu items that say what they are set to. Enter opens a small box to change one, with Show password for passwords. If one is missing or wrong when you connect, its box opens by itself and says what is wrong.

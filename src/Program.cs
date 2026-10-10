@@ -143,6 +143,12 @@ namespace TailRemote
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--selftest") return SelfTest();
+            if (args.Length == 1 && args[0] == "--speedtest")
+            {
+                // The internet speed test from File, without the window: the result goes to the temp folder.
+                File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-speedtest.txt"), SpeedTest.RunAsync().GetAwaiter().GetResult());
+                return 0;
+            }
             if (args.Length == 1 && args[0] == "--chaostest") return ChaosTest.Run();
             if (args.Length >= 1 && args[0] == "--audiotest")
             {
@@ -522,6 +528,19 @@ namespace TailRemote
             if (goneWhy != "The remote PC is updating TailRemote to version 9.9.9." || c.Leaving != Protocol.LeavingUpdating)
                 return Fail("updating host: the controller said " + (goneWhy ?? "nothing"));
             lossless += " | update goodbye";
+
+            // A settings backup comes back whole with its password, and not at all with a wrong one.
+            var original = new Settings { Address = "backup-test", Port = 47555, Password = "main secret", ListenPassword = "listen secret" };
+            original.SavedPcs.Add(new SavedPc { Address = "saved-one", Port = 47120, PasswordEnc = Settings.Protect("saved secret") });
+            byte[] backup = original.Export("backup password");
+            var restored = Settings.Import(backup, "backup password");
+            if (restored.Address != "backup-test" || restored.Port != 47555 || restored.Password != "main secret" || restored.ListenPassword != "listen secret"
+                || restored.SavedPcs.Count != 1 || Settings.Unprotect(restored.SavedPcs[0].PasswordEnc) != "saved secret")
+                return Fail("a settings backup did not come back whole");
+            if (System.Text.Encoding.UTF8.GetString(backup).Contains("secret")) return Fail("a settings backup has a password in plain sight");
+            try { Settings.Import(backup, "wrong password"); return Fail("a settings backup opened with the wrong password"); }
+            catch (InvalidDataException) { }
+            lossless += " | settings backup";
 
             // The window and its menu bar still build in the trimmed exe (never shown, so nothing is saved).
             using (var form = new MainForm(false, false, false))

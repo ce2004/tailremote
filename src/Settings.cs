@@ -76,6 +76,67 @@ namespace TailRemote
             set => PasswordEnc = Protect(value);
         }
 
+        // ---- Backups: everything, for another PC ----
+        // The passwords here are locked to this Windows account (DPAPI), so a backup carries them
+        // as plain text inside, and the whole file is locked with a password of its own instead:
+        // "TRBK1", salt (16), nonce (12), tag (16), then the settings, AES-GCM with a slow PBKDF2 key.
+
+        private static readonly byte[] BackupMagic = "TRBK1"u8.ToArray();
+
+        public byte[] Export(string password)
+        {
+            var copy = JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(this))!;
+            copy.PasswordEnc = Password;
+            copy.ListenPasswordEnc = ListenPassword;
+            foreach (var pc in copy.SavedPcs) pc.PasswordEnc = Unprotect(pc.PasswordEnc);
+            copy.KnownPorts = new();   // this PC's firewall history, not the next one's
+            copy.ResumeState = "";
+            byte[] plain = JsonSerializer.SerializeToUtf8Bytes(copy);
+            byte[] salt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+            byte[] nonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(12);
+            byte[] tag = new byte[16], secret = new byte[plain.Length];
+            using (var gcm = new System.Security.Cryptography.AesGcm(BackupKey(password, salt), 16)) gcm.Encrypt(nonce, plain, secret, tag);
+            using var ms = new MemoryStream();
+            ms.Write(BackupMagic);
+            ms.Write(salt);
+            ms.Write(nonce);
+            ms.Write(tag);
+            ms.Write(secret);
+            return ms.ToArray();
+        }
+
+        /// <summary>The settings in a backup, with their passwords locked to this Windows account again. Throws with a plain message.</summary>
+        public static Settings Import(byte[] data, string password)
+        {
+            int head = BackupMagic.Length;
+            if (data.Length < head + 44 || !data.AsSpan(0, head).SequenceEqual(BackupMagic)) throw new InvalidDataException("That is not a TailRemote settings backup.");
+            byte[] salt = data[head..(head + 16)], nonce = data[(head + 16)..(head + 28)], tag = data[(head + 28)..(head + 44)], secret = data[(head + 44)..];
+            byte[] plain = new byte[secret.Length];
+            try
+            {
+                using var gcm = new System.Security.Cryptography.AesGcm(BackupKey(password, salt), 16);
+                gcm.Decrypt(nonce, secret, tag, plain);
+            }
+            catch (System.Security.Cryptography.CryptographicException) { throw new InvalidDataException("Wrong password for that backup, or the file is damaged."); }
+            var s = JsonSerializer.Deserialize<Settings>(plain) ?? throw new InvalidDataException("The backup is empty.");
+            s.Password = s.PasswordEnc;
+            s.ListenPassword = s.ListenPasswordEnc;
+            foreach (var pc in s.SavedPcs) pc.PasswordEnc = Protect(pc.PasswordEnc);
+            return s;
+        }
+
+        private static byte[] BackupKey(string password, byte[] salt) =>
+            System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), salt, 200_000, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
+
+        /// <summary>Takes on every setting of another (a restored backup), keeping this PC's port history.</summary>
+        public void CopyFrom(Settings other)
+        {
+            var ports = KnownPorts;
+            foreach (var p in typeof(Settings).GetProperties())
+                if (p.CanWrite && p.CanRead && !Attribute.IsDefined(p, typeof(JsonIgnoreAttribute))) p.SetValue(this, p.GetValue(other));
+            foreach (int port in ports) if (!KnownPorts.Contains(port)) KnownPorts.Add(port);
+        }
+
         public static Settings Load()
         {
             try { return JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings(); }

@@ -49,6 +49,18 @@ namespace TailRemote
         private readonly ToolStripMenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
         private readonly ToolStripMenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
         private readonly ToolStripMenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
+        private readonly ToolStripMenuItem _switchTo = new("Switch &to PC");
+        private readonly ToolStripMenuItem _speedHere = new("Internet &speed test on this PC...");
+        private readonly ToolStripMenuItem _speedRemote = new("Internet speed test on the r&emote PC...");
+        private readonly ToolStripMenuItem _backup = new("&Back up settings to a file...");
+        private readonly ToolStripMenuItem _restore = new("&Restore settings from a backup...");
+        // Several PCs at once: the one in front is _client; these wait in the background, connected
+        // but silent, until switched to (Control 1 to 9, or File, Switch to PC).
+        private sealed record Parked(string Name, string Address, int Port, string Password, Client Client);
+        private readonly System.Collections.Generic.List<Parked> _parked = new();
+        private const int MaxParked = 8;
+        private bool _loadingSettings; // a restored backup is going into the window: nothing is saved halfway
+        private readonly System.Collections.Generic.HashSet<Client> _versionTold = new();
         private Client? _seenClient;  // the connection the version and quality below belong to
         private int _qualitySaid;      // the bitrate step last announced
         private bool _expectRestart; // the remote PC was asked to restart: say when it is back
@@ -104,7 +116,8 @@ namespace TailRemote
             var file = new ToolStripMenuItem("&File");
             file.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _go, _toggle, _restart, _remoteInfo, _updateRemote, _streaming.Item, new ToolStripSeparator(),
+                _go, _switchTo, _toggle, _restart, _remoteInfo, _updateRemote, _streaming.Item, new ToolStripSeparator(),
+                _speedHere, _speedRemote, new ToolStripSeparator(),
                 _mode.Menu, _saved.Menu, _address.Item, _port.Item, _password.Item, _listenPassword.Item, _copyAddress,
                 _savePc, _forgetPc, new ToolStripSeparator(),
                 Menus.Action("E&xit", ExitForGood),
@@ -119,7 +132,7 @@ namespace TailRemote
             {
                 _quality.Menu, _announceQuality, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
                 _startup, _service, _portEditor, _audioSetup, _audioRemove, new ToolStripSeparator(),
-                _logging,
+                _backup, _restore, _logging,
             });
             var bar = new MenuStrip { Dock = DockStyle.Top };
             bar.Items.AddRange(new ToolStripItem[] { file, clip, set, AboutMenu.Build(this, bar, _update) });
@@ -198,6 +211,12 @@ namespace TailRemote
             _updateRemote.Click += (_, _) => UpdateRemote();
             _remoteInfo.Click += (_, _) => RemoteInfo();
             _getFiles.Click += (_, _) => GetFiles();
+            _speedHere.Click += (_, _) => SpeedTestHere();
+            _speedRemote.Click += (_, _) => SpeedTestRemote();
+            _backup.Click += (_, _) => BackupSettings();
+            _restore.Click += (_, _) => RestoreSettings();
+            _switchTo.DropDownItems.Add("(filled in when opened)");
+            _switchTo.DropDownOpening += (_, _) => FillSwitchMenu();
             _announceQuality.CheckedChanged += (_, _) => SaveSettings();
             _audioSetup.Click += (_, _) => SetUpAudio();
             _audioRemove.Click += (_, _) => RemoveAudio();
@@ -273,7 +292,7 @@ namespace TailRemote
             _quality.Menu.Available = !host; // the host always sends the best unless asked for less
             _streaming.Item.Available = !host;
             _toggle.Available = !host;
-            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = !host;
+            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _speedRemote.Available = _switchTo.Available = !host;
             _announceQuality.Available = !host;
             _startup.Available = host;
             _service.Available = host;
@@ -283,13 +302,13 @@ namespace TailRemote
 
         private void UpdateButtons()
         {
-            bool busy = _client != null || _host != null || _reconnecting;
+            bool busy = _client != null || _host != null || _reconnecting || _parked.Count > 0;
             _mode.Menu.Enabled = !busy;
             // Alt C and Alt S are the Clipboard and Settings menus, so the button uses other letters.
             if (HostMode) _go.Text = _service.Checked ? "Appl&y settings to the service" : _host == null ? "Start &hosting" : "Stop &hosting";
             else _go.Text = _client == null && !_reconnecting ? "Co&nnect" : "Disco&nnect";
             _toggle.Enabled = _client != null && !_client.ListenOnly;
-            _restart.Enabled = _updateRemote.Enabled = _remoteInfo.Enabled = _getFiles.Enabled = _client != null && !_client.ListenOnly;
+            _restart.Enabled = _updateRemote.Enabled = _remoteInfo.Enabled = _getFiles.Enabled = _speedRemote.Enabled = _client != null && !_client.ListenOnly;
             EnsureServiceLink();
             SaveResumeState();
         }
@@ -659,7 +678,7 @@ namespace TailRemote
                 _seenClient = c;
                 _qualitySaid = c.AudioQuality;
                 _updateRemote.Text = "Update the remote P&C to this PC's version (it has " + hv + ", this PC has " + Updater.Current + ")";
-                if (hv < Updater.Current && !c.ListenOnly)
+                if (hv < Updater.Current && !c.ListenOnly && _versionTold.Add(c))
                     Speak("The remote PC has TailRemote " + hv + ", older than this PC's " + Updater.Current + ". File, Update the remote PC brings it up to date.");
                 return;
             }
@@ -684,20 +703,264 @@ namespace TailRemote
 
         private void QuickConnect(int n)
         {
-            if (HostMode) { Say("Control 1 to 9 connect to saved PCs, in Control another PC mode."); return; }
+            if (HostMode) { Say("Control 1 to 9 switch between saved PCs, in Control another PC mode."); return; }
             if (n > _settings.SavedPcs.Count)
             {
                 Say(_settings.SavedPcs.Count == 0 ? "There are no saved PCs yet. Use File, Save this PC." : "There is no saved PC " + n + ". There are " + _settings.SavedPcs.Count + ".");
                 return;
             }
-            if (_connecting && !_reconnecting) { Say("Still connecting. Try again in a moment."); return; }
             var pc = _settings.SavedPcs[n - 1];
-            if (_client != null && _saved.SelectedIndex == n) { Say("Already connected to " + pc + "."); return; }
-            if (_client != null) Disconnect("Leaving " + _address.Text.Trim() + ".", byUser: true);
-            else if (_reconnecting) { _attempt++; _reconnecting = false; _retryTimer.Stop(); }
-            _saved.SelectedIndex = n;
-            UseSaved();
-            Connect(quiet: false);
+            SwitchTo(pc.Address, pc.Port, Settings.Unprotect(pc.PasswordEnc), pc.ToString());
+        }
+
+        // ---- Several PCs at once ----
+        // Switching to another PC keeps the one in front connected, in the background: silent, at
+        // the lowest bitrate, its transfers still going. Switching back is instant, with no login.
+
+        private static bool SamePc(string a, int portA, string b, int portB) => portA == portB && string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
+
+        private int CurrentPort => int.TryParse(_port.Text.Trim(), out int p) ? p : 0;
+
+        private string NameFor(string address, int port) =>
+            _settings.SavedPcs.Find(p => SamePc(p.Address, p.Port, address, port))?.ToString() ?? (port == Protocol.DefaultPort ? address : address + ", port " + port);
+
+        private Parked? FindParked(string address, int port) => _parked.Find(p => SamePc(p.Address, p.Port, address, port));
+
+        private void SwitchTo(string address, int port, string password, string name)
+        {
+            if (HostMode) { Say("Switching PCs works in Control another PC mode."); return; }
+            if (_connecting && !_reconnecting) { Say("Still connecting. Try again in a moment."); return; }
+            if ((_client != null || _reconnecting) && SamePc(_address.Text, CurrentPort, address, port)) { Say("Already on " + name + "."); return; }
+            var target = FindParked(address, port);
+            if (_client != null) Park(_client);
+            else if (_reconnecting) { _attempt++; _reconnecting = false; _retryTimer.Stop(); _resumeRemote = false; }
+            _address.Text = address;
+            _port.Text = port.ToString();
+            _password.Text = password;
+            SaveSettings();
+            FillSaved();
+            if (target != null) Unpark(target);
+            else Connect(quiet: false);
+        }
+
+        private void Park(Client c)
+        {
+            if (_keys?.Remote == true) { _quietModeChange = true; _keys.Toggle(); } // keys come home first
+            _keys?.SetClient(null);
+            c.Muted = true;
+            c.LockedStep = Protocol.OpusSteps.Length - 1; // a few kilobits, so it takes nothing from the one in front
+            _parked.Add(new Parked(NameFor(_address.Text, CurrentPort), _address.Text.Trim(), CurrentPort, _password.Text, c));
+            while (_parked.Count > MaxParked) { _parked[0].Client.Dispose(); _parked.RemoveAt(0); }
+            _client = null;
+        }
+
+        private void Unpark(Parked p)
+        {
+            _parked.Remove(p);
+            var c = p.Client;
+            _client = c;
+            c.Muted = false;
+            c.LockedStep = _quality.SelectedIndex - 1;
+            c.StartBest();
+            if (!c.ListenOnly) _keys?.SetClient(c);
+            Tone(Sounds.Tone.Connected);
+            Say("Switched to " + p.Name + "." + (c.ListenOnly ? " Listen only." : " Press Control Shift Enter to control it."));
+            UpdateButtons();
+            UpdateTitle();
+        }
+
+        /// <summary>A PC in the background dropped: it is let go, and switching to it connects again.</summary>
+        private void BackgroundDropped(Client c, string why)
+        {
+            var p = _parked.Find(x => x.Client == c);
+            if (p == null) return;
+            _parked.Remove(p);
+            c.Dispose();
+            Speak(p.Name + ", in the background, disconnected: " + why + " Switching to it connects again.");
+            UpdateTitle();
+        }
+
+        private void DropBackground()
+        {
+            foreach (var p in _parked) p.Client.Dispose();
+            _parked.Clear();
+        }
+
+        /// <summary>File, Switch to PC: every saved PC with its key and whether it is in front, in the background or not connected.</summary>
+        private void FillSwitchMenu()
+        {
+            var items = _switchTo.DropDownItems;
+            items.Clear();
+            string State(string address, int port) =>
+                (_client != null || _reconnecting || _connecting) && SamePc(_address.Text, CurrentPort, address, port) ? (_client != null ? "in front" : "connecting")
+                : FindParked(address, port) != null ? "in the background" : "not connected";
+            for (int i = 0; i < _settings.SavedPcs.Count; i++)
+            {
+                var pc = _settings.SavedPcs[i];
+                var item = new ToolStripMenuItem((pc + ", " + State(pc.Address, pc.Port)).Replace("&", "&&"));
+                if (i < 9) item.ShortcutKeyDisplayString = "Ctrl+" + (i + 1);
+                item.Click += (_, _) => SwitchTo(pc.Address, pc.Port, Settings.Unprotect(pc.PasswordEnc), pc.ToString());
+                items.Add(item);
+            }
+            // Connected ones that are not saved.
+            foreach (var p in _parked.Where(p => !_settings.SavedPcs.Any(s => SamePc(s.Address, s.Port, p.Address, p.Port))).ToList())
+            {
+                var item = new ToolStripMenuItem((p.Name + ", in the background").Replace("&", "&&"));
+                item.Click += (_, _) => SwitchTo(p.Address, p.Port, p.Password, p.Name);
+                items.Add(item);
+            }
+            if (_client != null && !_settings.SavedPcs.Any(s => SamePc(s.Address, s.Port, _address.Text, CurrentPort)))
+                items.Add(new ToolStripMenuItem((NameFor(_address.Text, CurrentPort) + ", in front").Replace("&", "&&")));
+            if (items.Count == 0) items.Add(new ToolStripMenuItem("No saved PCs yet: File, Save this PC adds the one you are connected to") { Enabled = false });
+            if (_parked.Count > 0)
+            {
+                items.Add(new ToolStripSeparator());
+                items.Add(Menus.Action("&Disconnect the PCs in the background", () =>
+                {
+                    int n = _parked.Count;
+                    DropBackground();
+                    Say("Disconnected " + n + (n == 1 ? " PC" : " PCs") + " in the background.");
+                    UpdateTitle();
+                }));
+            }
+        }
+
+        // ---- Internet speed tests ----
+
+        private async void SpeedTestHere()
+        {
+            Doing("testing this PC's internet speed");
+            _speedHere.Enabled = false;
+            Say("Testing this PC's internet speed. It takes about 20 seconds" + (_client != null || _host != null ? ", and the sound may break up meanwhile." : "."));
+            try { ShowSpeed("This PC's internet speed", await SpeedTest.RunAsync()); }
+            finally { _speedHere.Enabled = true; }
+        }
+
+        private async void SpeedTestRemote()
+        {
+            if (!CanUseRemote(out var c)) return;
+            Doing("testing the remote PC's internet speed");
+            _speedRemote.Enabled = false;
+            Say("The remote PC is testing its internet speed. It takes about 20 seconds, and its sound may break up meanwhile.");
+            string text;
+            try { text = await c.RequestSpeedTestAsync(); }
+            catch { text = "Problem: the remote PC did not answer."; }
+            finally { UpdateButtons(); }
+            ShowSpeed("The remote PC's internet speed", text);
+        }
+
+        /// <summary>The results in a list, read with the arrows, brought up in front.</summary>
+        private void ShowSpeed(string title, string text)
+        {
+            if (!Visible) RestoreFromTray();
+            Speak(text.StartsWith("Problem: ") ? text["Problem: ".Length..] : title + ": the test is done.");
+            if (text.StartsWith("Problem: ")) return;
+            Activate();
+            using var f = new ListViewerForm(title, text.Split('\n'), _ => false);
+            f.ShowDialog(this);
+        }
+
+        // ---- Settings backups ----
+
+        /// <summary>A save or open box on a thread of its own, like the file pickers. Null: cancelled.</summary>
+        private static System.Threading.Tasks.Task<string?> PickBackupFile(bool save)
+        {
+            var done = new System.Threading.Tasks.TaskCompletionSource<string?>();
+            var t = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    using FileDialog d = save
+                        ? new SaveFileDialog { Title = "Back up TailRemote's settings to", FileName = "TailRemote settings.trbackup", DefaultExt = "trbackup" }
+                        : new OpenFileDialog { Title = "Restore TailRemote's settings from" };
+                    d.Filter = "TailRemote settings backups (*.trbackup)|*.trbackup|All files|*.*";
+                    done.TrySetResult(d.ShowDialog() == DialogResult.OK ? d.FileName : null);
+                }
+                catch (Exception e) { done.TrySetException(e); }
+            }) { IsBackground = true, Name = "TailRemote backup picker" };
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.Start();
+            return done.Task;
+        }
+
+        private string? AskBackupPassword(string prompt)
+        {
+            using var f = new TextForm("Backup password", prompt, "", secret: true);
+            if (f.ShowDialog(this) != DialogResult.OK) return null;
+            if (f.Value.Length >= MinPasswordLength) return f.Value;
+            Say("The backup password needs at least " + MinPasswordLength + " characters.");
+            return null;
+        }
+
+        private async void BackupSettings()
+        {
+            Doing("backing up settings");
+            SaveSettings();
+            string? path;
+            try { path = await PickBackupFile(save: true); }
+            catch (Exception e) { Say("Could not open the save box: " + e.Message); return; }
+            if (path == null) return;
+            string? pw = AskBackupPassword("A password for the backup, at least " + MinPasswordLength + " characters. It locks the saved PCs' passwords inside, and you need it to restore:");
+            if (pw == null) return;
+            try
+            {
+                System.IO.File.WriteAllBytes(path, _settings.Export(pw));
+                int n = _settings.SavedPcs.Count;
+                Say("Backed up every setting and " + n + (n == 1 ? " saved PC" : " saved PCs") + " to " + path + ".");
+            }
+            catch (Exception e) { Say("Could not write the backup: " + e.Message); }
+        }
+
+        private async void RestoreSettings()
+        {
+            Doing("restoring settings");
+            if (_client != null || _host != null || _reconnecting || _connecting || _parked.Count > 0) { Say("Disconnect, or stop hosting, first."); return; }
+            string? path;
+            try { path = await PickBackupFile(save: false); }
+            catch (Exception e) { Say("Could not open the file box: " + e.Message); return; }
+            if (path == null) return;
+            string? pw = AskBackupPassword("The backup's password:");
+            if (pw == null) return;
+            Settings restored;
+            try { restored = Settings.Import(System.IO.File.ReadAllBytes(path), pw); }
+            catch (Exception e) { Say(e.Message); return; }
+            int n = restored.SavedPcs.Count;
+            if (MessageBox.Show(this, "Replace TailRemote's settings on this PC with the backup's? It has " + n + (n == 1 ? " saved PC" : " saved PCs") + ".",
+                    "Restore settings", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            _settings.CopyFrom(restored);
+            _settings.Save();
+            LoadIntoWindow();
+            Say("Restored every setting and " + n + (n == 1 ? " saved PC." : " saved PCs.") + (_service.Checked ? " Use Apply settings to the service to give the service them too." : ""));
+        }
+
+        /// <summary>Puts the settings into the menus (a restored backup), saving nothing until it is all in.</summary>
+        private void LoadIntoWindow()
+        {
+            _loadingSettings = true;
+            try
+            {
+                _mode.SelectedIndex = _settings.HostMode ? 1 : 0;
+                _address.Text = _settings.Address;
+                _port.Text = _settings.Port.ToString();
+                _password.Text = _settings.Password;
+                _listenPassword.Text = _settings.ListenPassword;
+                _logging.Checked = _settings.Logging;
+                DiagLog.Enabled = _settings.Logging;
+                _speedUp.Checked = _settings.CatchUpBySpeed;
+                _announceQuality.Checked = _settings.AnnounceQuality;
+                _quality.SelectedIndex = Math.Clamp(_settings.SoundQuality + 1, 0, _quality.Count - 1);
+                int sel = _devices.FindIndex(d => d.Id == _settings.OutputDevice);
+                _device.SelectedIndex = sel < 0 ? 0 : sel;
+                _fillingCapture = true;
+                int cap = _devices.FindIndex(d => d.Id == _settings.CaptureDevice);
+                _captureFrom.SelectedIndex = cap < 0 ? 0 : cap;
+                _fillingCapture = false;
+                Sounds.Key = Math.Clamp(_settings.SoundKey, 0, 11);
+                ApplyReceiveFolder();
+                FillSaved();
+            }
+            finally { _loadingSettings = false; }
+            UpdateMode();
         }
 
         // ---- Restart ----
@@ -946,6 +1209,7 @@ namespace TailRemote
                 int audio = _client.AudioDelayMs;
                 if (audio >= 0) t += ", audio " + (audio + _client.PingForAudio / 2) + " ms";
                 if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
+                if (_parked.Count > 0) t += ", " + _parked.Count + " more in the background";
                 WatchConnection(_client);
             }
             else if (_reconnecting) t = "TailRemote - reconnecting";
@@ -969,6 +1233,7 @@ namespace TailRemote
 
         private void SaveSettings()
         {
+            if (_loadingSettings) return;
             _settings.HostMode = HostMode;
             _settings.Address = _address.Text.Trim();
             if (int.TryParse(_port.Text.Trim(), out int port)) _settings.Port = port;
@@ -1130,6 +1395,7 @@ namespace TailRemote
             if (address.Length == 0) { Later(() => _address.Ask(this, "Type the address first.")); return; }
             if (!CheckPassword()) return;
             if (!CheckPort(out int port)) return;
+            if (!quiet && FindParked(address, port) is Parked waiting) { Unpark(waiting); return; } // already connected, in the background
             _connecting = true;
             int attempt = ++_attempt;
             if (!quiet) { _go.Enabled = false; Say("Connecting to " + address + "."); }
@@ -1157,7 +1423,7 @@ namespace TailRemote
                     c.Dispose();
                     return;
                 }
-                c.Disconnected += why => Later(() => Disconnect(why, byUser: false));
+                c.Disconnected += why => Later(() => { if (c == _client) Disconnect(why, byUser: false); else BackgroundDropped(c, why); });
                 c.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 c.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
                 c.TransferProgress += t => Later(() => ShowTransfer(t));
@@ -1226,7 +1492,13 @@ namespace TailRemote
             _client = null;
             Tone(Sounds.Tone.Disconnected);
             if (!byUser && leaving is Protocol.LeavingRestarting or Protocol.LeavingShutdown) _expectRestart = true; // whoever asked for it
-            if (byUser) { _expectRestart = false; _expectUpdate = null; Say(why); }
+            if (byUser)
+            {
+                _expectRestart = false;
+                _expectUpdate = null;
+                Say(why);
+                if (_parked.Count > 0) Speak("Still connected in the background to " + string.Join(", ", _parked.Select(x => x.Name)) + ". File, Switch to PC brings one to the front.");
+            }
             else if (leaving == Protocol.LeavingUpdating)
             {
                 // The host said it is updating: no error, just wait for it to come back.
@@ -1350,6 +1622,7 @@ namespace TailRemote
                     _host?.Leave(Protocol.LeavingUpdating, r.Version.ToString());
                     _keys?.SetClient(null);
                     _client?.Dispose(); _client = null;
+                    DropBackground();
                     _host?.Dispose(); _host = null;
                     return args;
                 });
@@ -1506,7 +1779,7 @@ namespace TailRemote
         /// </summary>
         private void HideToTray(bool announce)
         {
-            bool connected = _host == null && (_client != null || _reconnecting);
+            bool connected = _host == null && (_client != null || _reconnecting || _parked.Count > 0);
             if (connected && _keys?.Remote == true)
             {
                 // The keyboard comes back to this PC first: nothing is typed into a window you cannot see.
@@ -1540,7 +1813,7 @@ namespace TailRemote
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing && (_host != null || _client != null || _reconnecting) && !_reallyExit)
+            if (e.CloseReason == CloseReason.UserClosing && (_host != null || _client != null || _reconnecting || _parked.Count > 0) && !_reallyExit)
             {
                 e.Cancel = true;
                 HideToTray(announce: true);
@@ -1557,6 +1830,7 @@ namespace TailRemote
             _idleTimer?.Dispose();
             _keys?.SetClient(null);
             _client?.Dispose();
+            DropBackground();
             _player?.Dispose();
             _host?.Leave(e.CloseReason == CloseReason.WindowsShutDown ? Protocol.LeavingShutdown : Protocol.LeavingStopped);
             _host?.Dispose();

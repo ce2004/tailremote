@@ -48,6 +48,7 @@ namespace TailRemote
         public const byte ListFolder = 9;    // u32 request id, UTF-8 path ("" = the drives and the usual folders)
         public const byte Fetch = 10;        // UTF-8 paths, one per line: the host sends them to this controller like Send files
         public const byte InfoRequest = 11;  // the host answers with Info
+        public const byte SpeedTestRequest = 12; // the host runs an internet speed test and answers with SpeedResult
         // Either way
         public const byte Features = 0x40;   // u32 flags
         // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it
@@ -56,6 +57,7 @@ namespace TailRemote
         public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
         public const byte FolderList = 0x85; // u32 request id, UTF-8 lines: one per entry, tab-separated: D name, F name bytes modified-ticks, or E problem
         public const byte Info = 0x86;       // UTF-8 lines about the host PC, for Remote PC info
+        public const byte SpeedResult = 0x87; // UTF-8 lines: the host's internet speed test
         public const byte Leaving = 0x83; // u8 why (Leaving*), then UTF-8 detail (the new version when updating): sent just before the host closes on purpose
         // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
 
