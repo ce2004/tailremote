@@ -40,7 +40,7 @@ namespace TailRemote
         private bool _settingService; // set while the checkbox is changed by code, not by the user
         private readonly ToolStripMenuItem _go = new();
         private readonly ToolStripMenuItem _toggle = new("Control &remote PC") { ShortcutKeyDisplayString = "Ctrl+Shift+Enter" };
-        private readonly ToolStripMenuItem _update = new("Check for &updates (you have " + Updater.Current + ")");
+        private readonly ToolStripMenuItem _update = new("Check for &updates (you have " + Updater.Current + ")") { ShortcutKeys = Keys.Control | Keys.U };
         private readonly ToolStripMenuItem _audioSetup = new("Set up au&dio device...");
         private readonly ToolStripMenuItem _audioRemove = new("Remove audio de&vice...");
         private readonly ToolStripMenuItem _portEditor = new("Port &editor...");
@@ -49,6 +49,7 @@ namespace TailRemote
         private readonly ToolStripMenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
         private readonly ToolStripMenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
         private readonly ToolStripMenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
+        private readonly ToolStripMenuItem _muteLocal = Menus.Check("&Mute the remote PC while you are not controlling it (it stays connected)");
         private readonly ToolStripMenuItem _switchTo = new("Switch &to PC");
         private readonly ToolStripMenuItem _speedHere = new("Internet &speed test on this PC...");
         private readonly ToolStripMenuItem _speedRemote = new("Internet speed test on the r&emote PC...");
@@ -99,10 +100,10 @@ namespace TailRemote
 
             _mode.Add("Control another PC");
             _mode.Add("Host: let this PC be controlled");
-            _copyAddress.Click += (_, _) => CopyAddress();
+            _copyAddress.Click += (_, _) => Menus.AfterMenu(() => CopyAddress());
             System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += (_, _) => Later(FillMyAddress);
             FillMyAddress();
-            _pickReceiveFolder.Click += (_, _) => PickReceiveFolder();
+            _pickReceiveFolder.Click += (_, _) => Menus.AfterMenu(() => PickReceiveFolder());
             _transferStatus.Text = TransferIdle;
             _transferStop.Click += (_, _) =>
             {
@@ -130,11 +131,13 @@ namespace TailRemote
             var set = new ToolStripMenuItem("&Settings");
             set.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _quality.Menu, _announceQuality, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
+                _quality.Menu, _announceQuality, _muteLocal, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
                 _startup, _service, _portEditor, _audioSetup, _audioRemove, new ToolStripSeparator(),
                 _backup, _restore, _logging,
             });
-            var bar = new MenuStrip { Dock = DockStyle.Top };
+            // Flow, not the usual single row: a row hides whatever does not fit, with no word to a
+            // screen reader, and with Windows' text scaling About did not fit.
+            var bar = new MenuStrip { Dock = DockStyle.Top, LayoutStyle = ToolStripLayoutStyle.Flow };
             bar.Items.AddRange(new ToolStripItem[] { file, clip, set, AboutMenu.Build(this, bar, _update) });
             Menus.Attach(bar);
             Controls.Add(bar);
@@ -148,15 +151,16 @@ namespace TailRemote
             _logging.Checked = _settings.Logging;
             _speedUp.Checked = _settings.CatchUpBySpeed;
             _announceQuality.Checked = _settings.AnnounceQuality;
+            _muteLocal.Checked = _settings.MuteWhenNotControlling;
             ApplyReceiveFolder();
             Sounds.Key = Math.Clamp(_settings.SoundKey, 0, 11);
             Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && (s == Sounds.RandomName || Sounds.All.Contains(s)) ? s : Sounds.DefaultName;
-            _sounds.Click += (_, _) =>
+            _sounds.Click += (_, _) => Menus.AfterMenu(() =>
             {
                 Doing("choosing sounds");
                 using var f = new SoundsForm(_settings);
                 f.ShowDialog(this);
-            };
+            });
             Sounds.Warm();
             _quality.Add("Variable: follows the connection");
             foreach (var (kbps, _) in Protocol.OpusSteps) _quality.Add("Locked at " + kbps + " kbit/s");
@@ -188,11 +192,11 @@ namespace TailRemote
 
             _mode.SelectedIndexChanged += (_, _) => UpdateMode();
             _saved.SelectedIndexChanged += (_, _) => UseSaved();
-            _savePc.Click += (_, _) => SavePc();
-            _forgetPc.Click += (_, _) => ForgetPc();
-            _sendClipboard.Click += (_, _) => SendClipboard();
-            _sendFiles.Click += (_, _) => SendFiles(folder: false);
-            _sendFolder.Click += (_, _) => SendFiles(folder: true);
+            _savePc.Click += (_, _) => Menus.AfterMenu(() => SavePc());
+            _forgetPc.Click += (_, _) => Menus.AfterMenu(() => ForgetPc());
+            _sendClipboard.Click += (_, _) => Menus.AfterMenu(() => SendClipboard());
+            _sendFiles.Click += (_, _) => Menus.AfterMenu(() => SendFiles(folder: false));
+            _sendFolder.Click += (_, _) => Menus.AfterMenu(() => SendFiles(folder: true));
             _logging.CheckedChanged += (_, _) =>
             {
                 SaveSettings();
@@ -200,27 +204,28 @@ namespace TailRemote
                 Say(_logging.Checked ? "Logging to " + DiagLog.FilePath + "." + (_service.Checked ? " Press Apply settings to the service to log there too." : "")
                                      : "Logging is off.");
             };
-            _go.Click += (_, _) => Go();
+            _go.Click += (_, _) => Menus.AfterMenu(() => Go());
             _address.Changed += SaveSettings;
             _port.Changed += SaveSettings;
             _password.Changed += SaveSettings;
             _listenPassword.Changed += SaveSettings;
-            _toggle.Click += (_, _) => _keys?.Toggle();
-            _update.Click += (_, _) => CheckForUpdates();
-            _restart.Click += (_, _) => RestartRemote();
-            _updateRemote.Click += (_, _) => UpdateRemote();
-            _remoteInfo.Click += (_, _) => RemoteInfo();
-            _getFiles.Click += (_, _) => GetFiles();
-            _speedHere.Click += (_, _) => SpeedTestHere();
-            _speedRemote.Click += (_, _) => SpeedTestRemote();
-            _backup.Click += (_, _) => BackupSettings();
-            _restore.Click += (_, _) => RestoreSettings();
+            _toggle.Click += (_, _) => Menus.AfterMenu(() => _keys?.Toggle());
+            _update.Click += (_, _) => Menus.AfterMenu(() => CheckForUpdates());
+            _restart.Click += (_, _) => Menus.AfterMenu(() => RestartRemote());
+            _updateRemote.Click += (_, _) => Menus.AfterMenu(() => UpdateRemote());
+            _remoteInfo.Click += (_, _) => Menus.AfterMenu(() => RemoteInfo());
+            _getFiles.Click += (_, _) => Menus.AfterMenu(() => GetFiles());
+            _speedHere.Click += (_, _) => Menus.AfterMenu(() => SpeedTestHere());
+            _speedRemote.Click += (_, _) => Menus.AfterMenu(() => SpeedTestRemote());
+            _backup.Click += (_, _) => Menus.AfterMenu(() => BackupSettings());
+            _restore.Click += (_, _) => Menus.AfterMenu(() => RestoreSettings());
             _switchTo.DropDownItems.Add("(filled in when opened)");
             _switchTo.DropDownOpening += (_, _) => FillSwitchMenu();
             _announceQuality.CheckedChanged += (_, _) => SaveSettings();
-            _audioSetup.Click += (_, _) => SetUpAudio();
-            _audioRemove.Click += (_, _) => RemoveAudio();
-            _portEditor.Click += (_, _) => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); };
+            _muteLocal.CheckedChanged += (_, _) => { SaveSettings(); ApplyMute(); };
+            _audioSetup.Click += (_, _) => Menus.AfterMenu(() => SetUpAudio());
+            _audioRemove.Click += (_, _) => Menus.AfterMenu(() => RemoveAudio());
+            _portEditor.Click += (_, _) => Menus.AfterMenu(() => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); });
             _startup.CheckedChanged += (_, _) => StartupChanged();
             _service.CheckedChanged += (_, _) => { if (!_settingService) ServiceChanged(); };
             _titleTimer.Tick += (_, _) => UpdateTitle();
@@ -293,7 +298,7 @@ namespace TailRemote
             _streaming.Item.Available = !host;
             _toggle.Available = !host;
             _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _speedRemote.Available = _switchTo.Available = !host;
-            _announceQuality.Available = !host;
+            _announceQuality.Available = _muteLocal.Available = !host;
             _startup.Available = host;
             _service.Available = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
@@ -686,7 +691,7 @@ namespace TailRemote
             if (q == _qualitySaid) return;
             bool lower = q > _qualitySaid; // higher steps are lower bitrates
             _qualitySaid = q;
-            if (_announceQuality.Checked)
+            if (_announceQuality.Checked && !c.Muted) // muted, it is lowered on purpose: nothing to say
                 Speak(q == 0 ? "Sound back to full quality." : "Sound " + (lower ? "lowered" : "raised") + " to " + Protocol.OpusSteps[q].Kbps + " kilobits.");
         }
 
@@ -762,6 +767,7 @@ namespace TailRemote
             c.Muted = false;
             c.LockedStep = _quality.SelectedIndex - 1;
             c.StartBest();
+            ApplyMute();
             if (!c.ListenOnly) _keys?.SetClient(c);
             Tone(Sounds.Tone.Connected);
             Say("Switched to " + p.Name + "." + (c.ListenOnly ? " Listen only." : " Press Control Shift Enter to control it."));
@@ -799,19 +805,20 @@ namespace TailRemote
                 var pc = _settings.SavedPcs[i];
                 var item = new ToolStripMenuItem((pc + ", " + State(pc.Address, pc.Port)).Replace("&", "&&"));
                 if (i < 9) item.ShortcutKeyDisplayString = "Ctrl+" + (i + 1);
-                item.Click += (_, _) => SwitchTo(pc.Address, pc.Port, Settings.Unprotect(pc.PasswordEnc), pc.ToString());
+                item.Click += (_, _) => Menus.AfterMenu(() => SwitchTo(pc.Address, pc.Port, Settings.Unprotect(pc.PasswordEnc), pc.ToString()));
                 items.Add(item);
             }
             // Connected ones that are not saved.
             foreach (var p in _parked.Where(p => !_settings.SavedPcs.Any(s => SamePc(s.Address, s.Port, p.Address, p.Port))).ToList())
             {
                 var item = new ToolStripMenuItem((p.Name + ", in the background").Replace("&", "&&"));
-                item.Click += (_, _) => SwitchTo(p.Address, p.Port, p.Password, p.Name);
+                item.Click += (_, _) => Menus.AfterMenu(() => SwitchTo(p.Address, p.Port, p.Password, p.Name));
                 items.Add(item);
             }
             if (_client != null && !_settings.SavedPcs.Any(s => SamePc(s.Address, s.Port, _address.Text, CurrentPort)))
                 items.Add(new ToolStripMenuItem((NameFor(_address.Text, CurrentPort) + ", in front").Replace("&", "&&")));
-            if (items.Count == 0) items.Add(new ToolStripMenuItem("No saved PCs yet: File, Save this PC adds the one you are connected to") { Enabled = false });
+            // Never an empty or all-greyed-out menu: with nothing NVDA can land on, it froze.
+            if (items.Count == 0) items.Add(new MenuStatus("There are no saved PCs to switch to yet. Connect to one, then File, Save this PC.").Item);
             if (_parked.Count > 0)
             {
                 items.Add(new ToolStripSeparator());
@@ -948,6 +955,7 @@ namespace TailRemote
                 DiagLog.Enabled = _settings.Logging;
                 _speedUp.Checked = _settings.CatchUpBySpeed;
                 _announceQuality.Checked = _settings.AnnounceQuality;
+                _muteLocal.Checked = _settings.MuteWhenNotControlling;
                 _quality.SelectedIndex = Math.Clamp(_settings.SoundQuality + 1, 0, _quality.Count - 1);
                 int sel = _devices.FindIndex(d => d.Id == _settings.OutputDevice);
                 _device.SelectedIndex = sel < 0 ? 0 : sel;
@@ -1191,9 +1199,30 @@ namespace TailRemote
             else if (_autoConnect && !HostMode && _address.Text.Trim().Length > 0) Go();
         }
 
+        /// <summary>
+        /// Settings, Mute the remote PC while you are not controlling it: the PC in front is
+        /// silent while the keys are on this PC, at the lowest bitrate (a few kilobits, which saves
+        /// data on a phone connection), and the connection stays up. Controlling it again brings
+        /// the sound straight back at its best. Listen-only connections are always heard.
+        /// </summary>
+        private void ApplyMute()
+        {
+            if (_client is not Client c || c.ListenOnly) return;
+            bool mute = _muteLocal.Checked && _keys?.Remote != true;
+            if (mute == c.Muted) return;
+            c.Muted = mute;
+            if (mute) c.LockedStep = Protocol.OpusSteps.Length - 1;
+            else
+            {
+                c.LockedStep = _quality.SelectedIndex - 1;
+                c.StartBest();
+            }
+        }
+
         private void ModeChanged(bool remote)
         {
             _toggle.Text = remote ? "Control &this PC" : "Control &remote PC";
+            ApplyMute();
             if (_quietModeChange) _quietModeChange = false; // the reconnect message says it
             else { Say(remote ? "Controlling remote PC." : "Controlling this PC."); Tone(remote ? Sounds.Tone.ControlRemote : Sounds.Tone.ControlLocal); }
             UpdateTitle();
@@ -1244,6 +1273,7 @@ namespace TailRemote
             _settings.Logging = _logging.Checked;
             _settings.CatchUpBySpeed = _speedUp.Checked;
             _settings.AnnounceQuality = _announceQuality.Checked;
+            _settings.MuteWhenNotControlling = _muteLocal.Checked;
             _settings.SoundQuality = _quality.SelectedIndex - 1;
             _settings.Save();
         }
@@ -1429,6 +1459,7 @@ namespace TailRemote
                 c.TransferProgress += t => Later(() => ShowTransfer(t));
                 _client = c;
                 if (!c.ListenOnly) _keys?.SetClient(c); // a listener never sends keys
+                ApplyMute();
                 bool wasReconnecting = _reconnecting;
                 _reconnecting = false;
                 _retryTimer.Stop();

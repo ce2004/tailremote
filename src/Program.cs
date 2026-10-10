@@ -72,14 +72,13 @@ namespace TailRemote
             if (args.Length == 1 && args[0] == "--setup-audio")
             {
                 Speech.Init();
-                ApplicationConfiguration.Initialize();
-                var setup = new SetupForm("Setting up the TailRemote audio device", async (report, ct) =>
+                SetupForm? setup = null;
+                RunWindow(() => setup = new SetupForm("Setting up the TailRemote audio device", async (report, ct) =>
                 {
                     await AudioSetup.RunAsync(report, ct);
                     return "Done. The TailRemote audio device is ready and is the default output.";
-                });
-                Application.Run(setup);
-                return setup.Result;
+                }));
+                return setup!.Result;
             }
 
             if (args.Length == 3 && args[0] == "--firewall" && int.TryParse(args[2], out int fwPort))
@@ -94,10 +93,9 @@ namespace TailRemote
             if (args.Length == 1 && args[0] == "--remove-audio")
             {
                 Speech.Init();
-                ApplicationConfiguration.Initialize();
-                var remove = new SetupForm("Removing the TailRemote audio device", AudioSetup.RemoveAsync);
-                Application.Run(remove);
-                return remove.Result;
+                SetupForm? remove = null;
+                RunWindow(() => remove = new SetupForm("Removing the TailRemote audio device", AudioSetup.RemoveAsync));
+                return remove!.Result;
             }
 
             if (args.Length == 1 && args[0] == "--licence")
@@ -150,6 +148,16 @@ namespace TailRemote
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--chaostest") return ChaosTest.Run();
+            if (args.Length >= 1 && args[0] == "--dialogtest")
+            {
+                // A blank window with a menu bar like the real one, opening a list and a typing box,
+                // to check with NVDA what is read. "direct" opens them straight from the click, and
+                // "mta" runs it on the program's own thread, the way 2.1.0 did both.
+                bool direct = args.Length > 1 && args[1] == "direct";
+                if (args.Length > 1 && args[1] == "mta") Application.Run(MenuTestWindow(direct));
+                else RunWindow(() => MenuTestWindow(direct));
+                return 0;
+            }
             if (args.Length >= 1 && args[0] == "--audiotest")
             {
                 if (args.Length > 2 && int.TryParse(args[2], out int jitter)) Client.TestJitterMs = jitter;
@@ -161,6 +169,8 @@ namespace TailRemote
                 foreach (var a in args) if (a.StartsWith("lock") && int.TryParse(a[4..], out int lk)) Client.TestLockStep = lk;
                 foreach (var a in args) if (a.StartsWith("until") && int.TryParse(a[5..], out int un)) Client.TestKbpsUntil = un;
                 foreach (var a in args) if (a.StartsWith("dialup") && int.TryParse(a[6..], out int du)) Client.TestDialupKbps = du;
+                foreach (var a in args) if (a.StartsWith("cell") && int.TryParse(a[4..], out int cell)) Client.TestCellMs = cell;
+                foreach (var a in args) if (a.StartsWith("secs") && int.TryParse(a[4..], out int secs)) AudioTestSeconds = secs;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
 
@@ -175,12 +185,70 @@ namespace TailRemote
             string resume = Array.IndexOf(args, "--resume") >= 0 ? Settings.Load().ResumeState : "";
 
             Speech.Init();
-            ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm(
+            RunWindow(() => new MainForm(
                 autoHost: Array.IndexOf(args, "--host") >= 0 || resume == "host",
                 autoConnect: Array.IndexOf(args, "--connect") >= 0 || resume == "connect",
                 updated: after >= 0));
             return 0;
+        }
+
+        /// <summary>
+        /// Every TailRemote window runs on a thread of the kind Windows' accessibility expects
+        /// (STA). On the program's own thread NVDA read a window's first control, then heard
+        /// nothing more: Tab, the arrows, other windows, all silent. The sound code is unaffected:
+        /// playback and capture make their Windows audio objects on threads of their own.
+        /// </summary>
+        private static void RunWindow(Func<Form> make) => RunOnWindowThread(() =>
+        {
+            ApplicationConfiguration.Initialize();
+            Application.Run(make());
+        });
+
+        private static Form MenuTestWindow(bool direct)
+        {
+            var form = new Form { Text = "TailRemote menu test", ClientSize = new System.Drawing.Size(420, 120), Font = new System.Drawing.Font("Segoe UI", 10f) };
+            var bar = new MenuStrip { Dock = DockStyle.Top, LayoutStyle = ToolStripLayoutStyle.Flow };
+            var about = new ToolStripMenuItem("&About");
+            void List() { using var f = new ListViewerForm("Test results", new[] { "Download: 100 megabits per second", "Upload: 20 megabits per second" }, _ => false); f.ShowDialog(form); }
+            var address = new MenuText("&Address", "The other PC's name:");
+            var list = new ToolStripMenuItem("View the &results...");
+            list.Click += (_, _) => { if (direct) List(); else Menus.AfterMenu(List); };
+            about.DropDownItems.Add(list);
+            about.DropDownItems.Add(address.Item);
+            // Submenus like the real ones, for arrowing past them: a choice, and one filled as it opens.
+            var quality = new MenuChoice("Sound &quality");
+            quality.Add("Variable");
+            quality.Add("Locked at 64 kbit/s");
+            quality.SelectedIndex = 0;
+            about.DropDownItems.Add(quality.Menu);
+            var switchTo = new ToolStripMenuItem("Switch &to PC");
+            switchTo.DropDownItems.Add("(filled in when opened)");
+            switchTo.DropDownOpening += (_, _) =>
+            {
+                switchTo.DropDownItems.Clear();
+                switchTo.DropDownItems.Add(new MenuStatus("There are no saved PCs to switch to yet. Connect to one, then File, Save this PC.").Item);
+            };
+            about.DropDownItems.Add(switchTo);
+            about.DropDownItems.Add(Menus.Check("&Logging"));
+            bar.Items.Add(about);
+            Menus.Attach(bar);
+            form.Controls.Add(bar);
+            form.MainMenuStrip = bar;
+            return form;
+        }
+
+        private static void RunOnWindowThread(Action run)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo? failed = null;
+            var t = new System.Threading.Thread(() =>
+            {
+                try { run(); }
+                catch (Exception e) { failed = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e); }
+            }) { Name = "TailRemote window" };
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.Start();
+            t.Join();
+            failed?.Throw();
         }
 
         /// <summary>Copies that build.ps1 moved aside while they were running; gone once they have exited.</summary>
@@ -206,6 +274,8 @@ namespace TailRemote
         /// often the buffer ran dry or skipped, and how full it was, to
         /// %TEMP%\tailremote-audiotest.txt.
         /// </summary>
+        private static int AudioTestSeconds = 15;
+
         private static int AudioTest(string? captureName)
         {
             string report = Path.Combine(Path.GetTempPath(), "tailremote-audiotest.txt");
@@ -231,7 +301,7 @@ namespace TailRemote
                 using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s), Client.TestLockStep);
                 System.Threading.Thread.Sleep(1500);
                 player.Diagnose();
-                for (int i = 1; i <= 15; i++)
+                for (int i = 1; i <= AudioTestSeconds; i++)
                 {
                     if (Client.TestHoldQuality) c.TestSetQuality(i % Protocol.OpusSteps.Length); // every bitrate in turn, down and back up
                     System.Threading.Thread.Sleep(1000);
@@ -239,7 +309,7 @@ namespace TailRemote
                     int fillMs = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestGapFillMs, 0);
                     int seqSkips = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestSeqSkips, 0);
                     int chunk = System.Threading.Interlocked.Exchange(ref LoopbackCapture.TestChunkMax, 0);
-                    if (Client.TestLockStep >= 0 && i == 15) Say("locked test: first packet " + Client.TestFirstTicks + " ticks, other lengths " + Client.TestOtherTicks);
+                    if (Client.TestLockStep >= 0 && i == AudioTestSeconds) Say("locked test: first packet " + Client.TestFirstTicks + " ticks, other lengths " + Client.TestOtherTicks);
                     Say($"{i,2}s  {player.Diagnose()}, quality step {c.AudioQuality} | host: biggest chunk {chunk} ms, silence added {fills}x ({fillMs} ms), count skips {seqSkips}");
                 }
                 return 0;
@@ -551,6 +621,11 @@ namespace TailRemote
                 if (form.MainMenuStrip == null) return Fail("the window has no menu bar");
                 Count(form.MainMenuStrip.Items);
                 if (items < 30) return Fail("the menu bar has only " + items + " items");
+                // Each menu really on the bar, even with Windows' largest text: a bar hides what does not fit.
+                form.Font = new System.Drawing.Font(form.Font.FontFamily, form.Font.Size * 2.5f);
+                form.MainMenuStrip.PerformLayout();
+                foreach (ToolStripItem top in form.MainMenuStrip.Items)
+                    if (top.Placement != ToolStripItemPlacement.Main) return Fail("the " + (top.Text ?? "").Replace("&", "") + " menu is hidden off the menu bar");
                 lossless += " | window with " + items + " menu items";
                 if (!AboutMenu.Resource("CHANGES.txt").Split('\n').Any(l => l.Trim() == Updater.Current.ToString()) || AboutMenu.Resource("README.txt").Length == 0)
                     return Fail("the changelog inside TailRemote has no section for " + Updater.Current + ", or the guide is missing");

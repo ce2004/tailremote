@@ -170,15 +170,12 @@ namespace TailRemote
             foreach (var l in lines) _lines.Items.Add(l);
             var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
             flow.Controls.Add(_lines);
-            var buttons = new FlowLayoutPanel { AutoSize = true };
-            var copy = new Button { Text = "&Copy this line", AutoSize = true };
-            var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel };
-            buttons.Controls.Add(copy);
-            buttons.Controls.Add(close);
-            flow.Controls.Add(buttons);
+            // Tab goes between the lines and OK, nothing else; Control C copies a line.
+            var ok = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
+            flow.Controls.Add(ok);
             Controls.Add(flow);
-            CancelButton = close;
-            copy.Click += (_, _) => Copy();
+            AcceptButton = ok;
+            CancelButton = ok;
             _lines.KeyDown += (_, e) =>
             {
                 if (e.Control && e.KeyCode == Keys.C) { e.Handled = e.SuppressKeyPress = true; Copy(); }
@@ -191,11 +188,8 @@ namespace TailRemote
                     Speech.Speak(step > 0 ? "No more headings." : "This is the first heading.");
                 }
             };
-            Shown += (_, _) =>
-            {
-                if (_lines.Items.Count > 0) _lines.SelectedIndex = 0;
-                _lines.Focus();
-            };
+            if (_lines.Items.Count > 0) _lines.SelectedIndex = 0;
+            Menus.FocusWhenShown(this, () => _lines);
         }
 
         private void Copy()

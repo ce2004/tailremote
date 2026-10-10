@@ -39,6 +39,7 @@ namespace TailRemote
             panel.Controls.Add(new Label { Text = "&Ports TailRemote has used, and whether Windows Firewall lets them in", AutoSize = true });
             _list.AccessibleName = "Ports TailRemote has used";
             panel.Controls.Add(_list);
+            Menus.FocusWhenShown(this, () => _list);
             var row = new FlowLayoutPanel { AutoSize = true };
             row.Controls.Add(_open);
             row.Controls.Add(_close);

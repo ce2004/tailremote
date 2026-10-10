@@ -573,6 +573,8 @@ namespace TailRemote
         public static int TestLagMs;
         /// <summary>Test only (--audiotest ... stallN): 5 seconds in, nothing arrives for N ms, then all of it at once.</summary>
         public static int TestStallMs;
+        /// <summary>Test only (--audiotest ... cellNNN): a phone connection. Sound comes in bunches with up to NNN ms between, now and then a longer stall, and 2 percent never arrives.</summary>
+        public static int TestCellMs;
         /// <summary>Test only (--audiotest ... dropN): throws away N percent of audio packets at random, like Clumsy.</summary>
         public static int TestDropPercent;
         /// <summary>Test only (--audiotest ... bwN): from 3 seconds in, audio over N kbit/s is thrown away, like Clumsy's bandwidth limit.</summary>
@@ -610,7 +612,7 @@ namespace TailRemote
 
         private void UdpLoop()
         {
-            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
+            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0 || TestCellMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
@@ -636,6 +638,18 @@ namespace TailRemote
                     if (start - t > 2000) continue; // the modem's buffer is full: dropped
                     _modemFreeAt = start + (d.Length + Protocol.PacketOverheadBytes - 22) * 8.0 / TestDialupKbps;
                     lock (_jitterQueue) _jitterQueue.Add(((long)_modemFreeAt, _jitterN++), d);
+                    continue;
+                }
+                if (TestCellMs > 0)
+                {
+                    if (Random.Shared.Next(100) < 2) continue;
+                    long at = _jitterClock.ElapsedMilliseconds;
+                    // Delivered in bunches, the way a phone network schedules: everything waits for the next slot.
+                    long slot = Math.Max(20, TestCellMs / 2);
+                    at = (at / slot + 1) * slot + Random.Shared.Next(TestCellMs / 2 + 1);
+                    // About every 7 seconds, a stall up to three times as long.
+                    if (at % 7000 < 300) at += Random.Shared.Next(TestCellMs * 3);
+                    lock (_jitterQueue) _jitterQueue.Add((at, _jitterN++), d);
                     continue;
                 }
                 if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0)
@@ -763,6 +777,7 @@ namespace TailRemote
         private const int StepEveryMs = 750, StepAllInMs = 3000; // a change takes about 3 s however far: one step at most every 0.75 s, faster for long ways
         private readonly int[] _bad = new int[5], _sent = new int[5], _winBytes = new int[5], _winPackets = new int[5]; // the last second, by 0.2 s tick
         private int _badAt, _cleanTicks, _target, _ceiling, _failures;
+        private long _shortSince; // since when the sound has been arriving slower than real time
         private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt, _lastUpAt;
         private double _lossBefore, _noHelpLoss;
         private int _qPackets, _qBytes, _qTicks, _winFilled;
@@ -826,7 +841,7 @@ namespace TailRemote
         /// a starved connection.
         ///
         /// Clean for 0.6 s: the target goes back to the best and it climbs, step by
-        /// step. Trouble within 3 seconds of climbing a step sets a ceiling at the
+        /// step. Trouble within 10 seconds of climbing a step sets a ceiling at the
         /// step before, held 5 seconds the first time, then 10, 20, up to a minute, so
         /// it does not keep breaking up trying to go higher. A bad patch that is not
         /// caused by climbing never holds it down.
@@ -854,13 +869,18 @@ namespace TailRemote
             double loss = sentSecond == 0 ? 0 : (double)badSecond / sentSecond;
             bool heavy = bad >= 4 && bad * 4 >= packets + bad;
             // Starved: the sound is not even arriving in real time (under 80 percent of it
-            // over at least 0.4 s). A modem or a full link queues rather than drops, so
-            // nothing looks lost, it just comes too slowly. That is never random loss.
+            // over a whole second, for at least a second running). A modem or a full link
+            // queues rather than drops, so nothing looks lost, it just comes too slowly.
+            // That is never random loss. A phone network hands sound over in bunches and
+            // stalls now and then, then catches up: that is delay, which no bitrate fixes,
+            // and judging it on less made the bitrate go down and up every few seconds.
             int expectedTicks = _winFilled * QualityTickMs / (int)Protocol.TickMs;
-            bool starved = _winFilled >= 2 && ticksSecond < expectedTicks * 0.8;
+            long now = Environment.TickCount64;
+            if (_winFilled >= _bad.Length && ticksSecond < expectedTicks * 0.8) { if (_shortSince == 0) _shortSince = now; }
+            else _shortSince = 0;
+            bool starved = _shortSince != 0 && now - _shortSince >= 1000;
             bool struggling = heavy || loss > 0.10 || starved;
             bool clean = loss < 0.07 && !starved;
-            long now = Environment.TickCount64;
             int q = AudioQuality, lowest = Protocol.OpusSteps.Length - 1;
 
             if (struggling && !starved && now < _noHelpUntil && loss < _noHelpLoss * 1.5 && loss < 0.4) struggling = false; // lowering did not help last time
@@ -899,7 +919,9 @@ namespace TailRemote
                 // hides an overload for a few seconds while it queues, so without this it
                 // climbed straight back into trouble. Counting every bad second as a failure
                 // kept it down for a minute after the network had recovered.)
-                bool climbing = now - _lastUpAt < 3000;
+                // Within 10 seconds of a step up counts as the climb's fault: on a phone network the
+                // trouble from going higher often takes several seconds to show.
+                bool climbing = now - _lastUpAt < 10_000;
                 _ceiling = Math.Max(fit, climbing ? Math.Min(lowest, q + 1) : 0);
                 _ceilingUntil = now + (climbing ? Math.Min(60_000, 5000 << Math.Min(_failures, 4)) : 5000);
                 if (climbing) { _failures++; _lastFailAt = now; }

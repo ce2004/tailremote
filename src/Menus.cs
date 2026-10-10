@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace TailRemote
@@ -39,15 +40,60 @@ namespace TailRemote
         public static ToolStripMenuItem Action(string text, Action clicked, Keys keys = Keys.None)
         {
             var item = new ToolStripMenuItem(text) { ShortcutKeys = keys };
-            item.Click += (_, _) => clicked();
+            item.Click += (_, _) => AfterMenu(clicked);
             return item;
         }
 
+        /// <summary>
+        /// Runs a menu's action once the menu has finished closing. A window opened straight from
+        /// the click came up while Windows was still closing the menu, and NVDA, told "menu
+        /// closed" after the window had appeared, went back to the main window and never read it.
+        /// </summary>
+        public static void AfterMenu(Action action)
+        {
+            if (SynchronizationContext.Current is { } ui) ui.Post(_ => action(), null);
+            else action();
+        }
+
+        /// <summary>
+        /// For every TailRemote window: the keyboard starts on 'first', set before the window
+        /// appears. Moving it there afterwards made NVDA say it twice.
+        /// </summary>
+        public static void FocusWhenShown(Form form, Func<Control?> first) =>
+            form.Load += (_, _) => { if (first() is { } c) form.ActiveControl = c; };
+
         internal static readonly object KeepOpenTag = new();
+
+        // When a key that means "open this" (Right, Enter, a letter) or a mouse click last came in.
+        private static long _openAsked;
+
+        /// <summary>
+        /// Notes the keys and clicks that may open a submenu. With the mouse pointer resting where
+        /// a menu dropped down, the item under it opened its submenu by itself as the arrows went past.
+        /// </summary>
+        private sealed class OpenFilter : IMessageFilter
+        {
+            public bool PreFilterMessage(ref Message m)
+            {
+                const int WM_KEYDOWN = 0x100, WM_SYSKEYDOWN = 0x104, WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202;
+                if (m.Msg is WM_KEYDOWN or WM_SYSKEYDOWN)
+                {
+                    var key = (Keys)(int)m.WParam & Keys.KeyCode;
+                    if (key is not (Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown or Keys.Escape or Keys.Left or Keys.Tab
+                        or Keys.ShiftKey or Keys.ControlKey or Keys.Menu or Keys.Insert or Keys.Capital))
+                        _openAsked = Environment.TickCount64;
+                }
+                else if (m.Msg is WM_LBUTTONDOWN or WM_LBUTTONUP) _openAsked = Environment.TickCount64;
+                return false;
+            }
+        }
+
+        private static bool _filtering;
 
         /// <summary>Hooks every drop-down under the menu bar (and ones added later) so stay-open items keep it open.</summary>
         public static void Attach(MenuStrip bar)
         {
+            if (!_filtering) { _filtering = true; Application.AddMessageFilter(new OpenFilter()); }
             foreach (ToolStripItem top in bar.Items)
                 if (top is ToolStripMenuItem m) Attach(m);
         }
@@ -57,6 +103,11 @@ namespace TailRemote
             var dd = menu.DropDown;
             if (dd.Tag == KeepOpenTag) return;
             dd.Tag = KeepOpenTag;
+            // A submenu (not File, Settings and the rest) opens only when asked, never by the pointer resting on it.
+            dd.Opening += (_, e) =>
+            {
+                if (menu.Owner is ToolStripDropDown && Environment.TickCount64 - _openAsked > 500) e.Cancel = true;
+            };
             dd.ItemClicked += (_, e) =>
             {
                 if (e.ClickedItem?.Tag != KeepOpenTag) return;
@@ -155,7 +206,7 @@ namespace TailRemote
             _prompt = prompt;
             _secret = secret;
             Item = new ToolStripMenuItem();
-            Item.Click += (_, _) => Ask(Item.Owner?.FindForm() ?? Form.ActiveForm, null);
+            Item.Click += (_, _) => Menus.AfterMenu(() => Ask(Form.ActiveForm, null));
             Show();
         }
 
@@ -215,7 +266,8 @@ namespace TailRemote
             Controls.Add(flow);
             AcceptButton = ok;
             CancelButton = cancel;
-            Shown += (_, _) => { _box.Focus(); _box.SelectAll(); };
+            _box.SelectAll();
+            Menus.FocusWhenShown(this, () => _box);
         }
     }
 

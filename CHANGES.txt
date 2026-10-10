@@ -1,3 +1,13 @@
+2.1.1
+Bug fixed: with Windows' text made larger, the About menu was hidden off the end of the menu bar, so you could not check for updates. Every menu now always shows.
+Bug fixed: NVDA read the first thing in a TailRemote window and then went silent: Tab, the arrows and other windows said nothing. TailRemote's windows now run the way Windows' accessibility expects, and NVDA reads everything in them.
+Changed: the changelog, guide, speed test results, Remote PC info and the other lists have just the list and an OK button, so Tab goes between the two. Control C still copies a line, and in Remote PC info F5 refreshes.
+New feature: Control U checks for updates.
+New feature: Settings, Mute the remote PC while you are not controlling it. When your keys are back on this PC you hear nothing from the remote PC, and it stays connected using almost no data. Control Shift Enter brings its sound straight back at full quality.
+Bug fixed: on a phone connection the sound quality went down and up every few seconds. A phone network delivers sound in bunches with short stalls, which looked like a slow connection. Now only sound that stays short for a couple of seconds lowers the quality, so it stays at its best far more of the time.
+Bug fixed: arrowing up and down a menu could open a submenu by itself when the mouse pointer was resting over it. Submenus now open only with Right Arrow, Enter, their letter or a click.
+Bug fixed: File, Switch to PC with no saved PCs left NVDA with nothing to read. It now says there are no saved PCs to switch to yet.
+
 2.1.0
 New feature: several PCs at once. Control 1 to 9, or File, Switch to PC, brings another saved PC to the front and keeps the one you were on connected in the background: silent, using almost nothing, its file transfers still going. Switching back is instant, with no new login. Switch to PC says which PCs are in front, in the background or not connected, and can disconnect the ones in the background.
 New feature: File, Internet speed test on this PC, and Internet speed test on the remote PC. About 20 seconds later a window shows the download and upload speed, ping and jitter, the Cloudflare data centre it tested against, your internet address and how much data the test used (at most about 1.5 gigabytes, even on a very fast line), a line each.

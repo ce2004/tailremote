@@ -32,6 +32,7 @@ namespace TailRemote
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
         public bool CatchUpBySpeed { get; set; }
         public bool AnnounceQuality { get; set; }
+        public bool MuteWhenNotControlling { get; set; }
         /// <summary>Piano tones for connecting, clipboard, files and the rest (Sounds.cs).</summary>
         public bool Sounds { get; set; } = true;
         /// <summary>Which sound each event makes (event name to sound name); events not here get the piano.</summary>

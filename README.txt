@@ -25,7 +25,7 @@ The menus
 - Address, Port and the passwords are menu items that say what they are set to (passwords only say set or not set). Enter opens a small box to change them, with Show password for passwords. If something is missing or wrong when you connect, that box opens by itself and says what is wrong.
 - File: Connect or Disconnect (Start or Stop hosting), Switch to PC, Control remote PC, Restart remote PC, Streaming (Enter says it again), Mode, Saved PCs, Address, Port, Password, Listen-only password, Copy this PC's IP address (it shows the addresses), Save this PC, Forget the chosen saved PC and Exit.
 - Clipboard: Files (what is moving right now; Enter says it again, and while several files move it opens a line per file), Send the clipboard (Control B), Send files (Control I), Send a folder (Control T), Stop the file transfer, and Pick where received files go.
-- About: Check for updates, View the changelog (Shift F1), Read the guide (F1), Keyboard shortcuts, About TailRemote, Licences and credits, Open the TailRemote website, Report a problem on GitHub, and Open the log file. The changelog, guide and the rest open as a list: the arrows go a line at a time, Control Down and Control Up jump between versions or sections, and Control C copies a line.
+- About: Check for updates (Control U), View the changelog (Shift F1), Read the guide (F1), Keyboard shortcuts, About TailRemote, Licences and credits, Open the TailRemote website, Report a problem on GitHub, and Open the log file. The changelog, guide and the rest open as a list: the arrows go a line at a time, Control Down and Control Up jump between versions or sections, and Control C copies a line.
 - Settings: Sound quality, Output device, Capture sound from, Catch up by fast-forwarding, Sounds, Start hosting when Windows starts, Run as a Windows service, Port editor, Set up audio device, Remove audio device and Enable logging.
 
 Features
@@ -43,6 +43,7 @@ Features
 - File, Internet speed test on this PC, or on the remote PC: about 20 seconds later a window shows download and upload speed, ping and jitter, the Cloudflare data centre it tested against, the internet address and how much data it used (at most about 1.5 gigabytes). The sound may break up while it runs.
 - Settings, Back up settings to a file saves every setting and saved PC, with their passwords, in one file locked with a password you choose. Settings, Restore settings from a backup puts them on this PC (disconnect first).
 - Settings, Announce when the sound quality changes: says when the sound is lowered because the connection struggles, and when it is back to full quality.
+- Settings, Mute the remote PC while you are not controlling it: while your keys are on this PC you hear nothing from the remote PC, and it stays connected using almost no data. Control Shift Enter brings the sound straight back.
 - File, Restart remote PC and reconnect restarts the remote PC and reconnects when it is back.
 - File, Saved PCs: choose one to fill in its address, port and password. File, Save this PC remembers the address, port and password; File, Forget the chosen saved PC removes one.
 - Listen-only password, in Host mode: anyone who connects with it hears the PC but cannot control it. Up to 100 at once. Each listener uses about 0.7 megabits per second of the host's upload while sound plays.

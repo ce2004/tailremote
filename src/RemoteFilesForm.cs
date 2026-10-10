@@ -62,6 +62,7 @@ namespace TailRemote
             };
             _list.DoubleClick += (_, _) => Open();
             Shown += async (_, _) => await LoadFolder("", null);
+            Menus.FocusWhenShown(this, () => _list);
         }
 
         private Entry? Current => _list.FocusedItem?.Tag as Entry ?? _list.SelectedItems.Cast<ListViewItem>().FirstOrDefault()?.Tag as Entry;
@@ -158,21 +159,22 @@ namespace TailRemote
             MinimizeBox = MaximizeBox = false;
             var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
             flow.Controls.Add(_lines);
-            var buttons = new FlowLayoutPanel { AutoSize = true };
-            var refresh = new Button { Text = "&Refresh", AutoSize = true };
-            var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel };
-            buttons.Controls.Add(refresh);
-            buttons.Controls.Add(close);
-            flow.Controls.Add(buttons);
+            // Tab goes between the lines and OK, nothing else; F5 asks the remote PC again.
+            var ok = new Button { Text = "OK", AutoSize = true, DialogResult = DialogResult.OK };
+            flow.Controls.Add(ok);
             Controls.Add(flow);
-            CancelButton = close;
+            AcceptButton = ok;
+            CancelButton = ok;
+            _lines.AccessibleDescription = "F5 refreshes";
             Fill(first);
-            refresh.Click += async (_, _) =>
+            _lines.KeyDown += async (_, e) =>
             {
-                try { Fill(await client.RequestInfoAsync()); _lines.Focus(); say("Refreshed."); }
+                if (e.KeyCode != Keys.F5) return;
+                e.Handled = true;
+                try { Fill(await client.RequestInfoAsync()); say("Refreshed."); }
                 catch { say("The remote PC did not answer."); }
             };
-            Shown += (_, _) => _lines.Focus();
+            Menus.FocusWhenShown(this, () => _lines);
         }
 
         private void Fill(string text)

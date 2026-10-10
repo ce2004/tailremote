@@ -74,6 +74,7 @@ namespace TailRemote
             table.Controls.Add(buttons);
             table.SetColumnSpan(buttons, 2);
             Controls.Add(table);
+            Menus.FocusWhenShown(this, () => _key);
             AcceptButton = ok;
             CancelButton = cancel;
         }
