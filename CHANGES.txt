@@ -1,3 +1,6 @@
+2.1.4
+Bug fixed: since 2.0.0, sending the clipboard could crash TailRemote on both PCs, or show a System Error box on the PC being controlled that stopped some keys working until it was closed. Shrinking TailRemote's download had removed part of what Windows' clipboard needs. That part is back, and the self-test now uses the real Windows clipboard so this cannot slip through again.
+
 2.1.3
 Changed: Get files from the remote PC never fetches anything until you choose Get (Alt G). Enter on a file now checks it, like Space, and your checks stay as you move between folders, so you can pick from several and get them all at once.
 New feature: in Get files, each file you asked for says getting, then got (or failed), so you can see what you have already, and TailRemote says when files arrive.

@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>2.1.3</Version>
+    <Version>2.1.4</Version>
     <!-- ARM64 by default; "dotnet publish -r win-x64" builds the x64 copy. -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
@@ -49,6 +49,7 @@
     <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
     <TrimmerRootAssembly Include="System.Drawing.Common" />
     <TrimmerRootAssembly Include="Accessibility" />
+    <TrimmerRootDescriptor Include="TrimRoots.xml" />
   </ItemGroup>
 
   <!-- The NVDA controller client must match this process's architecture. -->

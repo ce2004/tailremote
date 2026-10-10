@@ -148,6 +148,7 @@ namespace TailRemote
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--chaostest") return ChaosTest.Run();
+            if (args.Length == 1 && args[0] == "--cliptest") return ClipTest();
             if (args.Length >= 3 && args[0] == "--testhost" && int.TryParse(args[1], out int testPort))
             {
                 // A host with no window, for testing a controlling window against (until it is stopped).
@@ -288,6 +289,49 @@ namespace TailRemote
         /// often the buffer ran dry or skipped, and how full it was, to
         /// %TEMP%\tailremote-audiotest.txt.
         /// </summary>
+        /// <summary>
+        /// --cliptest: the Windows clipboard, the way TailRemote really uses it when clipboard text or
+        /// files arrive and when Send the clipboard reads it, each step written down before it runs
+        /// (so a crash shows where). The self-test moves clipboard data between PCs but never touched
+        /// the real clipboard. Writes %TEMP%\tailremote-cliptest.txt.
+        /// </summary>
+        private static int ClipTest()
+        {
+            string report = Path.Combine(Path.GetTempPath(), "tailremote-cliptest.txt");
+            File.WriteAllText(report, "");
+            void Step(string s) => File.AppendAllText(report, s + Environment.NewLine);
+            int result = 0;
+            var t = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    Step("set text (SetDataObject, copy, as when text arrives)");
+                    Clipboard.SetDataObject("TailRemote clipboard test", true, 2, 50);
+                    Step("read text: " + Clipboard.GetText());
+                    Step("set text (DataObject UnicodeText, as the service's agent does)");
+                    Clipboard.SetDataObject(new DataObject(DataFormats.UnicodeText, "agent test"), true, 2, 50);
+                    Step("read text: " + Clipboard.GetText());
+                    Step("set files (file drop list with Preferred DropEffect, as when files arrive)");
+                    var list = new System.Collections.Specialized.StringCollection { Environment.ProcessPath! };
+                    var data = new DataObject();
+                    data.SetFileDropList(list);
+                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(2)));
+                    Clipboard.SetDataObject(data, true, 2, 50);
+                    Step("contains files: " + Clipboard.ContainsFileDropList() + ", " + Clipboard.GetFileDropList().Count);
+                    Step("formats: " + string.Join(", ", Clipboard.GetDataObject()?.GetFormats() ?? Array.Empty<string>()));
+                    Step("clear");
+                    Clipboard.Clear();
+                    Step("formats when empty: " + (Clipboard.GetDataObject()?.GetFormats()?.Length ?? -1));
+                    Step("ok");
+                }
+                catch (Exception e) { Step("FAIL: " + e); result = 1; }
+            });
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.Start();
+            t.Join();
+            return result;
+        }
+
         private static int AudioTestSeconds = 15;
 
         private static int AudioTest(string? captureName)
@@ -626,6 +670,19 @@ namespace TailRemote
             try { Settings.Import(backup, "wrong password"); return Fail("a settings backup opened with the wrong password"); }
             catch (InvalidDataException) { }
             lossless += " | settings backup";
+
+            // The real Windows clipboard, as when clipboard text and files arrive. Trimmed too far, the
+            // release build hung or crashed here (2.0.0 to 2.1.3), and nothing else noticed.
+            {
+                string before = Path.Combine(Path.GetTempPath(), "tailremote-cliptest.txt");
+                var clip = new System.Threading.Thread(() => ClipTest()) { IsBackground = true };
+                clip.Start();
+                if (!clip.Join(20_000)) return Fail("putting text on the Windows clipboard hung (the release build is trimmed too far)");
+                string said = File.Exists(before) ? File.ReadAllText(before) : "";
+                if (said.Contains("FAIL") && !said.Contains("ExternalException") && !said.Contains("COMException"))
+                    return Fail("the Windows clipboard: " + said.Trim().Split('\n').Last());
+                lossless += said.Contains("\nok") || said.EndsWith("ok" + Environment.NewLine) ? " | Windows clipboard" : " | Windows clipboard not reachable here";
+            }
 
             // The window and its menu bar still build in the trimmed exe (never shown, so nothing is saved).
             using (var form = new MainForm(false, false, false))
