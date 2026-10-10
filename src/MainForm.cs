@@ -1266,6 +1266,13 @@ namespace TailRemote
             _keys.ModeChanged += remote => Later(() => ModeChanged(remote));
             _keys.NotConnected += () => Later(() => Say("Not connected."));
             _titleTimer.Start();
+            if (!_autoHost)
+            {
+                // The window is blank, with nothing in it to take focus, so NVDA said nothing when
+                // TailRemote opened: you had to Alt Tab away and back to know where you were.
+                Activate();
+                Speech.Speak(Text + ". Alt opens the menus.", interrupt: false);
+            }
             if (_updated) Say("Updated to version " + Updater.Current + ".");
             OfferServiceUpdate();
             if (_autoHost && _service.Checked) Log("The TailRemote service is hosting this PC, so this window does not.");

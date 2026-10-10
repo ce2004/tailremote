@@ -1,3 +1,6 @@
+2.1.5
+Bug fixed: since the window became blank in 2.0.0, opening TailRemote said nothing with NVDA, so you had to Alt Tab away and back to know where you were. It now comes to the front and says its title, and that Alt opens the menus.
+
 2.1.4
 Bug fixed: since 2.0.0, sending the clipboard could crash TailRemote on both PCs, or show a System Error box on the PC being controlled that stopped some keys working until it was closed. Shrinking TailRemote's download had removed part of what Windows' clipboard needs. That part is back, and the self-test now uses the real Windows clipboard so this cannot slip through again.
 
