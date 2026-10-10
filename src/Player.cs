@@ -87,6 +87,23 @@ namespace TailRemote
         /// </summary>
         public volatile bool SpeedUp;
 
+        /// <summary>
+        /// Ride out Wi-Fi scans (a setting, on by default). A Wi-Fi card scanning for networks
+        /// holds every packet back for a fifth of a second or so, then lets them all go at once:
+        /// with a buffer of 40 ms at most, every scan was a gap in the sound. After two such
+        /// stalls within 3 minutes, the buffer covers the biggest one (up to 300 ms) until 3
+        /// minutes pass with none, then goes back to live. A one-off stall changes nothing.
+        /// </summary>
+        public volatile bool RideOut = true;
+        private const float MaxRideMs = 300;
+        private float _rideMs, _spikePeak;
+        private double _rideUntil;
+        private readonly System.Collections.Generic.Queue<double> _spikes = new();
+
+        /// <summary>The extra sound held to ride out stalls now, in ms (0 when not).</summary>
+        public int RidingOutMs => (int)Volatile.Read(ref _rideNow);
+        private float _rideNow;
+
         /// <summary>Test only: play silence, with all the timing of the real thing.</summary>
         public bool Mute;
 
@@ -121,6 +138,7 @@ namespace TailRemote
             }
             _haveSeq = false;
             _lateCount = 0; _lateAt = 0; _coverMs = 0; _measured = false; _stallSince = 0; // the old connection's lateness must not size the new buffer
+            _rideMs = 0; _rideNow = 0; _spikePeak = 0; _rideUntil = 0; _spikes.Clear();
             _packetMs = (float)Protocol.TickMs;
         }
 
@@ -144,7 +162,7 @@ namespace TailRemote
             {
                 string s = $"lost {_diagLost}, late {_diagLate}, restarts {_diagSpurts}, dry {_diagDry}, skips {_diagSkips} ({_diagSkippedMs:0} ms)" +
                     $", fast-forwarded {_diagFastMs:0} ms, buffer {(_diagLevelMin == double.MaxValue ? 0 : _diagLevelMin):0.0}-{_diagLevelMax:0.0} ms" +
-                    $", target {_targetMs + _periodMs:0.0} ms, device period {_periodMs:0.0} ms, delay {DelayUnlocked()} ms, biggest step {_diagJump:0.0000000}";
+                    $", target {_targetMs + _periodMs:0.0} ms, riding out {_rideNow:0} ms, device period {_periodMs:0.0} ms, delay {DelayUnlocked()} ms, biggest step {_diagJump:0.0000000}";
                 _diagDry = 0; _diagSkips = 0; _diagLost = 0; _diagLate = 0; _diagSpurts = 0; _diagJump = 0;
                 _diagSkippedMs = 0; _diagFastMs = 0; _diagLevelMin = double.MaxValue; _diagLevelMax = 0;
                 return s;
@@ -251,11 +269,13 @@ namespace TailRemote
             float lateMs = (float)Math.Min(raw - _ref, 400);
             if (_measured && lateMs > _coverMs + 40)
             {
+                _spikePeak = Math.Max(_spikePeak, lateMs);
                 if (_stallSince == 0) _stallSince = now;
-                else if (now - _stallSince > 1000) { _ref = raw; _stallSince = 0; }
+                else if (now - _stallSince > 1000) { _ref = raw; _stallSince = 0; _spikePeak = 0; } // not a stall: the network got slower
             }
             else
             {
+                if (_spikePeak > 0) { Spike(now, _spikePeak); _spikePeak = 0; }
                 _stallSince = 0;
                 _late[_lateAt] = lateMs;
                 _lateWhen[_lateAt] = now;
@@ -284,7 +304,19 @@ namespace TailRemote
                     _measured = true;
                 }
             }
-            _targetMs = (float)(_packetMs + MarginMs + _coverMs);
+            if (now >= _rideUntil || !RideOut) _rideMs = 0;
+            _rideNow = _rideMs;
+            _targetMs = (float)(_packetMs + MarginMs + Math.Max(_coverMs, _rideMs));
+        }
+
+        /// <summary>A stall just ended (packets held back, then all at once), peak ms late.</summary>
+        private void Spike(double now, float peak)
+        {
+            while (_spikes.Count > 0 && now - _spikes.Peek() > 180_000) _spikes.Dequeue();
+            _spikes.Enqueue(now);
+            if (!RideOut || _spikes.Count < 2) return;
+            _rideMs = Math.Min(Math.Max(_rideMs, peak + 10), MaxRideMs);
+            _rideUntil = now + 180_000;
         }
 
         private void Collect(float l, float r)

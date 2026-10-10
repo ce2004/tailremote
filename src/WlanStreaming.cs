@@ -18,6 +18,13 @@ namespace TailRemote
     {
         private const int BackgroundScanEnabled = 2, MediaStreamingMode = 3; // WLAN_INTF_OPCODE
         private IntPtr _handle;
+
+        /// <summary>
+        /// How it went last time, said in the Streaming line and Remote PC info: null with no Wi-Fi,
+        /// else whether Windows agreed to hold off the scans. Some Wi-Fi drivers refuse, and then
+        /// Ride out Wi-Fi scans is what keeps the sound going.
+        /// </summary>
+        public static volatile string? State;
         private readonly System.Threading.Tasks.Task _opened;
 
         [DllImport("wlanapi.dll")] private static extern int WlanOpenHandle(uint version, IntPtr reserved, out uint negotiated, out IntPtr handle);
@@ -53,6 +60,7 @@ namespace TailRemote
                     }
                 }
                 finally { WlanFreeMemory(list); }
+                if (done.Count > 0) State = done.Exists(d => d.Contains("refused")) ? "Wi-Fi would not hold off its scans for networks (its driver refused)" : "Wi-Fi scans for networks held off while connected";
                 DiagLog.Write(who + ": Wi-Fi " + (done.Count == 0 ? "none" : string.Join("; ", done)));
             }
             catch (Exception e) { DiagLog.Write(who + ": Wi-Fi settings not changed: " + e.Message); }

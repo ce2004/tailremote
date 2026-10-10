@@ -95,6 +95,7 @@ namespace TailRemote
                 lines.Add("Memory: " + mem.dwMemoryLoad + " percent used, " + FileChannel.Size((long)mem.ullAvailPhys) + " free of " + FileChannel.Size((long)mem.ullTotalPhys));
             if (GetSystemPowerStatus(out var power))
             {
+                if (WlanStreaming.State is string wifi) lines.Add(wifi);
                 if (power.BatteryFlag == 255) lines.Add("Battery: unknown"); // Windows cannot tell
                 else if ((power.BatteryFlag & 128) != 0) lines.Add("Battery: none (plugged in)");
                 else lines.Add("Battery: " + (power.BatteryLifePercent <= 100 ? power.BatteryLifePercent + " percent" : "unknown") +

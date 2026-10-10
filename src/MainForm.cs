@@ -51,6 +51,7 @@ namespace TailRemote
         private readonly MenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
         private readonly MenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
         private readonly MenuItem _muteLocal = Menus.Check("&Mute the remote PC while you are not controlling it (it stays connected)");
+        private readonly MenuItem _rideOut = Menus.Check("Ride out &Wi-Fi scans: when the sound keeps stalling, hold enough to cover it (a little more delay until it stops)");
         private readonly MenuItem _switchTo = new("Switch &to PC");
         private readonly MenuItem _speedHere = new("Internet &speed test on this PC...") { WhyNot = "A speed test is already running on this PC." };
         private readonly MenuItem _speedRemote = new("Internet speed test on the r&emote PC...");
@@ -106,6 +107,7 @@ namespace TailRemote
             FillMyAddress();
             _pickReceiveFolder.Click += (_, _) => Menus.AfterMenu(() => PickReceiveFolder());
             _transferStatus.Text = TransferIdle;
+            FillHistory();
             _transferStop.Click += (_, _) =>
             {
                 if (_client != null) _client.CancelTransfer();
@@ -127,12 +129,12 @@ namespace TailRemote
             var clip = new MenuItem("&Clipboard");
             clip.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _transferStatus.Item, _sendClipboard, _sendFiles, _sendFolder, _getFiles, _transferStop, new ToolStripSeparator(), _pickReceiveFolder,
+                _transferStatus.Item, _history, _sendClipboard, _sendFiles, _sendFolder, _getFiles, _transferStop, new ToolStripSeparator(), _pickReceiveFolder,
             });
             var set = new MenuItem("&Settings");
             set.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _quality.Menu, _announceQuality, _muteLocal, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
+                _quality.Menu, _announceQuality, _muteLocal, _rideOut, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
                 _startup, _service, _portEditor, _audioSetup, _audioRemove, new ToolStripSeparator(),
                 _backup, _restore, _logging,
             });
@@ -153,6 +155,7 @@ namespace TailRemote
             _speedUp.Checked = _settings.CatchUpBySpeed;
             _announceQuality.Checked = _settings.AnnounceQuality;
             _muteLocal.Checked = _settings.MuteWhenNotControlling;
+            _rideOut.Checked = _settings.RideOutStalls;
             ApplyReceiveFolder();
             Sounds.Key = Math.Clamp(_settings.SoundKey, 0, 11);
             Sounds.Choice = t => _settings.SoundChoices.TryGetValue(t.ToString(), out var s) && (s == Sounds.RandomName || Sounds.All.Contains(s)) ? s : Sounds.DefaultName;
@@ -225,6 +228,7 @@ namespace TailRemote
             _switchTo.DropDownOpening += (_, _) => FillSwitchMenu();
             _announceQuality.CheckedChanged += (_, _) => SaveSettings();
             _muteLocal.CheckedChanged += (_, _) => { SaveSettings(); ApplyMute(); };
+            _rideOut.CheckedChanged += (_, _) => { SaveSettings(); if (_player != null) _player.RideOut = _rideOut.Checked; };
             _audioSetup.Click += (_, _) => Menus.AfterMenu(() => SetUpAudio());
             _audioRemove.Click += (_, _) => Menus.AfterMenu(() => RemoveAudio());
             _portEditor.Click += (_, _) => Menus.AfterMenu(() => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); });
@@ -300,7 +304,7 @@ namespace TailRemote
             _streaming.Item.Available = !host;
             _toggle.Available = !host;
             _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _speedRemote.Available = _switchTo.Available = !host;
-            _announceQuality.Available = _muteLocal.Available = !host;
+            _announceQuality.Available = _muteLocal.Available = _rideOut.Available = !host;
             _startup.Available = host;
             _service.Available = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
@@ -444,7 +448,7 @@ namespace TailRemote
             {
                 string[]? files = null;
                 string? text = null;
-                bool inaccessible = false;
+                bool inaccessible = false, other = false;
                 for (int i = 0; i < 5; i++)
                 {
                     try
@@ -454,8 +458,14 @@ namespace TailRemote
                             var list = Clipboard.GetFileDropList();
                             files = new string[list.Count];
                             list.CopyTo(files, 0);
+                            // Files cut and pasted elsewhere stay listed on the clipboard though they are gone:
+                            // sent, they arrived as nothing and wiped the other PC's clipboard.
+                            int listed = files.Length;
+                            files = files.Where(f => System.IO.File.Exists(f) || System.IO.Directory.Exists(f)).ToArray();
+                            if (files.Length == 0 && listed > 0) { Later(() => Say("Nothing sent: the files on the clipboard are not there any more. Copy them again.")); return; }
                         }
                         else if (Clipboard.ContainsText()) text = Clipboard.GetText();
+                        else other = Clipboard.GetDataObject()?.GetFormats()?.Length > 0;
                         inaccessible = false;
                         break;
                     }
@@ -472,6 +482,8 @@ namespace TailRemote
                         Tone(Sounds.Tone.ClipboardSent); // the Files line says the rest, without speaking
                     });
                 }
+                else if (text != null && text.Length > 0 && string.IsNullOrWhiteSpace(text))
+                    Later(() => Say("Nothing sent: the clipboard has only spaces or blank lines."));
                 else if (!string.IsNullOrEmpty(text))
                 {
                     if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); return; }
@@ -485,7 +497,8 @@ namespace TailRemote
                     });
                 }
                 else if (inaccessible) Later(() => Say("Could not read the clipboard: try again."));
-                else Later(() => Say("The clipboard is empty: copy something first."));
+                else if (other) Later(() => Say("Nothing sent: the clipboard has something other than text or files, like a picture. Only text and files can be sent."));
+                else Later(() => Say("Nothing sent: the clipboard is empty. Copy something first."));
             });
         }
 
@@ -994,6 +1007,7 @@ namespace TailRemote
                 _speedUp.Checked = _settings.CatchUpBySpeed;
                 _announceQuality.Checked = _settings.AnnounceQuality;
                 _muteLocal.Checked = _settings.MuteWhenNotControlling;
+                _rideOut.Checked = _settings.RideOutStalls;
                 _quality.SelectedIndex = Math.Clamp(_settings.SoundQuality + 1, 0, _quality.Count - 1);
                 int sel = _devices.FindIndex(d => d.Id == _settings.OutputDevice);
                 _device.SelectedIndex = sel < 0 ? 0 : sel;
@@ -1030,18 +1044,38 @@ namespace TailRemote
 
         private const string TransferIdle = "Nothing being sent or received. Use Send the clipboard or Send files.";
         private FileChannel.Transfer? _transferShown;
-        private System.Windows.Forms.Timer? _idleTimer;
 
         /// <summary>A finished line stays 15 seconds, then the Files line goes back to saying nothing is going.</summary>
-        private void IdleSoon()
+        // Every send and receive that ended, newest first, until Clear the history. The Files line
+        // keeps the last one too: it used to go back to "nothing being sent" after 15 seconds, so
+        // whoever was away or busy elsewhere never found out how a transfer had gone.
+        private readonly System.Collections.Generic.List<string> _historyLines = new();
+        private readonly MenuItem _history = new("&History of transfers");
+        private const int MaxHistory = 100;
+
+        private void Remember(string what)
         {
-            if (_idleTimer == null)
+            _historyLines.Insert(0, DateTime.Now.ToString("t") + ": " + what);
+            if (_historyLines.Count > MaxHistory) _historyLines.RemoveAt(_historyLines.Count - 1);
+            FillHistory();
+        }
+
+        private void FillHistory()
+        {
+            var items = _history.DropDownItems;
+            items.Clear();
+            _history.Text = "&History of transfers" + (_historyLines.Count > 0 ? " (" + _historyLines.Count + ")" : "");
+            // Never an empty menu: with nothing to land on, NVDA froze.
+            if (_historyLines.Count == 0) { items.Add(new MenuStatus("Nothing has been sent or received yet.").Item); return; }
+            foreach (var line in _historyLines) items.Add(new MenuStatus(line).Item);
+            items.Add(new ToolStripSeparator());
+            items.Add(Menus.Action("&Clear the history", () =>
             {
-                _idleTimer = new System.Windows.Forms.Timer { Interval = 15_000 };
-                _idleTimer.Tick += (_, _) => { _idleTimer!.Stop(); if (_transferShown == null) _transferStatus.Text = TransferIdle; };
-            }
-            _idleTimer.Stop();
-            _idleTimer.Start();
+                _historyLines.Clear();
+                if (_transferShown == null) _transferStatus.Text = TransferIdle;
+                FillHistory();
+                Say("Cleared.");
+            }));
         }
 
         /// <summary>
@@ -1075,7 +1109,7 @@ namespace TailRemote
             ShowFileBars(Array.Empty<(string, long, long)>());
             _transferStatus.Text = why;
             _transferStop.Enabled = false;
-            IdleSoon();
+            Remember(why);
         }
 
         // Every transfer going right now (several when this PC hosts many controlling PCs), and
@@ -1084,6 +1118,9 @@ namespace TailRemote
         private readonly System.Collections.Generic.List<FileChannel.Transfer> _ended = new();
 
         /// <summary>How transfers are going, either way: the Files line and bars. Never spoken, so a lot of them cannot flood NVDA; the sounds say they started and ended.</summary>
+        /// <summary>A transfer of files coming to this PC ended (RemoteFilesForm marks what it asked for).</summary>
+        internal static event Action<FileChannel.Transfer>? IncomingFilesEnded;
+
         private void ShowTransfer(FileChannel.Transfer t)
         {
             if (t.Finished) { _going.Remove(t.Serial); if (!_ended.Contains(t)) _ended.Add(t); }
@@ -1097,7 +1134,12 @@ namespace TailRemote
                 if (ends.Count == 0) return;
                 ShowFileBars(Array.Empty<(string, long, long)>());
                 _transferStatus.Text = Summary(ends);
-                IdleSoon();
+                // Files coming here (Get files, or Send files from the other PC): said, not only a sound,
+                // as you may be busy in another window (Get files) when they finish.
+                var arrived = ends.Where(e => !e.Outgoing && !e.Clipboard).ToList();
+                if (arrived.Count > 0) Say(Summary(arrived));
+                foreach (var e in arrived) IncomingFilesEnded?.Invoke(e);
+                Remember(_transferStatus.Text);
                 _transferStop.Enabled = false;
                 // The clipboard's own sounds play when it is sent and when it arrives; file sounds are
                 // for Send files only; and stopping (or replacing) on purpose is never an error.
@@ -1295,6 +1337,8 @@ namespace TailRemote
                 : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
                   (_client.LockedStep >= 0 ? ", locked" : ", variable") +
                   (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "") +
+                  (_player?.RidingOutMs > 0 ? ", riding out stalls (" + _player.RidingOutMs + " ms of it)" : "") +
+                  (WlanStreaming.State is string wifi ? ". " + wifi : "") +
                   (_client.UdpBlocked ? ". NO SOUND: UDP port " + _client.Port + " is blocked between the PCs. On the remote PC, open it with Port editor, or check its firewall" : "");
             if (_streaming.Text != st) _streaming.Text = st;
         }
@@ -1313,6 +1357,7 @@ namespace TailRemote
             _settings.CatchUpBySpeed = _speedUp.Checked;
             _settings.AnnounceQuality = _announceQuality.Checked;
             _settings.MuteWhenNotControlling = _muteLocal.Checked;
+            _settings.RideOutStalls = _rideOut.Checked;
             _settings.SoundQuality = _quality.SelectedIndex - 1;
             _settings.Save();
         }
@@ -1479,6 +1524,7 @@ namespace TailRemote
                     _playerDevice = device;
                 }
                 _player.SpeedUp = _speedUp.Checked;
+                _player.RideOut = _rideOut.Checked;
                 var player = _player;
                 int locked = _quality.SelectedIndex - 1; // from the very first sound
                 // Trying again: a short wait for an answer, so a PC that is starting up is caught the
@@ -1901,8 +1947,6 @@ namespace TailRemote
             _retryTimer.Dispose();
             _titleTimer.Stop();
             _titleTimer.Dispose();
-            _idleTimer?.Stop();
-            _idleTimer?.Dispose();
             _keys?.SetClient(null);
             _client?.Dispose();
             DropBackground();

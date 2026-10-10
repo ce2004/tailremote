@@ -7,8 +7,10 @@ namespace TailRemote
 {
     /// <summary>
     /// Get files from the remote PC: its folders and files in a list. Enter opens a folder,
-    /// Backspace goes up, Space checks files and folders, and Get brings the checked ones (or
-    /// the one you are on) here, into the received files folder, like Send files from there.
+    /// Backspace goes up, Space (or Enter on a file) checks files and folders, in as many
+    /// folders as you like, and only Get brings the checked ones here, all at once, into the
+    /// received files folder. Each one then says ", getting", then ", got" (or ", failed"), and
+    /// TailRemote says when they have arrived.
     /// </summary>
     internal sealed class RemoteFilesForm : Form
     {
@@ -24,7 +26,13 @@ namespace TailRemote
         private readonly Button _up = new() { Text = "&Up one folder (Backspace)", AutoSize = true };
         private readonly Button _close = new() { Text = "Close", AutoSize = true, DialogResult = DialogResult.Cancel };
         private string _path = "";
-        private bool _loading;
+        private bool _loading, _filling;
+        // Checked, in any folder (checks stay when you move between folders), by path.
+        private readonly Dictionary<string, Entry> _chosen = new(StringComparer.OrdinalIgnoreCase);
+        // What happened to each one asked for: "getting", "got" or "failed", by path.
+        private readonly Dictionary<string, string> _state = new(StringComparer.OrdinalIgnoreCase);
+        // The ones on their way now (one Get at a time: the remote PC replaces a sending with a newer one).
+        private List<Entry>? _pending;
 
         private sealed record Entry(bool Folder, string Path, string Name, long Bytes, long Ticks);
 
@@ -44,7 +52,7 @@ namespace TailRemote
             var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
             flow.Controls.Add(new Label { Text = "Folder on the remote PC", AutoSize = true });
             flow.Controls.Add(_where);
-            flow.Controls.Add(new Label { Text = "&Files and folders (Enter opens a folder, Space checks, Backspace goes up)", AutoSize = true });
+            flow.Controls.Add(new Label { Text = "&Files and folders (Enter opens a folder or checks a file, Space checks, Backspace goes up, Alt G gets what is checked)", AutoSize = true });
             flow.Controls.Add(_list);
             var buttons = new FlowLayoutPanel { AutoSize = true };
             buttons.Controls.Add(_get);
@@ -61,6 +69,13 @@ namespace TailRemote
                 else if (e.KeyCode == Keys.Back) { e.Handled = e.SuppressKeyPress = true; Up(); }
             };
             _list.DoubleClick += (_, _) => Open();
+            _list.ItemChecked += (_, e) =>
+            {
+                if (_filling || e.Item.Tag is not Entry en) return;
+                if (e.Item.Checked) _chosen[en.Path] = en; else _chosen.Remove(en.Path);
+            };
+            MainForm.IncomingFilesEnded += Arrived;
+            FormClosed += (_, _) => MainForm.IncomingFilesEnded -= Arrived;
             Shown += async (_, _) => await LoadFolder("", null);
             Menus.FocusWhenShown(this, () => _list);
         }
@@ -70,8 +85,31 @@ namespace TailRemote
         private async void Open()
         {
             if (Current is not Entry e) return;
-            if (!e.Folder) { Get(); return; }
+            if (!e.Folder)
+            {
+                // A file is checked, never fetched on the spot: Get brings everything checked at once.
+                if (_list.FocusedItem is ListViewItem item) item.Checked = !item.Checked;
+                return;
+            }
             await LoadFolder(e.Path, null);
+        }
+
+        private string Label(Entry e) =>
+            e.Name + (e.Folder ? ", folder" : "") + (_state.TryGetValue(e.Path, out var st) ? ", " + st : "");
+
+        private void Relabel()
+        {
+            foreach (ListViewItem i in _list.Items)
+                if (i.Tag is Entry e && i.Text != Label(e)) i.Text = Label(e);
+        }
+
+        /// <summary>A transfer coming here ended (MainForm says what arrived): the ones asked for are marked.</summary>
+        private void Arrived(FileChannel.Transfer t)
+        {
+            if (IsDisposed || _pending == null) return;
+            foreach (var e in _pending) _state[e.Path] = t.Failed ? "failed" : "got";
+            _pending = null;
+            Relabel();
         }
 
         private async void Up()
@@ -98,15 +136,17 @@ namespace TailRemote
                 _path = path;
                 _where.Text = path.Length == 0 ? "Drives and usual folders" : path;
                 _list.BeginUpdate();
+                _filling = true;
                 _list.Items.Clear();
                 foreach (var e in entries)
                 {
-                    // "Desktop, folder", not the Size column saying "folder".
-                    var item = new ListViewItem(e.Folder ? e.Name + ", folder" : e.Name) { Tag = e };
+                    // "Desktop, folder", not the Size column saying "folder"; then how getting it went.
+                    var item = new ListViewItem(Label(e)) { Tag = e, Checked = _chosen.ContainsKey(e.Path) };
                     item.SubItems.Add(e.Folder ? "" : FileChannel.Size(e.Bytes));
                     item.SubItems.Add(e.Ticks > 0 ? new DateTime(e.Ticks, DateTimeKind.Utc).ToLocalTime().ToString("g") : "");
                     _list.Items.Add(item);
                 }
+                _filling = false;
                 _list.EndUpdate();
                 if (_list.Items.Count == 0) { _say("This folder is empty."); _list.Focus(); return; }
                 var land = _list.Items.Cast<ListViewItem>().FirstOrDefault(i => focus != null && string.Equals(((Entry)i.Tag!).Path.TrimEnd('\\'), focus.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
@@ -123,6 +163,7 @@ namespace TailRemote
             finally
             {
                 _loading = false;
+                _filling = false;
                 if (!IsDisposed) UseWaitCursor = false;
             }
         }
@@ -138,14 +179,20 @@ namespace TailRemote
 
         private void Get()
         {
-            var chosen = _list.CheckedItems.Cast<ListViewItem>().Select(i => (Entry)i.Tag!).ToList();
-            if (chosen.Count == 0 && Current is Entry e) chosen.Add(e);
-            if (chosen.Count == 0) { _say("Check the files and folders to get first, with Space."); return; }
+            if (_pending != null) { _say("Still getting the last ones. Check more meanwhile, and Get them when those have arrived."); return; }
+            var chosen = _chosen.Values.ToList();
+            if (chosen.Count == 0) { _say("Nothing is checked. Check files and folders with Space, or Enter on a file, then Get."); return; }
             // Whole drives are too much to mean: a folder on one is fine.
-            if (_path.Length == 0 && chosen.Any(c => c.Path.TrimEnd('\\').Length <= 2)) { _say("Open the drive and choose folders or files in it."); return; }
+            if (chosen.Any(c => c.Path.TrimEnd('\\').Length <= 2)) { _say("A whole drive is too much: open it and check folders or files in it."); return; }
             if (_client() is not Client client || !client.Fetch(chosen.Select(c => c.Path))) { _say("Not connected to the remote PC, so nothing was asked for."); return; }
-            foreach (ListViewItem i in _list.CheckedItems) i.Checked = false;
-            _say("Getting " + (chosen.Count == 1 ? chosen[0].Name : chosen.Count + " items") + " into " + FileChannel.Downloads + ". The Files line in the Clipboard menu shows how it goes.");
+            _pending = chosen;
+            foreach (var c in chosen) _state[c.Path] = "getting";
+            _chosen.Clear();
+            _filling = true;
+            foreach (ListViewItem i in _list.Items) i.Checked = false;
+            _filling = false;
+            Relabel();
+            _say("Getting " + (chosen.Count == 1 ? chosen[0].Name : chosen.Count + " items") + " into " + FileChannel.Downloads + ". TailRemote says when they have arrived; each one says getting, then got.");
         }
     }
 

@@ -597,6 +597,8 @@ namespace TailRemote
         public static int TestStallMs;
         /// <summary>Test only (--audiotest ... cellNNN): a phone connection. Sound comes in bunches with up to NNN ms between, now and then a longer stall, and 2 percent never arrives.</summary>
         public static int TestCellMs;
+        /// <summary>Test only (--audiotest ... scanNNN): a Wi-Fi card scanning every 10 seconds, holding everything back NNN ms.</summary>
+        public static int TestScanMs;
         /// <summary>Test only (--audiotest ... dropN): throws away N percent of audio packets at random, like Clumsy.</summary>
         public static int TestDropPercent;
         /// <summary>Test only (--audiotest ... bwN): from 3 seconds in, audio over N kbit/s is thrown away, like Clumsy's bandwidth limit.</summary>
@@ -634,7 +636,7 @@ namespace TailRemote
 
         private void UdpLoop()
         {
-            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0 || TestCellMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
+            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0 || TestCellMs > 0 || TestScanMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
@@ -674,10 +676,11 @@ namespace TailRemote
                     lock (_jitterQueue) _jitterQueue.Add((at, _jitterN++), d);
                     continue;
                 }
-                if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0)
+                if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestScanMs > 0)
                 {
                     long at = _jitterClock.ElapsedMilliseconds;
                     if (at >= 5000 && at < 5000 + TestStallMs) at = 5000 + TestStallMs;
+                    if (TestScanMs > 0 && at % 10_000 < TestScanMs) at += TestScanMs - at % 10_000;
                     at += Random.Shared.Next(TestJitterMs + 1) + (at > 5000 ? TestLagMs : 0);
                     lock (_jitterQueue) _jitterQueue.Add((at, _jitterN++), d);
                     continue;

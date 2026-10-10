@@ -711,7 +711,7 @@ namespace TailRemote
             t.Waiting = false;
             t.Files = Array.Empty<(string, long, long)>();
             if (o.Outcome == EndedWell)
-                t.Result = "Sent " + o.What + (o.Kind == KindText ? "" : Summary(o.Entries.Select(e => (e.Rel, e.Length)))) + ", at " + Speed(t.BytesPerSecond) + ".";
+                t.Result = "Sent " + o.What + (o.Kind == KindText ? "" : Summary(o.Entries.Select(e => (e.Rel, e.Length)))) + At(t) + ".";
             else { t.Failed = true; t.Cancelled = o.Outcome == EndedStopped; t.Result = o.Why; }
             DiagLog.Write("files: " + o.What + ": " + t.Result);
             Progress?.Invoke(t);
@@ -1188,7 +1188,7 @@ namespace TailRemote
                 paths = b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray();
                 t.Result = "The other PC sent " + t.What + Summary(b.Entries.Select(e => e!.Value)) + " to your clipboard, at " + Speed(t.BytesPerSecond) + ". Press Control V to paste.";
             }
-            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + ", at " + Speed(t.BytesPerSecond) + ". It is in " + Where(b.Folder!) + ".";
+            else if (b.Kind == KindDownloads) t.Result = "Received " + t.What + Summary(b.Entries.Select(e => e!.Value)) + At(t) + ". It is in " + Where(b.Folder!) + ".";
             else
             {
                 text = Encoding.UTF8.GetString(b.Text!);
@@ -1369,6 +1369,9 @@ namespace TailRemote
             return " (" + Size(bytes) + ", " + what + ")";
         }
 
+
+        // The speed, only for something big enough to have one ("at 0 kilobytes a second" said nothing).
+        private static string At(Transfer t) => t.Total >= 1 << 20 ? ", at " + Speed(t.BytesPerSecond) : "";
         public static string Speed(double bytesPerSecond) =>
             bytesPerSecond >= 1 << 20 ? (bytesPerSecond / (1 << 20)).ToString(bytesPerSecond < 10 << 20 ? "0.0" : "0") + " megabytes a second"
             : (bytesPerSecond / 1024).ToString("0") + " kilobytes a second";

@@ -179,6 +179,7 @@ namespace TailRemote
                 foreach (var a in args) if (a.StartsWith("until") && int.TryParse(a[5..], out int un)) Client.TestKbpsUntil = un;
                 foreach (var a in args) if (a.StartsWith("dialup") && int.TryParse(a[6..], out int du)) Client.TestDialupKbps = du;
                 foreach (var a in args) if (a.StartsWith("cell") && int.TryParse(a[4..], out int cell)) Client.TestCellMs = cell;
+                foreach (var a in args) if (a.StartsWith("scan") && int.TryParse(a[4..], out int scanMs)) Client.TestScanMs = scanMs;
                 foreach (var a in args) if (a.StartsWith("secs") && int.TryParse(a[4..], out int secs)) AudioTestSeconds = secs;
                 return AudioTest(args.Length > 1 ? args[1] : null);
             }
@@ -310,7 +311,8 @@ namespace TailRemote
                 using var tone = new ToneSource(src.Id, src.Id == defId ? 0.0003 : 0.3);
                 Host.WrongPasswordDelayMs = 0;
                 using var host = new Host(47998, "audiotest", null, _ => { }, src.Id);
-                using var player = new Player("", s => Say("player: " + s)) { Mute = true, SpeedUp = Array.IndexOf(Environment.GetCommandLineArgs(), "speed") >= 0 };
+                using var player = new Player("", s => Say("player: " + s)) { Mute = true, SpeedUp = Array.IndexOf(Environment.GetCommandLineArgs(), "speed") >= 0,
+                    RideOut = Array.IndexOf(Environment.GetCommandLineArgs(), "noride") < 0 };
                 using var c = Client.Connect("127.0.0.1", 47998, "audiotest", player, s => Say("client: " + s), Client.TestLockStep);
                 System.Threading.Thread.Sleep(1500);
                 player.Diagnose();

@@ -1,3 +1,13 @@
+2.1.3
+Changed: Get files from the remote PC never fetches anything until you choose Get (Alt G). Enter on a file now checks it, like Space, and your checks stay as you move between folders, so you can pick from several and get them all at once.
+New feature: in Get files, each file you asked for says getting, then got (or failed), so you can see what you have already, and TailRemote says when files arrive.
+New feature: Clipboard, History of transfers lists every send and receive that ended, with the time, until you choose Clear the history. The Files line keeps the last result too, instead of going back to nothing being sent after 15 seconds.
+New feature: Settings, Ride out Wi-Fi scans, on at first. When the sound keeps stalling (a Wi-Fi card scanning for networks holds everything back for a fifth of a second or so), TailRemote holds just enough sound to play through it, for a little more delay until the stalls stop for 3 minutes. A one-off stall changes nothing.
+New feature: the Streaming line and Remote PC info say whether Wi-Fi agreed to hold off its scans while connected. Some Wi-Fi drivers refuse.
+Bug fixed: Send the clipboard with files on it that had since been moved or deleted said it was sent, and wiped the other PC's clipboard. It now says the files are not there any more, and a PC hosting as the service never empties its clipboard for nothing arriving.
+Bug fixed: Send the clipboard with only spaces, or a picture, on the clipboard now says so instead of sending or saying it is empty.
+Changed: small transfers no longer say they went at 0 kilobytes a second.
+
 2.1.2
 Bug fixed: since 2.1.1, a problem inside a TailRemote window could show a raw error box whose Quit closed TailRemote. It is written down and TailRemote carries on, as before.
 Bug fixed: Control 1 to 9 did nothing at all, not even saying there are no saved PCs.

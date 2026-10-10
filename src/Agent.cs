@@ -134,10 +134,16 @@ namespace TailRemote
                 t.Start();
             }
 
-            public void Arrived(string text) => _jobs.TryAdd(() => Set(new DataObject(DataFormats.UnicodeText, text)));
+            // Nothing never replaces what is on the clipboard here: an empty one sent from the other PC wiped this one.
+            public void Arrived(string text)
+            {
+                if (string.IsNullOrEmpty(text)) return;
+                _jobs.TryAdd(() => Set(new DataObject(DataFormats.UnicodeText, text)));
+            }
 
             public void FilesArrived(string[] paths) => _jobs.TryAdd(() =>
             {
+                if (paths.Length == 0) return;
                 var list = new System.Collections.Specialized.StringCollection();
                 list.AddRange(paths);
                 var data = new DataObject();
