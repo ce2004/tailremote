@@ -59,6 +59,11 @@ namespace TailRemote
 
         private static int Main(string[] args)
         {
+            // Never a crash box: on a PC reached only through TailRemote, Windows' "has stopped working"
+            // or System Error box grabbed the keyboard until someone closed it. A crash now just ends
+            // the process, and the service or Windows starts it again.
+            SetErrorMode(0x0001 | 0x0002 | 0x8000); // SEM_FAILCRITICALERRORS, NOGPFAULTERRORBOX, NOOPENFILEERRORBOX
+            try { WerSetFlags(0x20); } catch { } // WER_FAULT_REPORTING_NO_UI
             Native.FullSpeed(); // never on power-saving cores: that makes the sound run dry
             System.Threading.ThreadPool.QueueUserWorkItem(_ => Updater.CleanLeftovers()); // old copies from earlier updates, once nothing holds them
             // Nothing may ever close TailRemote by surprise: a problem in the window is
@@ -377,6 +382,8 @@ namespace TailRemote
         }
 
         [System.Runtime.InteropServices.DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern uint SetErrorMode(uint mode);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern int WerSetFlags(uint flags);
 
         /// <summary>Test only: plays a steady 440 Hz tone into one output.</summary>
         private sealed unsafe class ToneSource : IDisposable

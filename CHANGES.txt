@@ -1,3 +1,9 @@
+2.1.6
+New feature: if an update will not start, the service puts the previous version back by itself after a couple of failed starts, so a PC you reach only through TailRemote cannot be stranded by a bad update.
+Changed: TailRemote no longer lets Windows show a "stopped working" or system error box for it. A rare crash now just ends it quietly and it starts again, instead of a box sitting there holding some keys until it is closed.
+Bug fixed: someone with a large block of internet addresses could once flood the login and keep you from connecting. Logins are now counted per address block, and slots are kept for PCs that have connected before, so a flood cannot lock you out. You still cannot be let in without the password.
+Changed: a wrong password frees its login slot before the slowdown, and a listen-only connection can no longer make the host hold large messages.
+
 2.1.5
 Bug fixed: since the window became blank in 2.0.0, opening TailRemote said nothing with NVDA, so you had to Alt Tab away and back to know where you were. It now comes to the front and says its title, and that Alt opens the menus.
 

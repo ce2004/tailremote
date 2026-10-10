@@ -220,12 +220,34 @@ namespace TailRemote
         // 8 silent connections lock a real login out for as long as they kept coming.)
         // 32 from one address: many controllers behind one router each open file lanes, and with 8
         // a lane's login could push a real one out.
-        private const int MaxHandshakes = 256, MaxHandshakesPerAddress = 32;
+        private const int MaxHandshakes = 256, MaxHandshakesPerAddress = 32, ReservedForKnown = 64;
         private int _handshakes;
         private readonly Dictionary<IPAddress, LinkedList<TcpClient>> _pending = new();
+        private readonly HashSet<IPAddress> _known = new(); // address blocks that have logged in before
+
+        // Everyone behind one IPv6 /64 counts as one: a single attacker owns 2^64 addresses, so limits
+        // keyed on the exact address did nothing. IPv4 is used whole.
+        private static IPAddress Bucket(IPAddress a)
+        {
+            if (a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && !a.IsIPv4MappedToIPv6)
+            {
+                var b = a.GetAddressBytes();
+                for (int i = 8; i < 16; i++) b[i] = 0;
+                return new IPAddress(b);
+            }
+            return a;
+        }
+
+        /// <summary>This address block has logged in before: it keeps reserved handshake slots during a flood.</summary>
+        private void MarkKnown(IPAddress a)
+        {
+            a = Bucket(a);
+            lock (_guesses) { if (_known.Count > 10_000) _known.Clear(); _known.Add(a); }
+        }
 
         private bool BeginHandshake(IPAddress a, TcpClient tcp)
         {
+            a = Bucket(a);
             TcpClient? drop = null;
             lock (_guesses)
             {
@@ -236,7 +258,9 @@ namespace TailRemote
                     list.RemoveFirst();
                     _handshakes--;
                 }
-                if (_handshakes >= MaxHandshakes) { if (list.Count == 0) _pending.Remove(a); return false; }
+                // A flood of new addresses cannot use the last slots: those are kept for blocks that have logged in before.
+                int cap = _known.Contains(a) ? MaxHandshakes + ReservedForKnown : MaxHandshakes;
+                if (_handshakes >= cap) { if (list.Count == 0) _pending.Remove(a); return false; }
                 list.AddLast(tcp);
                 _handshakes++;
             }
@@ -246,6 +270,7 @@ namespace TailRemote
 
         private void EndHandshake(IPAddress a, TcpClient tcp)
         {
+            a = Bucket(a);
             lock (_guesses)
             {
                 if (!_pending.TryGetValue(a, out var list) || !list.Remove(tcp)) return; // already dropped to make room
@@ -258,20 +283,22 @@ namespace TailRemote
         /// <summary>After 5 wrong passwords in a minute, an address is refused at once for a minute.</summary>
         private bool Blocked(IPAddress a)
         {
+            a = Bucket(a);
             lock (_guesses) return _guesses.TryGetValue(a, out var g) && g.BlockedUntil > Environment.TickCount64;
         }
 
         /// <summary>Counts a wrong password; returns what to log, or null. A flood never floods the log.</summary>
         private string? WrongPassword(IPAddress a)
         {
+            IPAddress bucket = Bucket(a);
             long now = Environment.TickCount64;
             lock (_guesses)
             {
                 if (_guesses.Count > 10_000) _guesses.Clear(); // never grows without bound
-                (int Fails, long Since, long BlockedUntil) g = _guesses.TryGetValue(a, out var old) && now - old.Since < 60_000 ? old : (0, now, 0L);
+                (int Fails, long Since, long BlockedUntil) g = _guesses.TryGetValue(bucket, out var old) && now - old.Since < 60_000 ? old : (0, now, 0L);
                 g.Fails++;
                 if (g.Fails >= 5 && g.BlockedUntil <= now) g.BlockedUntil = now + 60_000;
-                _guesses[a] = g;
+                _guesses[bucket] = g;
                 return g.Fails == 1 ? "Refused " + a + ": wrong password."
                      : g.Fails == 5 ? "Refused " + a + " for a minute: too many wrong passwords."
                      : null;
@@ -386,6 +413,9 @@ namespace TailRemote
                 TcpClient tcp;
                 try { tcp = _listener.AcceptTcpClient(); }
                 catch { if (_stop) return; continue; }
+                var ra = ((IPEndPoint)tcp.Client.RemoteEndPoint!).Address;
+                if (ra.IsIPv4MappedToIPv6) ra = ra.MapToIPv4();
+                if (Blocked(ra)) { try { tcp.Dispose(); } catch { } continue; } // a guessing address is turned away before any work
                 new Thread(() => Serve(tcp)) { IsBackground = true, Name = "TailRemote session" }.Start();
             }
         }
@@ -476,12 +506,13 @@ namespace TailRemote
                 }
                 if (key == null)
                 {
+                    EndHandshake(remote, tcp); counted = false; // give the slot back before the slow part, so guesses cannot hold slots
                     string? note = WrongPassword(remote);
                     if (note != null) _status(note);
                     Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
                     byte[] refuse = new byte[Protocol.ReplyBytes]; // the same size as an acceptance
                     Protocol.AddCheck(refuse);
-                    stream.Write(refuse);
+                    try { stream.Write(refuse); } catch { }
                     tcp.Dispose();
                     return;
                 }
@@ -502,10 +533,12 @@ namespace TailRemote
                 {
                     Tcp = tcp, Stream = stream, Token = token, Address = remote, Role = role,
                     Key = key, HostNonce = nonce, ClientNonce = clientNonce,
-                    Link = new SecureLink(key, nonce, clientNonce, isHost: true),
+                    // A listener only ever sends pings and tiny control messages, so it cannot make the host hold 8 MB.
+                    Link = new SecureLink(key, nonce, clientNonce, isHost: true, maxReceive: role == Protocol.RoleListen ? 64 << 10 : SecureLink.MaxMessage),
                 };
                 s.Link.Send(s.Stream, Protocol.FeaturesMessage(SecureAttention != null ? Protocol.FeatureSecureAttention : 0));
                 EndHandshake(remote, tcp);
+                MarkKnown(remote); // the proof verified: this block keeps reserved slots in future floods
                 counted = false;
                 lock (_gate)
                 {

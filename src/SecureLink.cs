@@ -23,12 +23,14 @@ namespace TailRemote
         private readonly AesGcm _send, _recv, _audio;
         private readonly object _sendLock = new();
         private ulong _sendCounter, _recvCounter;
+        private readonly int _maxReceive;
         private readonly byte[] _recvHead = new byte[8];
         private const int HeadBytes = 8; // u32 length, then the length with every bit flipped
 
         /// <summary>purpose keeps a second connection (files) on keys of its own.</summary>
-        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "")
+        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "", int maxReceive = MaxMessage)
         {
+            _maxReceive = maxReceive;
             byte[] salt = new byte[32];
             hostNonce.CopyTo(salt, 0);
             clientNonce.CopyTo(salt, 16);
@@ -120,7 +122,7 @@ namespace TailRemote
         {
             Protocol.ReadExactly(s, _recvHead);
             int len = BitConverter.ToInt32(_recvHead);
-            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > MaxMessage)
+            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > _maxReceive)
                 throw new InvalidOperationException("The connection damaged data on the way, so it reconnected.");
             if (buffer == null || buffer.Length < len + TagSize) buffer = new byte[Math.Max(len + TagSize, 64 << 10)];
             Protocol.ReadExactly(s, buffer.AsSpan(0, len + TagSize));
@@ -137,7 +139,7 @@ namespace TailRemote
         {
             Protocol.ReadExactly(s, _recvHead);
             int len = BitConverter.ToInt32(_recvHead);
-            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > MaxMessage)
+            if (BitConverter.ToInt32(_recvHead, 4) != ~len || len < 0 || len > _maxReceive)
                 throw new InvalidOperationException("The connection damaged data on the way, so it reconnected.");
             byte[] body = new byte[len + TagSize];
             Protocol.ReadExactly(s, body);

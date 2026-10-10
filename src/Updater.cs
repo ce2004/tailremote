@@ -123,6 +123,8 @@ namespace TailRemote
         public static bool CleanLeftovers()
         {
             string exe = Environment.ProcessPath!;
+            // A service update not yet proven: its old copy is what roll back would restore.
+            if (File.Exists(exe + ".rollback")) return true;
             bool all = true;
             try
             {

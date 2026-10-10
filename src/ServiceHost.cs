@@ -285,12 +285,13 @@ namespace TailRemote
         {
             _statusHandle = NativeService.RegisterServiceCtrlHandlerExW(Name, _handler!, IntPtr.Zero);
             Report(NativeService.SERVICE_START_PENDING);
+            CheckRollback();
             // Hosting starts at once, from the service itself: before the sign-in screen exists.
             new Thread(Agent.StartHosting) { IsBackground = true, Name = "TailRemote service hosting" }.Start();
             new Thread(UpdateLoop) { IsBackground = true, Name = "TailRemote service updates" }.Start();
             new Thread(UpdatePipe) { IsBackground = true, Name = "TailRemote update nudge" }.Start();
             Report(NativeService.SERVICE_RUNNING);
-            try { File.Delete(InstalledExe + ".old"); } catch { } // left by the last self-update
+            if (!File.Exists(RollbackNote)) { try { File.Delete(InstalledExe + ".old"); } catch { } } // left by the last self-update
             Log("Service started, version " + Updater.Current + ".");
 
             Process? agent = null;
@@ -441,8 +442,52 @@ namespace TailRemote
             File.Move(exe, old);       // a running exe can be renamed, not overwritten
             try { File.Move(fresh, exe); }
             catch { File.Move(old, exe); throw; }
+            // Until the new copy has run for 2 minutes, the old one is kept and can come back.
+            try { File.WriteAllLines(RollbackNote, new[] { old, Updater.Current.ToString(), "0" }); } catch { }
             _restartingTo = r.Version.ToString();
             Restarting = true;
+        }
+
+        /// <summary>
+        /// Written when the service swaps in a new version: where the old copy is, its version, and
+        /// how many times the new one has started. While it is there, the old copy is never cleared.
+        /// </summary>
+        internal static string RollbackNote => InstalledExe + ".rollback";
+
+        /// <summary>
+        /// Automatic roll back. A PC reached only through TailRemote must never be lost to an update
+        /// that will not run: Windows restarts a failing service again and again, but the same broken
+        /// copy each time. So each start after an update is counted, and the fourth start without the
+        /// new version having stayed up for 2 minutes puts the previous version back and restarts into
+        /// it. After 2 minutes up, the update counts as good and the note goes.
+        /// </summary>
+        private static void CheckRollback()
+        {
+            try
+            {
+                if (!File.Exists(RollbackNote)) return;
+                var note = File.ReadAllLines(RollbackNote);
+                string old = note.Length > 0 ? note[0] : "";
+                string oldVersion = note.Length > 1 ? note[1] : "the previous version";
+                int starts = (note.Length > 2 && int.TryParse(note[2], out int n) ? n : 0) + 1;
+                if (starts >= 4 && File.Exists(old))
+                {
+                    string exe = InstalledExe;
+                    string bad = exe + ".old-failed-" + DateTime.UtcNow.Ticks;
+                    File.Move(exe, bad);
+                    File.Move(old, exe);
+                    File.Delete(RollbackNote);
+                    Log("Version " + Updater.Current + " kept failing to start, so the service went back to " + oldVersion + ".");
+                    Environment.Exit(1); // Windows' recovery setting starts the restored copy
+                }
+                File.WriteAllLines(RollbackNote, new[] { old, oldVersion, starts.ToString() });
+                new Thread(() =>
+                {
+                    Thread.Sleep(TimeSpan.FromMinutes(2));
+                    try { File.Delete(RollbackNote); Log("Version " + Updater.Current + " is running well; the previous copy is no longer kept."); } catch { }
+                }) { IsBackground = true, Name = "TailRemote update check" }.Start();
+            }
+            catch (Exception e) { Log("Roll back check failed: " + e.Message); }
         }
 
         /// <summary>A nudge from TailRemote after it updated itself: check now. At most once a minute.</summary>
