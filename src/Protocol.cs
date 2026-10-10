@@ -43,12 +43,24 @@ namespace TailRemote
         public const byte RestartPc = 4;     // controller asks the host PC to restart
         public const byte SecureAttention = 5; // controller asks for Ctrl+Alt+Del (service hosts only)
         public const byte FilePace = 7;      // u32 KB/s: how fast the host may send files (the client sets it from the audio ping)
-        public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)        // Either way
+        public const byte AudioQuality = 6;  // u8: the bitrate step the client wants (an index into OpusSteps; 0 = the best)
+        public const byte UpdateTo = 8;      // UTF-8 version: the controller asks the host to update TailRemote to it (the newest on GitHub, and only that)
+        public const byte ListFolder = 9;    // u32 request id, UTF-8 path ("" = the drives and the usual folders)
+        public const byte Fetch = 10;        // UTF-8 paths, one per line: the host sends them to this controller like Send files
+        public const byte InfoRequest = 11;  // the host answers with Info
+        // Either way
         public const byte Features = 0x40;   // u32 flags
         // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it
         // Host to client
         public const byte Pong = 0x81;  // stamp i64
-        public const byte Message = 0x82; // UTF-8 text (the frame gives the length)        // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
+        public const byte Message = 0x82; // UTF-8 text (the frame gives the length)
+        public const byte FolderList = 0x85; // u32 request id, UTF-8 lines: one per entry, tab-separated: D name, F name bytes modified-ticks, or E problem
+        public const byte Info = 0x86;       // UTF-8 lines about the host PC, for Remote PC info
+        public const byte Leaving = 0x83; // u8 why (Leaving*), then UTF-8 detail (the new version when updating): sent just before the host closes on purpose
+        // 0x84 was CaptureBurst (1.7.x): no longer sent, never reuse it
+
+        // Why the host is going away, so the controlling PC can say so instead of "forcibly closed"
+        public const byte LeavingUpdating = 1, LeavingRestarting = 2, LeavingStopped = 3, LeavingShutdown = 4;
 
         // UDP
         public const byte UdpHello = 0xA0;  // token[8] stamp[8], client to host, every second
@@ -65,6 +77,7 @@ namespace TailRemote
         // 4, 32 and 64 were the lossless formats (up to 1.7)
         public const uint FeatureRestart = 8;
         public const uint FeatureSecureAttention = 16; // only a host running as the service
+        public const uint FeatureRemoteTools = 128;    // UpdateTo, ListFolder, Fetch, InfoRequest
 
         /// <summary>
         /// The bitrate steps, best first. 5 ms packets down to 128 kbit/s (Opus's
@@ -86,7 +99,7 @@ namespace TailRemote
         public static int WireKbps(int step) => OpusSteps[step].Kbps + 1000 / OpusSteps[step].Ms * PacketOverheadBytes * 8 / 1000;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureRemoteTools;
 
 
         // ---- The login, damage-proof ----
@@ -118,13 +131,20 @@ namespace TailRemote
         /// <summary>The message a client gets when its login was damaged on the way: it tries again.</summary>
         public const string DamagedLogin = "The connection damaged the login on the way.";
 
+        /// <summary>The features, then this copy's version (so the other side knows when it is older).</summary>
         public static byte[] FeaturesMessage(uint extra = 0)
         {
-            byte[] m = new byte[5];
+            byte[] v = Encoding.UTF8.GetBytes(Updater.Current.ToString());
+            byte[] m = new byte[5 + v.Length];
             m[0] = Features;
             BitConverter.TryWriteBytes(m.AsSpan(1), OurFeatures | extra);
+            v.CopyTo(m, 5);
             return m;
         }
+
+        /// <summary>The version at the end of a Features message, or null (an older copy sends none).</summary>
+        public static Version? FeaturesVersion(byte[] m) =>
+            m.Length > 5 && Version.TryParse(Encoding.UTF8.GetString(m, 5, m.Length - 5), out var v) ? v : null;
 
         public static byte[] TextMessage(byte type, string text)
         {

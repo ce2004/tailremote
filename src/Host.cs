@@ -34,6 +34,12 @@ namespace TailRemote
         /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
         public Func<bool>? SecureAttention { get; init; }
 
+        /// <summary>
+        /// A controlling PC asked to update TailRemote here to this version. Raised on a pool
+        /// thread; the second argument sends a message back to that PC alone.
+        /// </summary>
+        public event Action<string, Action<string>>? UpdateRequested;
+
         private readonly object _gate = new();
         // Any number of controllers up to MaxControllers, all at once: a second one used to replace
         // the first, which reconnected and replaced the second, back and forth for ever.
@@ -344,6 +350,29 @@ namespace TailRemote
             }
         }
 
+        /// <summary>
+        /// Tells every connected PC why this host is about to go away (updating, restarting,
+        /// stopped), so they say that instead of "the connection was forcibly closed", and an
+        /// update or restart is waited out quietly. Waits up to a second for the sends; the
+        /// connections stay open, so a restart that fails changes nothing.
+        /// </summary>
+        public void Leave(byte why, string detail = "")
+        {
+            byte[] utf = System.Text.Encoding.UTF8.GetBytes(detail);
+            byte[] m = new byte[2 + utf.Length];
+            m[0] = Protocol.Leaving;
+            m[1] = why;
+            utf.CopyTo(m, 2);
+            var sends = AllSessions().Select(s => System.Threading.Tasks.Task.Run(() => { try { s.Link.Send(s.Stream, m); } catch { } })).ToArray();
+            try { System.Threading.Tasks.Task.WaitAll(sends, 1000); } catch { }
+            _status(why switch
+            {
+                Protocol.LeavingUpdating => "Told the connected PCs this PC is updating TailRemote.",
+                Protocol.LeavingRestarting => "Told the connected PCs this PC is restarting.",
+                _ => "Told the connected PCs hosting is stopping.",
+            });
+        }
+
         private void Broadcast(string msg)
         {
             foreach (var s in AllSessions())
@@ -574,9 +603,51 @@ namespace TailRemote
                         if (SecureAttention == null) Protocol.SendMessage(s.Link, s.Stream, "Control Alt Delete needs the TailRemote service on the remote PC.");
                         else if (!SecureAttention()) Protocol.SendMessage(s.Link, s.Stream, "The remote PC could not send Control Alt Delete.");
                         break;
+                    case Protocol.UpdateTo when IsController(s):
+                        {
+                            string version = System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1);
+                            void Reply(string msg) { try { Protocol.SendMessage(s.Link, s.Stream, msg); } catch { } }
+                            if (UpdateRequested == null) Reply("TailRemote on the remote PC cannot update itself from here.");
+                            else ThreadPool.QueueUserWorkItem(_ => UpdateRequested(version, Reply));
+                        }
+                        break;
+                    case Protocol.ListFolder when m.Length >= 5 && IsController(s):
+                        {
+                            byte[] id = m[1..5];
+                            string path = System.Text.Encoding.UTF8.GetString(m, 5, m.Length - 5);
+                            // Off this thread: a slow drive must not hold up the keys behind it.
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                byte[] body = System.Text.Encoding.UTF8.GetBytes(RemoteTools.ListFolder(path));
+                                byte[] r = new byte[5 + body.Length];
+                                r[0] = Protocol.FolderList;
+                                id.CopyTo(r, 1);
+                                body.CopyTo(r, 5);
+                                try { s.Link.Send(s.Stream, r); } catch { }
+                            });
+                        }
+                        break;
+                    case Protocol.Fetch when IsController(s):
+                        {
+                            string[] paths = System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                            FileChannel? files;
+                            lock (_gate) files = s.Files;
+                            if (files == null) Protocol.SendMessage(s.Link, s.Stream, "The file connection is not open yet. Try again in a moment.");
+                            else if (paths.Length > 0) ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
+                        }
+                        break;
+                    case Protocol.InfoRequest when IsController(s):
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            var (controlling, listening) = Connected;
+                            string text = RemoteTools.Info(Updater.Current + (SecureAttention != null ? ", running as the Windows service" : "")) +
+                                "\nConnected: " + controlling + " controlling" + (listening > 0 ? ", " + listening + " listening" : "");
+                            try { s.Link.Send(s.Stream, Protocol.TextMessage(Protocol.Info, text)); } catch { }
+                        });
+                        break;
                     case Protocol.RestartPc when IsController(s):
                         _status("Restarting this PC, as the controlling PC asked.");
-                        Broadcast("The remote PC is restarting.");
+                        Leave(Protocol.LeavingRestarting);
                         // A normal restart: programs can still ask to save their work.
                         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("shutdown.exe", "/r /t 0") { CreateNoWindow = true, UseShellExecute = false }); }
                         catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }

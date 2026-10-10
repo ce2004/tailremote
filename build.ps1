@@ -1,7 +1,7 @@
 # Builds TailRemote into bin\<arch>, even while it is running.
 #
-#   build.bat              quick: ARM64 only, no ReadyToRun or compression (seconds)
-#   build.bat x64          quick, x64
+#   build.bat              quick: this PC's own arch only, no trimming or compression (seconds)
+#   build.bat arm64 / x64  quick, that arch
 #   build.bat full         both architectures, exactly as a release is built
 #
 # A running exe cannot be overwritten, but it can be moved: the running copy is
@@ -14,12 +14,14 @@ Set-Location $PSScriptRoot
 
 $full = $Args2 -contains 'full'
 $Arch = @($Args2 | Where-Object { $_ -in 'arm64', 'x64' })
-if ($Arch.Count -eq 0) { $Arch = if ($full) { @('arm64', 'x64') } else { @('arm64') } }
+$cpu = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$native = if ($cpu -eq 'ARM64') { 'arm64' } else { 'x64' }
+if ($Arch.Count -eq 0) { $Arch = if ($full) { @('arm64', 'x64') } else { @($native) } }
 
 $dotnet = Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe'
 if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
 $oldDir = Join-Path $env:LOCALAPPDATA 'TailRemote\old'
-$quick = if ($full) { @() } else { @('-p:PublishReadyToRun=false', '-p:EnableCompressionInSingleFile=false') }
+$quick = if ($full) { @() } else { @('-p:PublishTrimmed=false', '-p:EnableCompressionInSingleFile=false') }
 
 foreach ($a in $Arch) {
     $pub = "obj\publish\$a"

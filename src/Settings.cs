@@ -31,6 +31,7 @@ namespace TailRemote
         public bool Logging { get; set; }
         /// <summary>Catch up by speeding up the sound instead of skipping (changes the pitch a little).</summary>
         public bool CatchUpBySpeed { get; set; }
+        public bool AnnounceQuality { get; set; }
         /// <summary>Piano tones for connecting, clipboard, files and the rest (Sounds.cs).</summary>
         public bool Sounds { get; set; } = true;
         /// <summary>Which sound each event makes (event name to sound name); events not here get the piano.</summary>
@@ -63,7 +64,7 @@ namespace TailRemote
         public string ResumeState { get; set; } = "";
 
         private static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
-        private static string FilePath => Path.Combine(Dir, "settings.json");
+        internal static string FilePath => Path.Combine(Dir, "settings.json");
         // Save() writes here first, then atomically replaces FilePath, so a crash or power loss
         // mid-write can never leave a half-written settings.json as the live file.
         private static string TempPath => FilePath + ".tmp";

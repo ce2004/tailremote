@@ -1,3 +1,20 @@
+2.0.0
+New feature: a menu bar, and nothing else. The window is blank until you press Alt; then Right Arrow moves between File, Clipboard, Settings and About, and Down Arrow goes through each. Alt then Enter connects (or starts hosting).
+New feature: the address, port and passwords are File menu items that say what they are set to. Enter opens a small box to change one, with Show password for passwords. If one is missing or wrong when you connect, its box opens by itself and says what is wrong.
+New feature: Enter on a setting turns it on or off and says checked or unchecked, and the menu stays open so you can change several in a row. Escape goes back. Choices like Sound quality and Output device are submenus that say the current choice in their name.
+New feature: Send the clipboard, Send files and Send a folder have keys that work anywhere in the window: Control B, Control I and Control T.
+New feature: when the PC you are controlling updates TailRemote, your PC says "The remote PC is updating TailRemote to version" and the new version, instead of "the connection was forcibly closed", waits quietly, and says when it is back on the new version. The same goes for the TailRemote service updating itself, a restart, Windows shutting down, and stopping hosting.
+New feature: File, Update the remote PC. It updates TailRemote on the PC you control to this PC's version, without taking control or opening its window, and works for the TailRemote service too. When you connect to a PC with an older TailRemote, you are told once.
+New feature: Clipboard, Get files from the remote PC (Control G). Browse the remote PC's folders and drives: Enter opens a folder, Backspace goes up, Space checks files and folders, and Get brings them to your received files folder, with the same progress and resuming as Send files.
+New feature: File, Remote PC info (Control Shift I): its name, Windows version, who is signed in, how long it has been on, how busy the processor is, memory, battery, free disk space, its TailRemote version and who is connected. Refresh asks again.
+New feature: an About menu. Check for updates is there now, with View the changelog (Shift F1) and Read the guide (F1), which open in a list you go through with the arrows, a line each; Control Down and Control Up jump to the next or last version or section, and Control C copies a line. Also Keyboard shortcuts, About TailRemote (version, where it runs from, where settings and received files are), Licences and credits, Open the TailRemote website, Report a problem on GitHub, and Open the log file.
+New feature: Control 1 to 9 connect straight to saved PC 1 to 9, leaving the one you are on. The Saved PCs menu shows each one's key.
+New feature: Settings, Announce when the sound quality changes. When it is on, you hear "Sound lowered to 128 kilobits" when the connection struggles and "Sound back to full quality" when it recovers.
+Changed: an update now downloads while hosting and the connection carry on, so the remote PC is only gone for the few seconds the restart takes.
+Changed: TailRemote.exe is less than half its old size, 31 MB instead of 75: the parts of .NET it never uses are left out.
+Changed: when a connection really does break, it is said in plain words, like "the remote PC's TailRemote closed suddenly, or the network dropped", instead of Windows' error text.
+Changed: every PC controlling a host hears that it is restarting, not just the one that asked.
+
 1.8.27
 Bug fixed: turning on Run as a Windows service skipped the listen-only password's own checks (long enough, and different from the main password), so a weak or duplicate listen-only password could reach the service unchecked. It is checked the same way everywhere now.
 Bug fixed: the service's own update channel accepted a request from any signed-in account on the PC, not just an administrator, letting any local account force an update and drop every connection. Only administrators and the system itself can do that now.

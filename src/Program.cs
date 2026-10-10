@@ -492,6 +492,50 @@ namespace TailRemote
             for (int i = 0; i < 60 && c.AudioPingMs < 0; i++) System.Threading.Thread.Sleep(50);
             if (c.AudioPingMs < 0) return Fail("the audio ping was never measured");
             lossless += " | audio ping " + c.AudioPingMs + " ms";
+
+            // The remote PC from the controlling one: its version, a folder, its info, getting a file, asking it to update.
+            if (c.HostVersion != Updater.Current || !c.CanRemoteTools) return Fail("remote tools: the host said version " + c.HostVersion);
+            string listing = c.ListFolderAsync(Path.Combine(dir, "src")).GetAwaiter().GetResult();
+            if (!listing.Contains("\tloose file.bin\t")) return Fail("remote folder listing: " + listing);
+            if (!c.ListFolderAsync("").GetAwaiter().GetResult().Contains("D\t")) return Fail("remote drives were not listed");
+            string info = c.RequestInfoAsync().GetAwaiter().GetResult();
+            if (!info.Contains("Name: " + Environment.MachineName) || !info.Contains("TailRemote: " + Updater.Current)) return Fail("remote info: " + info);
+            FileChannel.DownloadsOverride = Path.Combine(dir, "got"); // never the real Downloads
+            FileChannel.Transfer? fetched = null;
+            c.TransferProgress += t => { if (t.Finished && !t.Outgoing && !t.Clipboard) fetched = t; };
+            c.Fetch(new[] { loose });
+            for (int i = 0; i < 300 && fetched == null; i++) System.Threading.Thread.Sleep(20);
+            string got = Path.Combine(dir, "got", "loose file.bin");
+            if (fetched == null || fetched.Failed || !File.Exists(got) || !File.ReadAllBytes(got).AsSpan().SequenceEqual(content))
+                return Fail("get files from the remote PC: " + (fetched?.Result ?? "nothing arrived"));
+            c.RequestUpdate(new Version(99, 0, 0));
+            for (int i = 0; i < 100 && !log.Any(l => l.Contains("cannot update itself")); i++) System.Threading.Thread.Sleep(20);
+            if (!log.Any(l => l.Contains("cannot update itself"))) return Fail("the update request got no answer");
+            lossless += " | remote folders, info, get files, update answer";
+
+            // A host that updates says so: the controlling PC reports the update, never a broken connection.
+            string? goneWhy = null;
+            c.Disconnected += why => goneWhy = why;
+            host.Leave(Protocol.LeavingUpdating, "9.9.9");
+            host.Dispose();
+            for (int i = 0; i < 60 && goneWhy == null; i++) System.Threading.Thread.Sleep(50);
+            if (goneWhy != "The remote PC is updating TailRemote to version 9.9.9." || c.Leaving != Protocol.LeavingUpdating)
+                return Fail("updating host: the controller said " + (goneWhy ?? "nothing"));
+            lossless += " | update goodbye";
+
+            // The window and its menu bar still build in the trimmed exe (never shown, so nothing is saved).
+            using (var form = new MainForm(false, false, false))
+            {
+                form.CreateControl();
+                int items = 0;
+                void Count(ToolStripItemCollection list) { foreach (ToolStripItem i in list) { items++; if (i is ToolStripMenuItem m) Count(m.DropDownItems); } }
+                if (form.MainMenuStrip == null) return Fail("the window has no menu bar");
+                Count(form.MainMenuStrip.Items);
+                if (items < 30) return Fail("the menu bar has only " + items + " items");
+                lossless += " | window with " + items + " menu items";
+                if (!AboutMenu.Resource("CHANGES.txt").Split('\n').Any(l => l.Trim() == Updater.Current.ToString()) || AboutMenu.Resource("README.txt").Length == 0)
+                    return Fail("the changelog inside TailRemote has no section for " + Updater.Current + ", or the guide is missing");
+            }
             Directory.Delete(dir, true);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + lossless + CableReport());
             return 0;

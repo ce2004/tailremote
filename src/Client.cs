@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace TailRemote
 {
@@ -25,6 +26,10 @@ namespace TailRemote
         private FileChannel? _files;
         private WlanStreaming? _wifi;
         private uint _peerFeatures;
+
+        /// <summary>Why the host said it is going away (Protocol.Leaving*), or 0; and the detail (the new version when updating).</summary>
+        public byte Leaving { get; private set; }
+        public string LeavingDetail { get; private set; } = "";
 
         public event Action<string>? Status;
         public event Action<string>? Disconnected;
@@ -318,6 +323,15 @@ namespace TailRemote
         private void Close(string? why)
         {
             if (Interlocked.Exchange(ref _closing, 1) == 1) return;
+            // The host said why it is going: that, not how the socket happened to break.
+            if (why != null) why = Leaving switch
+            {
+                Protocol.LeavingUpdating => "The remote PC is updating TailRemote" + (LeavingDetail.Length > 0 ? " to version " + LeavingDetail : "") + ".",
+                Protocol.LeavingRestarting => "The remote PC is restarting.",
+                Protocol.LeavingShutdown => "The remote PC is shutting down or restarting.",
+                Protocol.LeavingStopped => "The remote PC stopped hosting.",
+                _ => why,
+            };
             DiagLog.Write("client: connection closed" + (why != null ? ": " + why : " by this PC"));
             _closed = true;
             _toSend.Release();
@@ -409,6 +423,46 @@ namespace TailRemote
 
         public bool CanRestart => !ListenOnly && (_peerFeatures & Protocol.FeatureRestart) != 0;
 
+        /// <summary>The host's TailRemote version (from its features), or null until it has said.</summary>
+        public Version? HostVersion { get; private set; }
+
+        public bool CanRemoteTools => !ListenOnly && (_peerFeatures & Protocol.FeatureRemoteTools) != 0;
+
+        /// <summary>Asks the host to update TailRemote to this version (it answers with a message).</summary>
+        public void RequestUpdate(Version v) => Write(Protocol.TextMessage(Protocol.UpdateTo, v.ToString()));
+
+        private readonly ConcurrentDictionary<uint, TaskCompletionSource<string>> _folderRequests = new();
+        private int _nextRequest;
+        private TaskCompletionSource<string>? _infoRequest;
+
+        /// <summary>A folder's contents on the host (see RemoteTools.ListFolder), or "" for the drives. Fails after 15 seconds.</summary>
+        public async System.Threading.Tasks.Task<string> ListFolderAsync(string path)
+        {
+            uint id = (uint)Interlocked.Increment(ref _nextRequest);
+            var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _folderRequests[id] = wait;
+            byte[] p = System.Text.Encoding.UTF8.GetBytes(path);
+            byte[] m = new byte[5 + p.Length];
+            m[0] = Protocol.ListFolder;
+            BitConverter.TryWriteBytes(m.AsSpan(1), id);
+            p.CopyTo(m, 5);
+            Write(m);
+            try { return await wait.Task.WaitAsync(TimeSpan.FromSeconds(15)); }
+            finally { _folderRequests.TryRemove(id, out _); }
+        }
+
+        /// <summary>Asks the host to send these files and folders here, like Send files from there.</summary>
+        public void Fetch(IEnumerable<string> paths) => Write(Protocol.TextMessage(Protocol.Fetch, string.Join('\n', paths)));
+
+        /// <summary>About the host PC (RemoteTools.Info). Fails after 15 seconds.</summary>
+        public System.Threading.Tasks.Task<string> RequestInfoAsync()
+        {
+            var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Interlocked.Exchange(ref _infoRequest, wait)?.TrySetCanceled();
+            Write(stackalloc byte[] { Protocol.InfoRequest });
+            return wait.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        }
+
         public bool CanSecureAttention => !ListenOnly && (_peerFeatures & Protocol.FeatureSecureAttention) != 0;
 
         /// <summary>Asks the host to send Ctrl+Alt+Del (only a host running as the service can).</summary>
@@ -441,10 +495,27 @@ namespace TailRemote
                         _lastPong = Environment.TickCount64;
                     }
                     else if (m.Length >= 1 && m[0] == Protocol.Message)
+                    {
+                        Leaving = 0; // still here after all (a restart that failed says so this way)
                         Status?.Invoke("Host: " + System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
+                    }
+                    else if (m.Length >= 5 && m[0] == Protocol.FolderList)
+                    {
+                        uint id = BitConverter.ToUInt32(m, 1);
+                        if (_folderRequests.TryRemove(id, out var wait)) wait.TrySetResult(System.Text.Encoding.UTF8.GetString(m, 5, m.Length - 5));
+                    }
+                    else if (m.Length >= 1 && m[0] == Protocol.Info)
+                        Interlocked.Exchange(ref _infoRequest, null)?.TrySetResult(System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1));
+                    else if (m.Length >= 2 && m[0] == Protocol.Leaving)
+                    {
+                        LeavingDetail = System.Text.Encoding.UTF8.GetString(m, 2, m.Length - 2);
+                        Leaving = m[1];
+                        DiagLog.Write("client: host is leaving, reason " + m[1] + " " + LeavingDetail);
+                    }
                     else if (m.Length >= 5 && m[0] == Protocol.Features)
                     {
                         _peerFeatures = BitConverter.ToUInt32(m, 1);
+                        HostVersion = Protocol.FeaturesVersion(m);
                         DiagLog.Write("client: host features " + _peerFeatures + (ListenOnly ? ", listen only" : ", control"));
                     }
                     // Anything else is from a newer version: ignore it.
@@ -452,8 +523,22 @@ namespace TailRemote
             }
             catch (Exception e)
             {
-                if (!_closed) Close("Disconnected: " + (e is System.IO.EndOfStreamException ? "the host closed the connection." : e.Message));
+                if (!_closed) Close("Disconnected: " + Plain(e));
             }
+        }
+
+        /// <summary>Why the connection broke, in words, instead of Windows' "An existing connection was forcibly closed by the remote host".</summary>
+        private static string Plain(Exception e)
+        {
+            if (e is System.IO.EndOfStreamException) return "the remote PC closed the connection.";
+            var socket = e as SocketException ?? e.InnerException as SocketException;
+            return socket?.SocketErrorCode switch
+            {
+                SocketError.ConnectionReset or SocketError.ConnectionAborted => "the remote PC's TailRemote closed suddenly, or the network dropped.",
+                SocketError.TimedOut => "the remote PC stopped answering.",
+                SocketError.NetworkDown or SocketError.NetworkUnreachable or SocketError.HostUnreachable => "this PC lost its network connection.",
+                _ => e.Message,
+            };
         }
 
         // ---- Receiving audio ----

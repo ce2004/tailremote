@@ -66,15 +66,20 @@ namespace TailRemote
             _host.ClipboardReceived += text => { if (!link.Text(text)) agent.Text(text); };
             _host.ClipboardFilesReceived += paths => { if (!link.Files(paths)) agent.Files(paths); };
             _host.TransferProgress += t => link.Transfer(t);
+            _host.UpdateRequested += ServiceHost.UpdateFor;
             ServiceHost.Log("Hosting on port " + cfg.Port + ", from the service.");
             // Audio settings and device names are never touched here: only Set up audio device, when pressed.
         }
 
-        public static void StopHosting()
+        public static void StopHosting(byte why = Protocol.LeavingStopped)
         {
             _stopping = true;
+            _host?.Leave(why);
             _host?.Dispose();
         }
+
+        /// <summary>The service is about to restart into a new version: the connected PCs wait for it quietly.</summary>
+        public static void LeaveForUpdate(string version) => _host?.Leave(Protocol.LeavingUpdating, version);
 
         /// <summary>Only a service may send Control Alt Delete; this is the service.</summary>
         private static bool SendSecureAttention()

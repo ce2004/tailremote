@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>1.8.27</Version>
+    <Version>2.0.0</Version>
     <!-- ARM64 by default; "dotnet publish -r win-x64" builds the x64 copy. -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
@@ -22,14 +22,33 @@
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <PublishTrimmed>false</PublishTrimmed>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- Size: the bundled .NET runtime is most of the exe. Trimming drops the parts TailRemote
+         never uses (75 MB down to about 31), and ReadyToRun is off: it nearly doubled the code
+         for a slightly quicker start. WinForms is not officially trim-safe, so the self-test and
+         the window are checked after every change to this. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <PublishReadyToRun>false</PublishReadyToRun>
     <DebugType>embedded</DebugType>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="src\**\*.cs" />
+  </ItemGroup>
+
+  <!-- Trimming keeps all of TailRemote's own code: its Windows audio and COM declarations are only reached by Windows itself. -->
+  <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
+    <TrimmerRootAssembly Include="TailRemote" />
+    <!-- WinForms reaches much of itself through COM (drag and drop, accessibility): trimmed, the window crashed on opening. -->
+    <TrimmerRootAssembly Include="System.Windows.Forms" />
+    <TrimmerRootAssembly Include="System.Windows.Forms.Primitives" />
+    <TrimmerRootAssembly Include="System.Drawing.Common" />
+    <TrimmerRootAssembly Include="Accessibility" />
   </ItemGroup>
 
   <!-- The NVDA controller client must match this process's architecture. -->
@@ -51,6 +70,13 @@
     </EmbeddedResource>
     <EmbeddedResource Include="native\Sounds-CREDITS.txt">
       <LogicalName>Sounds-CREDITS.txt</LogicalName>
+    </EmbeddedResource>
+    <!-- About, View the changelog and Read the guide show these. -->
+    <EmbeddedResource Include="CHANGES.txt">
+      <LogicalName>CHANGES.txt</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="README.txt">
+      <LogicalName>README.txt</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="native\Concentus-LICENSE.txt">
       <LogicalName>Concentus-LICENSE.txt</LogicalName>

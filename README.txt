@@ -7,57 +7,72 @@ Files
 
 On the PC you want to control (the host)
 1. Either install Tailscale on both PCs and sign in to the same tailnet, or use the host's internet address.
-2. Run TailRemote, choose Mode: Host, type a password, press Start hosting.
-3. A cloud PC usually has no sound card. TailRemote notices and sets up an audio device called TailRemote: approve the administrator prompt, then press Install Driver in VB-Cable's window. A progress bar shows the rest. You can also press Set up audio device (Alt D) at any time, and Remove audio device (Alt V) takes it off again.
-4. If Windows Firewall would keep other PCs out, TailRemote offers to open the port. Port editor (Alt E) lists every port TailRemote has used and opens or closes them.
-5. Check Start hosting when Windows starts. It asks for administrator once, then starts hosting at every sign-in as administrator, so keys also reach administrator windows and the port is opened by itself.
+2. Run TailRemote. In the File menu, choose Mode, Host, set Password, then choose Start hosting.
+3. A cloud PC usually has no sound card. TailRemote notices and sets up an audio device called TailRemote: approve the administrator prompt, then press Install Driver in VB-Cable's window. A progress bar shows the rest. You can also use Settings, Set up audio device at any time, and Settings, Remove audio device takes it off again.
+4. If Windows Firewall would keep other PCs out, TailRemote offers to open the port. Settings, Port editor lists every port TailRemote has used and opens or closes them.
+5. Turn on Settings, Start hosting when Windows starts. It asks for administrator once, then starts hosting at every sign-in as administrator, so keys also reach administrator windows and the port is opened by itself.
 
 On your PC
-1. Run TailRemote, choose Mode: Control another PC.
-2. Type the host's Tailscale name, 100 address or internet address, the same port and password, and press Connect.
+1. Run TailRemote. In the File menu, choose Mode, Control another PC.
+2. In the File menu, set Address to the host's Tailscale name, 100 address or internet address, and the same Port and Password. Then choose Connect, the first item in the File menu.
 3. In the TailRemote window, press Control Shift Enter to control the remote PC. Every key goes there: Windows, Alt Tab, your NVDA key, everything.
 4. Press Control Shift Enter again to come back to this PC.
+
+The menus
+- The window is blank: everything is in the menu bar. Alt, then Enter, is Connect (or Start hosting).
+- Press Alt, then Right Arrow to move between File, Clipboard and Settings, and Down Arrow through each menu. Escape goes back.
+- On a setting, Enter turns it on or off and says checked or unchecked. The menu stays open, so you can change several in a row. Choices such as Sound quality are submenus: their name says the current choice, and Enter on another one picks it.
+- Address, Port and the passwords are menu items that say what they are set to (passwords only say set or not set). Enter opens a small box to change them, with Show password for passwords. If something is missing or wrong when you connect, that box opens by itself and says what is wrong.
+- File: Connect or Disconnect (Start or Stop hosting), Control remote PC, Restart remote PC, Streaming (Enter says it again), Mode, Saved PCs, Address, Port, Password, Listen-only password, Copy this PC's IP address (it shows the addresses), Save this PC, Forget the chosen saved PC and Exit.
+- Clipboard: Files (what is moving right now; Enter says it again, and while several files move it opens a line per file), Send the clipboard (Control B), Send files (Control I), Send a folder (Control T), Stop the file transfer, and Pick where received files go.
+- About: Check for updates, View the changelog (Shift F1), Read the guide (F1), Keyboard shortcuts, About TailRemote, Licences and credits, Open the TailRemote website, Report a problem on GitHub, and Open the log file. The changelog, guide and the rest open as a list: the arrows go a line at a time, Control Down and Control Up jump between versions or sections, and Control C copies a line.
+- Settings: Sound quality, Output device, Capture sound from, Catch up by fast-forwarding, Sounds, Start hosting when Windows starts, Run as a Windows service, Port editor, Set up audio device, Remove audio device and Enable logging.
 
 Features
 - Control Shift Enter in the TailRemote window switches between the remote PC and this one.
 - Control Alt End sends Control Alt Delete to the remote PC, when it runs TailRemote as a service.
-- Send the clipboard (Alt B) sends what is on this PC's clipboard to the other PC's clipboard: text, or files and folders you copied. Paste it there with Control V. Send files (Alt I) sends files you choose to Downloads, TailRemote on the other PC, never over anything already there. Send a folder and everything in it (Alt T) does the same for a whole folder. Each file moving has its own progress bar. Both PCs have both buttons; nothing is ever sent by itself.
-- Pick where received files go (Alt K) chooses the folder files from the other PC are saved in (Downloads, TailRemote at first). A transfer interrupted by a dropped connection or Disconnect carries on by itself when you connect again; whatever arrived is always kept.
-- When hosting, This PC's IP address (Alt R) shows the addresses to connect to, and Copy IP address (Alt Y) copies the home network one (or Tailscale's).
-- The Files line (right after Streaming) shows what is being sent or received, how far along, the speed and the time left, followed by the progress bar and Stop the file transfer.
-- Sounds for connecting, clipboard and files (Alt L): a sound for each event. Default always plays the event's own tune on the piano; Random sound plays anything; or choose one of the instruments (a real Steinway, harp, glockenspiel, marimba, xylophone, pizzicato strings, classic phone and more) or Android's notification sounds, and the key (Alt K). TailRemote.exe --licence writes where the sounds come from.
-- Restart remote PC and reconnect (Alt N) restarts the remote PC and reconnects when it is back.
-- Saved PCs (Alt S): Save this PC (Alt H) remembers the address, port and password; Forget saved PC (Alt F) removes one.
+- Send the clipboard (Control B) sends what is on this PC's clipboard to the other PC's clipboard: text, or files and folders you copied. Paste it there with Control V. Send files (Control I) sends files you choose to Downloads, TailRemote on the other PC, never over anything already there. Send a folder and everything in it (Control T) does the same for a whole folder. Each file moving has its own progress bar. Both PCs have the Clipboard menu; nothing is ever sent by itself.
+- Clipboard, Pick where received files go chooses the folder files from the other PC are saved in (Downloads, TailRemote at first). A transfer interrupted by a dropped connection or Disconnect carries on by itself when you connect again; whatever arrived is always kept.
+- When hosting, File, Copy this PC's IP address shows the addresses to connect to, and Enter copies the home network one (or Tailscale's).
+- Clipboard, Files shows what is being sent or received, how far along, the speed and the time left. Clipboard, Stop the file transfer ends it.
+- Settings, Sounds for connecting, clipboard and files: a sound for each event. Default always plays the event's own tune on the piano; Random sound plays anything; or choose one of the instruments (a real Steinway, harp, glockenspiel, marimba, xylophone, pizzicato strings, classic phone and more) or Android's notification sounds, and the key (Alt K). TailRemote.exe --licence writes where the sounds come from.
+- File, Update the remote PC updates TailRemote on the PC you control to this PC's version (it must be the newest on GitHub). It works for the TailRemote service too. The remote PC keeps going while it downloads, then you hear it is updating and when it is back.
+- Clipboard, Get files from the remote PC (Control G) lists the remote PC's usual folders and drives. Enter opens a folder, Backspace goes up, Space checks files and folders, and Get the checked files and folders (Alt G) brings them to your received files folder, or the one you are on if none is checked.
+- File, Remote PC info (Control Shift I) shows the remote PC's name, Windows version, who is signed in, how long it has been on, processor, memory, battery, free disk space, TailRemote version and who is connected, one line each.
+- Control 1 to 9 connect to saved PC 1 to 9 straight away, leaving the one you are on.
+- Settings, Announce when the sound quality changes: says when the sound is lowered because the connection struggles, and when it is back to full quality.
+- File, Restart remote PC and reconnect restarts the remote PC and reconnects when it is back.
+- File, Saved PCs: choose one to fill in its address, port and password. File, Save this PC remembers the address, port and password; File, Forget the chosen saved PC removes one.
 - Listen-only password, in Host mode: anyone who connects with it hears the PC but cannot control it. Up to 100 at once. Each listener uses about 0.7 megabits per second of the host's upload while sound plays.
 
 Running the host as a Windows service
-- In Host mode, check Run as a Windows service (Alt C). It asks for administrator permission once.
+- In Host mode, turn on Settings, Run as a Windows service. It asks for administrator permission once.
 - The service starts with Windows, before anyone signs in, and has full system access. You can use the lock screen, sign in, answer administrator prompts and send Control Alt Delete with Control Alt End.
 - Anyone who knows the TailRemote password gets that access too, so use a long password.
-- While the service runs, the hosting button becomes Apply settings to the service. Press it after changing the port or passwords.
+- While the service runs, Start hosting in the File menu becomes Apply settings to the service. Press it after changing the port or passwords.
 - The service runs its own copy from Program Files. It never updates by itself: when you update TailRemote on that PC with Check for updates, the service follows straight away to the same version, without asking.
-- Uncheck Run as a Windows service to remove it completely.
+- Turn off Settings, Run as a Windows service to remove it completely.
 
-Settings in the main window
-- Enable logging (Alt G): writes TailRemote-log.txt next to TailRemote, with a line every second about the sound on that PC. Turn it on on both PCs and send both files when something sounds wrong. What you type is never logged.
-- Capture sound from (Host mode, Alt A): which output's sound the other PCs hear. Windows default follows whatever the default output is.
+More settings
+- Enable logging: writes TailRemote-log.txt next to TailRemote, with a line every second about the sound on that PC. Turn it on on both PCs and send both files when something sounds wrong. What you type is never logged.
+- Capture sound from (Host mode): which output's sound the other PCs hear. Windows default follows whatever the default output is.
 - Output device: where the remote PC's sound plays here.
 
 How it keeps delay down
 - Sound is Opus at 48 kHz stereo, up to 510 kilobits per second, in 5 millisecond packets over UDP, never waited for or resent. Opus adds about 2.5 milliseconds.
-- Sound quality (Alt Q, Control mode): Variable follows the connection, lowering the bitrate until the sound fits, down to 6 kilobits per second, one step at most every three quarters of a second. Or lock it to one bitrate and it never changes. Above 16 kilobits per second it is tuned for music, from 16 down for speech. The lowest steps send longer packets (up to 60 milliseconds), so they fit even dial-up, at the cost of more delay.
-- The Streaming line (Tab) says the bitrate, whether it is locked or variable, and the audio delay.
+- Sound quality (Control mode): Variable follows the connection, lowering the bitrate until the sound fits, down to 6 kilobits per second, one step at most every three quarters of a second. Or lock it to one bitrate and it never changes. Above 16 kilobits per second it is tuned for music, from 16 down for speech. The lowest steps send longer packets (up to 60 milliseconds), so they fit even dial-up, at the cost of more delay.
+- File, Streaming says the bitrate, whether it is locked or variable, and the audio delay.
 - It always heads back to live: nothing old is ever played. The buffer covers how unevenly packets arrived over the last 3 seconds, never more than 40 milliseconds; a stall never raises it, and whatever piles up behind a stall is skipped the moment it lands.
-- Catch up by fast-forwarding (Alt Y, Control mode): instead of skipping, the sound plays at 1.5x, 2x or 4x at its own pitch until it has caught up.
+- Catch up by fast-forwarding (Control mode): instead of skipping, the sound plays at 1.5x, 2x or 4x at its own pitch until it has caught up.
 - Packets that arrive out of order are put back in order. A packet that never comes is filled in by Opus, smoothly.
 - The pitch never changes.
 - Keys go over TCP with no batching, so each key is sent the moment it is pressed.
 - The window title shows the ping and the total audio delay. Press NVDA T to hear it. Run tailscale ping with the host's name: if it says via DERP, the connection is relayed and slower; a direct connection is best.
 
 Updates
-- Check for updates (Alt U) gets the newest version from github.com/ce2004/tailremote, checks the download, swaps it in and restarts. A host restarts hosting; a connected PC reconnects.
-- To update the cloud PC, control it, switch to its TailRemote window and press Check for updates there. Your side reconnects by itself when it comes back.
-- If the connection drops for any reason, TailRemote keeps trying every 2 seconds until it is back or you press Stop reconnecting.
+- About, Check for updates gets the newest version from github.com/ce2004/tailremote, checks the download, swaps it in and restarts. A host keeps hosting while it downloads, then restarts hosting; a connected PC reconnects.
+- To update the cloud PC, use File, Update the remote PC from your side, or control it and use Check for updates there. Your side says the remote PC is updating, not that the connection broke, and says when it is back on the new version. A restart, a shutdown or stopping hosting are said the same way.
+- If the connection drops for any reason, TailRemote keeps trying every second until it is back or you press Disconnect.
 
 Security
 - Both PCs prove they know the password before anything is sent, and wrong passwords are slowed down.
@@ -77,7 +92,7 @@ About the audio device
 - If Windows needs a restart after installing it, restart and start hosting: TailRemote finishes the setup by itself.
 
 Building
-- build.bat builds bin\arm64 quickly, in seconds, without the release optimisations. build.bat x64 does the same for x64. build.bat full builds both exactly as a release is built.
+- build.bat builds this PC's own kind (arm64 or x64) quickly, in seconds, without trimming or compression. build.bat arm64 or build.bat x64 picks one. build.bat full builds both exactly as a release is built.
 - If TailRemote is running from bin, the new build replaces it, closes the old copy and restarts it, still hosting or connected.
 - TailRemote.exe --selftest runs a host and client on this PC and writes the result to tailremote-selftest.txt in the temp folder.
 - TailRemote.exe --licence writes the NVDA controller client licence beside the exe.

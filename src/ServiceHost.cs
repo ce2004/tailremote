@@ -270,6 +270,7 @@ namespace TailRemote
             {
                 case NativeService.SERVICE_CONTROL_STOP:
                 case NativeService.SERVICE_CONTROL_SHUTDOWN:
+                    if (control == NativeService.SERVICE_CONTROL_SHUTDOWN) _shuttingDown = true;
                     Report(NativeService.SERVICE_STOP_PENDING);
                     Stop.Set();
                     break;
@@ -301,6 +302,7 @@ namespace TailRemote
                 {
                     // A new copy is in place: close the agent and leave without saying
                     // "stopped", so Windows' recovery setting starts the new copy.
+                    Agent.LeaveForUpdate(_restartingTo);
                     try { if (agent != null && !agent.HasExited) agent.Kill(); } catch { }
                     Log("Restarting into the new version.");
                     Environment.Exit(1);
@@ -323,7 +325,7 @@ namespace TailRemote
             }
             try { if (agent != null && !agent.HasExited) agent.Kill(); } catch { }
             agent?.Dispose();
-            Agent.StopHosting();
+            Agent.StopHosting(_shuttingDown ? Protocol.LeavingShutdown : Protocol.LeavingStopped);
             Log("Service stopped.");
             Report(NativeService.SERVICE_STOPPED);
         }
@@ -365,6 +367,8 @@ namespace TailRemote
         private const string UpdatePipeName = "TailRemoteUpdate";
         private static readonly AutoResetEvent CheckNow = new(false);
         private static volatile bool Restarting;
+        private static volatile string _restartingTo = "";
+        private static volatile bool _shuttingDown;
 
         /// <summary>
         /// Never on its own: Conner chooses when to update. When TailRemote on
@@ -377,22 +381,49 @@ namespace TailRemote
         {
             while (WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }) == 1)
             {
-                try { TryUpdate(); } catch (Exception e) { Log("Update failed: " + e.Message); }
+                // A controlling PC's request (File, Update the remote PC) is answered either way.
+                var reply = Interlocked.Exchange(ref _requestReply, null);
+                var requested = Interlocked.Exchange(ref _requested, null);
+                try { TryUpdate(requested, reply); }
+                catch (Exception e) { Log("Update failed: " + e.Message); reply?.Invoke("The remote PC could not update: " + e.Message); }
                 if (Restarting) { Wake.Set(); return; }
             }
         }
 
-        private static void TryUpdate()
+        private static Version? _requested;
+        private static Action<string>? _requestReply;
+
+        /// <summary>
+        /// A controlling PC chose File, Update the remote PC: update to that version, which must be
+        /// GitHub's newest. That is someone choosing to update, so the window's version is no limit.
+        /// </summary>
+        public static void UpdateFor(string version, Action<string> reply)
+        {
+            if (!Version.TryParse(version, out var want)) return;
+            if (want <= Updater.Current) { reply("The remote PC already has TailRemote " + Updater.Current + "."); return; }
+            if (Restarting) { reply("TailRemote on the remote PC is already updating."); return; }
+            Interlocked.Exchange(ref _requestReply, reply)?.Invoke("Another controlling PC asked for an update at the same time; it is going ahead.");
+            _requested = want;
+            CheckNow.Set();
+        }
+
+        private static void TryUpdate(Version? requested, Action<string>? reply)
         {
             var r = Updater.CheckAsync().GetAwaiter().GetResult();
+            if (requested != null && r?.Version != requested)
+            {
+                reply?.Invoke("The remote PC did not update: the newest TailRemote on GitHub is " + (r?.Version ?? Updater.Current) + ", not " + requested + ".");
+                return;
+            }
             if (r == null) return;
             var chosen = WindowVersion();
-            if (chosen != null && r.Version > chosen)
+            if (requested == null && chosen != null && r.Version > chosen)
             {
                 Log("GitHub has " + r.Version + ", but TailRemote on this PC is " + chosen + "; staying in step with it.");
                 return;
             }
             Log("Updating the service to version " + r.Version + ".");
+            reply?.Invoke("The remote PC's TailRemote service is downloading " + r.Version + ". Everything carries on until it is ready.");
             byte[] data;
             using (var h = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(10) })
             {
@@ -407,6 +438,7 @@ namespace TailRemote
             File.Move(exe, old);       // a running exe can be renamed, not overwritten
             try { File.Move(fresh, exe); }
             catch { File.Move(old, exe); throw; }
+            _restartingTo = r.Version.ToString();
             Restarting = true;
         }
 

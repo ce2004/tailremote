@@ -56,8 +56,13 @@ namespace TailRemote
             throw new InvalidOperationException("Version " + version + " has no " + AssetName + ".");
         }
 
-        /// <summary>Downloads, verifies and swaps in the new exe, then starts it with the given arguments.</summary>
-        public static async Task InstallAsync(Release r, string args)
+        /// <summary>
+        /// Downloads, verifies and swaps in the new exe, then starts it with the arguments
+        /// beforeStart returns. beforeStart runs once the new copy is in place, just before it
+        /// starts: hosting and the connection carry on through the whole download, and are let
+        /// go only then.
+        /// </summary>
+        public static async Task InstallAsync(Release r, Func<string> beforeStart)
         {
             string exe = Environment.ProcessPath!;
             string fresh = exe + ".new", old = exe + ".old";
@@ -91,6 +96,7 @@ namespace TailRemote
                 try { File.Delete(fresh); } catch { }
                 throw;
             }
+            string args = beforeStart();
             try
             {
                 Process.Start(new ProcessStartInfo(exe, args + " --after-update " + Environment.ProcessId) { UseShellExecute = false });
