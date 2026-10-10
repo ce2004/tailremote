@@ -555,8 +555,8 @@ namespace TailRemote
         {
             if (_client == null || _client.ListenOnly) { Say(_client == null ? "Connect first." : "Listeners cannot do that."); return; }
             Doing("getting the remote PC's clipboard");
-            _client.RequestClipboard();
-            Say("Asked the remote PC for its clipboard.");
+            // A single press speaks as before; a held or mashed key is throttled and the extras drop quietly.
+            if (_client.RequestClipboard()) Say("Asked the remote PC for its clipboard.");
         }
 
         private bool _picking;
@@ -1087,11 +1087,9 @@ namespace TailRemote
             var c = _client;
             if (c == null || c.ListenOnly) { Say("Connect first."); return; }
             if (!c.CanRestart) { Say("The remote PC's TailRemote is too old to restart it. Update it first."); return; }
-            var answer = MessageBox.Show(this,
-                "Restart the remote PC now? Programs there close as in a normal restart, and may ask to save first." + Environment.NewLine + Environment.NewLine +
-                "TailRemote reconnects when it is back. That only happens if the remote PC starts hosting by itself: turn on Start hosting when Windows starts there, or the service.",
-                "Restart remote PC", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (answer != DialogResult.Yes) return;
+            // A checkbox must be ticked before Restart turns on, so a reflexive Enter cannot restart the remote PC.
+            using (var dlg = new RestartConfirmForm())
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
             _expectRestart = true;
             c.RestartHost();
             Say("Asked the remote PC to restart.");
@@ -1758,7 +1756,7 @@ namespace TailRemote
                 string notes = r.Notes.Trim().Length > 0 ? r.Notes.Trim() : "No notes.";
                 var answer = MessageBox.Show(this, "Version " + r.Version + " is available. You have " + Updater.Current + "." +
                     Environment.NewLine + Environment.NewLine + notes + Environment.NewLine + Environment.NewLine + "Update now? TailRemote restarts and carries on where it was.",
-                    "TailRemote update", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                    "TailRemote update", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2); // default No: a stray Enter must not kick off an update + restart
                 if (answer != DialogResult.Yes) return;
                 Say("Downloading version " + r.Version + ". Everything carries on until it is ready.");
                 await InstallUpdate(r);
@@ -1855,7 +1853,7 @@ namespace TailRemote
                 "2. Move programs off the TailRemote device. Any program still using it is cut off." + Environment.NewLine +
                 "3. Remove VB-Cable completely, including its driver. If you use VB-Cable for anything else, that stops working too." + Environment.NewLine + Environment.NewLine +
                 "Windows asks for administrator permission first.";
-            if (MessageBox.Show(this, plan, "Remove audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            if (MessageBox.Show(this, plan, "Remove audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK) return; // default Cancel: removing the driver is destructive
             _audioSetup.Enabled = _audioRemove.Enabled = false;
             bool ok = await AudioSetup.RemoveElevatedAsync();
             Say(ok ? "The TailRemote audio device is removed." : "Removing the audio device did not finish.");
@@ -1874,7 +1872,8 @@ namespace TailRemote
                   "It uses this window's port and passwords, opens the port in Windows Firewall, and replaces Start hosting when Windows starts. Windows asks for administrator permission."
                 : "Remove the TailRemote service? This PC stops hosting until you start hosting here again. Windows asks for administrator permission.";
             if (MessageBox.Show(this, plan, want ? "Run as a Windows service" : "Remove the service", MessageBoxButtons.OKCancel,
-                    want ? MessageBoxIcon.Warning : MessageBoxIcon.Question) != DialogResult.OK
+                    want ? MessageBoxIcon.Warning : MessageBoxIcon.Question,
+                    want ? MessageBoxDefaultButton.Button1 : MessageBoxDefaultButton.Button2) != DialogResult.OK // removing defaults to Cancel; installing (what the user just asked for) keeps OK
                 || (want && (!CheckPassword() || !CheckPort(out _) || !CheckListenPassword())))
             {
                 SetServiceBox(!want);

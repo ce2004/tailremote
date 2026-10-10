@@ -1,3 +1,8 @@
+2.1.8
+Bug fixed: pressing Get the remote PC's clipboard many times quickly could make the app on the other PC stop responding. Rapid presses are now limited so it stays smooth.
+Changed: confirmation prompts that do something big, like restarting the remote PC or removing the audio device, now start on the safe choice, so a stray Enter cancels instead of confirming.
+New feature: restarting the remote PC now asks you to tick a box before the Restart button turns on, so it cannot happen by an accidental keypress.
+
 2.1.7
 New feature: Get the remote PC's clipboard. Press Control Shift B while connected and whatever is on the other PC's clipboard, text or files, lands on yours. You no longer have to open a window on that PC to send its clipboard back, and it works when that PC is hosting as a Windows service.
 Bug fixed: changing the output device while connected now switches the sound straight away, instead of only after you disconnect and reconnect.

@@ -50,6 +50,11 @@ namespace TailRemote
         public const byte InfoRequest = 11;  // the host answers with Info
         public const byte SpeedTestRequest = 12; // the host runs an internet speed test and answers with SpeedResult
         public const byte ClipboardRequest = 13; // the controller asks the host to send its clipboard here (text or files), like Send the clipboard but pulled
+        // A clipboard pull reads the clipboard and fans a transfer out to every controller; the host
+        // window's message pump drowns under the progress updates if the controller mashes or holds
+        // Ctrl+Shift+B. Both ends gate on this: the controller sends at most one pull this often, and
+        // the host coalesces any that still arrive closer together into one read + send.
+        public const long ClipboardPullThrottleMs = 500;
         // Either way
         public const byte Features = 0x40;   // u32 flags
         // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it

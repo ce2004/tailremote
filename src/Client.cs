@@ -514,15 +514,25 @@ namespace TailRemote
         /// <summary>Asks the host PC to restart.</summary>
         public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
 
+        private long _lastClipboardRequestAt = long.MinValue / 2;
+
         /// <summary>
         /// Asks the host to send its clipboard here (text or files), the pull that mirrors Send the
         /// clipboard. What comes back arrives on the file lanes like any other clipboard, through
         /// ClipboardReceived / ClipboardFilesReceived, and lands on this PC's clipboard. Not for listeners.
+        /// Returns false when it dropped the request (throttled): mashing or holding Ctrl+Shift+B would
+        /// otherwise flood the host with one clipboard read + fan-out per press. At most one pull every
+        /// half second goes out; extras are dropped quietly.
         /// </summary>
-        public void RequestClipboard()
+        public bool RequestClipboard()
         {
-            if (_closed || ListenOnly) return;
+            if (_closed || ListenOnly) return false;
+            long now = Environment.TickCount64;
+            long prev = Interlocked.Read(ref _lastClipboardRequestAt);
+            if (now - prev < Protocol.ClipboardPullThrottleMs) return false;
+            if (Interlocked.CompareExchange(ref _lastClipboardRequestAt, now, prev) != prev) return false;
             Write(stackalloc byte[] { Protocol.ClipboardRequest });
+            return true;
         }
 
         /// <summary>Sends clipboard text to the host's clipboard. Never waits. Not for listeners.</summary>

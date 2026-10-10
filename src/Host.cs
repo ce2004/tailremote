@@ -39,6 +39,9 @@ namespace TailRemote
         /// </summary>
         public event Action? ClipboardRequested;
 
+        // When the last clipboard pull was let through, for coalescing a flood of them (see ReadLoop).
+        private long _lastClipboardRequestAt = long.MinValue / 2;
+
         /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
         public Func<bool>? SecureAttention { get; init; }
 
@@ -712,7 +715,16 @@ namespace TailRemote
                         break;
                     case Protocol.ClipboardRequest when IsController(s):
                         // Only a controller may pull the clipboard; a listener never reaches here.
-                        ClipboardRequested?.Invoke();
+                        // Coalesce a flood of rapid pulls (a mashed or held Ctrl+Shift+B, or an old
+                        // controller with no throttle): each pull reads the clipboard and fans a
+                        // transfer out to every controller, and the host window's message pump drowns
+                        // under the progress updates. At most one goes through this often; the rest
+                        // drop, so many rapid requests become at most one clipboard send.
+                        long nowReq = Environment.TickCount64;
+                        long prevReq = Interlocked.Read(ref _lastClipboardRequestAt);
+                        if (nowReq - prevReq >= Protocol.ClipboardPullThrottleMs &&
+                            Interlocked.CompareExchange(ref _lastClipboardRequestAt, nowReq, prevReq) == prevReq)
+                            ClipboardRequested?.Invoke();
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);

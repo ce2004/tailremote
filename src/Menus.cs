@@ -273,6 +273,49 @@ namespace TailRemote
         }
     }
 
+    /// <summary>
+    /// The confirmation for restarting the remote PC: a checkbox must be ticked before the Restart
+    /// button turns on, so a reflexive Enter cannot restart the remote PC. There is deliberately no
+    /// AcceptButton, so even once the box is ticked, confirming takes a real press of Restart rather
+    /// than a stray Enter; Escape still cancels. Styled and made accessible like <see cref="TextForm"/>.
+    /// </summary>
+    internal sealed class RestartConfirmForm : Form
+    {
+        public RestartConfirmForm()
+        {
+            Text = "Restart remote PC";
+            Font = new System.Drawing.Font("Segoe UI", 10f);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MinimizeBox = MaximizeBox = ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(10), WrapContents = false };
+            var label = new Label
+            {
+                Text = "Restart the remote PC now? Programs there close as in a normal restart, and may ask to save first." + Environment.NewLine + Environment.NewLine +
+                       "TailRemote reconnects when it is back. That only happens if the remote PC starts hosting by itself: turn on Start hosting when Windows starts there, or the service.",
+                AutoSize = true,
+                MaximumSize = new System.Drawing.Size(360, 0),
+            };
+            var understand = new CheckBox { Text = "&I understand this will restart the remote PC", AutoSize = true, Checked = false };
+            understand.AccessibleName = "I understand this will restart the remote PC"; // read with the box so the stakes come through
+            var buttons = new FlowLayoutPanel { AutoSize = true };
+            var restart = new Button { Text = "&Restart", DialogResult = DialogResult.OK, AutoSize = true, Enabled = false };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
+            understand.CheckedChanged += (_, _) => restart.Enabled = understand.Checked; // Restart turns on only once the box is ticked
+            buttons.Controls.Add(restart);
+            buttons.Controls.Add(cancel);
+            flow.Controls.Add(label);
+            flow.Controls.Add(understand);
+            flow.Controls.Add(buttons);
+            Controls.Add(flow);
+            // Tab order follows the add order: checkbox, then Restart, then Cancel.
+            CancelButton = cancel; // Escape cancels; no AcceptButton, so Enter never confirms
+            Menus.FocusWhenShown(this, () => understand);
+        }
+    }
+
     /// <summary>A line of information in a menu (Streaming, Files): Enter says it again, the menu stays open.</summary>
     internal sealed class MenuStatus
     {
