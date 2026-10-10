@@ -36,7 +36,8 @@ namespace TailRemote
         private volatile float _packetMs = (float)Protocol.TickMs; // how long the packets are now
         private const double MarginMs = 2;
 
-        private readonly string? _deviceId;
+        private volatile string? _deviceId; // the chosen output; can change live via SetDevice
+        private volatile bool _deviceChanged; // SetDevice set a new _deviceId: reopen next cycle
         private readonly Action<string> _status;
         private volatile bool _stop;
         private readonly Thread _thread;
@@ -140,6 +141,18 @@ namespace TailRemote
             _lateCount = 0; _lateAt = 0; _coverMs = 0; _measured = false; _stallSince = 0; // the old connection's lateness must not size the new buffer
             _rideMs = 0; _rideNow = 0; _spikePeak = 0; _rideUntil = 0; _spikes.Clear();
             _packetMs = (float)Protocol.TickMs;
+        }
+
+        /// <summary>
+        /// Switches the output to another device while connected (Settings > Output device).
+        /// The render loop reopens on the new device at its next cycle, reusing the same reopen
+        /// path as default-device following, so the sound follows the new choice within a device
+        /// period or two rather than only on the next reconnect. Safe to call from the UI thread.
+        /// </summary>
+        public void SetDevice(string? deviceId)
+        {
+            _deviceId = deviceId;   // reference assignment, atomic; volatile so the render thread sees it
+            _deviceChanged = true;  // set after _deviceId so the loop reopens with the new value
         }
 
         /// <summary>Packets, lost and late since the last call: how the connection is coping.</summary>
@@ -397,6 +410,8 @@ namespace TailRemote
                         Fill(data, (int)avail, fmt);
                         render.ReleaseBuffer(avail, 0);
                     }
+
+                    if (_deviceChanged) { _deviceChanged = false; return; } // SetDevice: reopen on the new device
 
                     long now = Environment.TickCount64;
                     if (now - lastDeviceCheck > 1000)

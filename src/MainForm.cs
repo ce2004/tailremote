@@ -49,6 +49,7 @@ namespace TailRemote
         private readonly MenuItem _updateRemote = new("Update the remote P&C to this PC's version");
         private readonly MenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
         private readonly MenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
+        private readonly MenuItem _getClipboard = new("Get the remote PC's clip&board") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.B };
         private readonly MenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
         private readonly MenuItem _muteLocal = Menus.Check("&Mute the remote PC while you are not controlling it (it stays connected)");
         private readonly MenuItem _rideOut = Menus.Check("Ride out &Wi-Fi scans: when the sound keeps stalling, hold enough to cover it (a little more delay until it stops)");
@@ -129,7 +130,7 @@ namespace TailRemote
             var clip = new MenuItem("&Clipboard");
             clip.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _transferStatus.Item, _history, _sendClipboard, _sendFiles, _sendFolder, _getFiles, _transferStop, new ToolStripSeparator(), _pickReceiveFolder,
+                _transferStatus.Item, _history, _sendClipboard, _sendFiles, _sendFolder, _getFiles, _getClipboard, _transferStop, new ToolStripSeparator(), _pickReceiveFolder,
             });
             var set = new MenuItem("&Settings");
             set.DropDownItems.AddRange(new ToolStripItem[]
@@ -188,6 +189,14 @@ namespace TailRemote
             foreach (var d in Wasapi.OutputDevices()) { _devices.Add(d); _device.Add(d.Name); }
             int sel = _devices.FindIndex(d => d.Id == _settings.OutputDevice);
             _device.SelectedIndex = sel < 0 ? 0 : sel;
+            // Wired after the initial SelectedIndex so it fires only on the person's choice:
+            // save it and, if a player exists, switch it live rather than only on reconnect.
+            _device.SelectedIndexChanged += (_, _) =>
+            {
+                SaveSettings();
+                string device = _devices[Math.Max(0, _device.SelectedIndex)].Id;
+                if (_player != null) { _player.SetDevice(device); _playerDevice = device; }
+            };
             _fillingCapture = true;
             foreach (var d in _devices) _captureFrom.Add(d.Name);
             int cap = _devices.FindIndex(d => d.Id == _settings.CaptureDevice);
@@ -220,6 +229,7 @@ namespace TailRemote
             _updateRemote.Click += (_, _) => Menus.AfterMenu(() => UpdateRemote());
             _remoteInfo.Click += (_, _) => Menus.AfterMenu(() => RemoteInfo());
             _getFiles.Click += (_, _) => Menus.AfterMenu(() => GetFiles());
+            _getClipboard.Click += (_, _) => Menus.AfterMenu(() => GetClipboard());
             _speedHere.Click += (_, _) => Menus.AfterMenu(() => SpeedTestHere());
             _speedRemote.Click += (_, _) => Menus.AfterMenu(() => SpeedTestRemote());
             _backup.Click += (_, _) => Menus.AfterMenu(() => BackupSettings());
@@ -303,7 +313,7 @@ namespace TailRemote
             _quality.Menu.Available = !host; // the host always sends the best unless asked for less
             _streaming.Item.Available = !host;
             _toggle.Available = !host;
-            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _speedRemote.Available = _switchTo.Available = !host;
+            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _getClipboard.Available = _speedRemote.Available = _switchTo.Available = !host;
             _announceQuality.Available = _muteLocal.Available = _rideOut.Available = !host;
             _startup.Available = host;
             _service.Available = host;
@@ -321,7 +331,7 @@ namespace TailRemote
             else _go.Text = _client == null && !_reconnecting ? "Co&nnect" : "Disco&nnect";
             bool canUse = _client != null && !_client.ListenOnly;
             string why = _client == null ? "Connect to a PC first." : "Not on a listen-only connection: it needs the control password.";
-            foreach (var item in new[] { _toggle, _restart, _updateRemote, _remoteInfo, _getFiles, _speedRemote })
+            foreach (var item in new[] { _toggle, _restart, _updateRemote, _remoteInfo, _getFiles, _getClipboard, _speedRemote })
             {
                 item.Enabled = canUse;
                 item.WhyNot = why;
@@ -440,66 +450,113 @@ namespace TailRemote
             return true;
         }
 
+        // What this PC's clipboard held when it was read, so Send the clipboard and a controller's
+        // pull of the host's clipboard share the one read (text, file-drop lists, stale/missing files
+        // dropped, and non-text noticed).
+        private enum ClipKind { Files, FilesGone, SpacesOnly, Text, Inaccessible, Other, Empty }
+
+        /// <summary>Reads this PC's clipboard on the clipboard (STA) thread; call only from a ClipboardJobs job.</summary>
+        private static (ClipKind Kind, string[]? Files, string? Text) ReadClipboardOnce()
+        {
+            string[]? files = null;
+            string? text = null;
+            bool inaccessible = false, other = false;
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    if (Clipboard.ContainsFileDropList())
+                    {
+                        var list = Clipboard.GetFileDropList();
+                        files = new string[list.Count];
+                        list.CopyTo(files, 0);
+                        // Files cut and pasted elsewhere stay listed on the clipboard though they are gone:
+                        // sent, they arrived as nothing and wiped the other PC's clipboard.
+                        int listed = files.Length;
+                        files = files.Where(f => System.IO.File.Exists(f) || System.IO.Directory.Exists(f)).ToArray();
+                        if (files.Length == 0 && listed > 0) return (ClipKind.FilesGone, null, null);
+                    }
+                    else if (Clipboard.ContainsText()) text = Clipboard.GetText();
+                    else other = Clipboard.GetDataObject()?.GetFormats()?.Length > 0;
+                    inaccessible = false;
+                    break;
+                }
+                catch { inaccessible = true; System.Threading.Thread.Sleep(50); } // another program has it open
+            }
+            if (files is { Length: > 0 }) return (ClipKind.Files, files, null);
+            if (text != null && text.Length > 0 && string.IsNullOrWhiteSpace(text)) return (ClipKind.SpacesOnly, null, null);
+            if (!string.IsNullOrEmpty(text)) return (ClipKind.Text, null, text);
+            if (inaccessible) return (ClipKind.Inaccessible, null, null);
+            if (other) return (ClipKind.Other, null, null);
+            return (ClipKind.Empty, null, null);
+        }
+
         private void SendClipboard()
         {
             Doing("sending the clipboard");
             if (!CanSend(out _, out _)) return;
             ClipboardJobs.TryAdd(() =>
             {
-                string[]? files = null;
-                string? text = null;
-                bool inaccessible = false, other = false;
-                for (int i = 0; i < 5; i++)
+                var (kind, files, text) = ReadClipboardOnce();
+                switch (kind)
                 {
-                    try
-                    {
-                        if (Clipboard.ContainsFileDropList())
+                    case ClipKind.Files:
+                        Later(() =>
                         {
-                            var list = Clipboard.GetFileDropList();
-                            files = new string[list.Count];
-                            list.CopyTo(files, 0);
-                            // Files cut and pasted elsewhere stay listed on the clipboard though they are gone:
-                            // sent, they arrived as nothing and wiped the other PC's clipboard.
-                            int listed = files.Length;
-                            files = files.Where(f => System.IO.File.Exists(f) || System.IO.Directory.Exists(f)).ToArray();
-                            if (files.Length == 0 && listed > 0) { Later(() => Say("Nothing sent: the files on the clipboard are not there any more. Copy them again.")); return; }
-                        }
-                        else if (Clipboard.ContainsText()) text = Clipboard.GetText();
-                        else other = Clipboard.GetDataObject()?.GetFormats()?.Length > 0;
-                        inaccessible = false;
+                            if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
+                            client?.SendClipboardFiles(files!);
+                            host?.SendClipboardFiles(files!);
+                            link?.SendClipboardFiles(files!);
+                            Tone(Sounds.Tone.ClipboardSent); // the Files line says the rest, without speaking
+                        });
                         break;
-                    }
-                    catch { inaccessible = true; System.Threading.Thread.Sleep(50); } // another program has it open
+                    case ClipKind.FilesGone:
+                        Later(() => Say("Nothing sent: the files on the clipboard are not there any more. Copy them again."));
+                        break;
+                    case ClipKind.SpacesOnly:
+                        Later(() => Say("Nothing sent: the clipboard has only spaces or blank lines."));
+                        break;
+                    case ClipKind.Text:
+                        if ((long)text!.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); break; }
+                        Later(() =>
+                        {
+                            if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
+                            client?.SendClipboard(text);
+                            host?.SendClipboard(text);
+                            link?.SendClipboard(text);
+                            Tone(Sounds.Tone.ClipboardSent);
+                        });
+                        break;
+                    case ClipKind.Inaccessible: Later(() => Say("Could not read the clipboard: try again.")); break;
+                    case ClipKind.Other: Later(() => Say("Nothing sent: the clipboard has something other than text or files, like a picture. Only text and files can be sent.")); break;
+                    default: Later(() => Say("Nothing sent: the clipboard is empty. Copy something first.")); break;
                 }
-                if (files is { Length: > 0 })
-                {
-                    Later(() =>
-                    {
-                        if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
-                        client?.SendClipboardFiles(files);
-                        host?.SendClipboardFiles(files);
-                        link?.SendClipboardFiles(files);
-                        Tone(Sounds.Tone.ClipboardSent); // the Files line says the rest, without speaking
-                    });
-                }
-                else if (text != null && text.Length > 0 && string.IsNullOrWhiteSpace(text))
-                    Later(() => Say("Nothing sent: the clipboard has only spaces or blank lines."));
-                else if (!string.IsNullOrEmpty(text))
-                {
-                    if ((long)text.Length * 3 > FileChannel.MaxText) { Later(() => Say("That is too much text to send: over 512 megabytes.")); return; }
-                    Later(() =>
-                    {
-                        if (!CanSend(out var client, out var host, out var link)) return; // the connection may have closed meanwhile
-                        client?.SendClipboard(text);
-                        host?.SendClipboard(text);
-                        link?.SendClipboard(text);
-                        Tone(Sounds.Tone.ClipboardSent);
-                    });
-                }
-                else if (inaccessible) Later(() => Say("Could not read the clipboard: try again."));
-                else if (other) Later(() => Say("Nothing sent: the clipboard has something other than text or files, like a picture. Only text and files can be sent."));
-                else Later(() => Say("Nothing sent: the clipboard is empty. Copy something first."));
             });
+        }
+
+        /// <summary>
+        /// A controller asked for this host's clipboard (the window hosts itself). Reads it on the
+        /// clipboard thread and sends it to the controllers, like Send the clipboard but with no word
+        /// here: the host's user did not ask for it. Nothing to send (empty, a picture, files gone)
+        /// quietly sends nothing, so the controller's clipboard stays as it was.
+        /// </summary>
+        private void SendClipboardToControllers(Host host)
+        {
+            ClipboardJobs.TryAdd(() =>
+            {
+                var (kind, files, text) = ReadClipboardOnce();
+                if (kind == ClipKind.Files) host.SendClipboardFiles(files!);
+                else if (kind == ClipKind.Text && (long)text!.Length * 3 <= FileChannel.MaxText) host.SendClipboard(text);
+            });
+        }
+
+        /// <summary>Controller side: ask the remote PC for its clipboard. It arrives on this clipboard through the usual path.</summary>
+        private void GetClipboard()
+        {
+            if (_client == null || _client.ListenOnly) { Say(_client == null ? "Connect first." : "Listeners cannot do that."); return; }
+            Doing("getting the remote PC's clipboard");
+            _client.RequestClipboard();
+            Say("Asked the remote PC for its clipboard.");
         }
 
         private bool _picking;
@@ -1239,13 +1296,16 @@ namespace TailRemote
             if (address.Length == 0) { Later(() => _address.Ask(this, "Type the address first.")); return; }
             if (!CheckPassword() || !CheckPort(out int port)) return;
             var pc = _settings.SavedPcs.Find(p => string.Equals(p.Address, address, StringComparison.OrdinalIgnoreCase) && p.Port == port);
+            // Already there with the same password: nothing to do. (The stored form is re-encrypted
+            // differently each time, so compare the password itself, not the stored bytes.)
+            if (pc != null && Settings.Unprotect(pc.PasswordEnc) == _password.Text) { Say(pc + " is already saved."); return; }
             bool isNew = pc == null;
             pc ??= new SavedPc { Address = address, Port = port };
             pc.PasswordEnc = Settings.Protect(_password.Text);
             if (isNew) _settings.SavedPcs.Add(pc);
             SaveSettings();
             FillSaved();
-            Say(isNew ? "Saved " + pc + "." : "Updated " + pc + ".");
+            Say(isNew ? "Saved " + pc + "." : "Updated the password for " + pc + ".");
         }
 
         private void ForgetPc()
@@ -1426,6 +1486,8 @@ namespace TailRemote
                     _settings.CaptureDevice.Length == 0 ? null : _settings.CaptureDevice);
                 _host.ClipboardReceived += text => Later(() => ClipboardArrived(text));
                 _host.ClipboardFilesReceived += paths => Later(() => ClipboardFilesArrived(paths));
+                var hosting = _host;
+                _host.ClipboardRequested += () => SendClipboardToControllers(hosting); // a controller pulled this host's clipboard
                 _host.TransferProgress += t => Later(() => ShowTransfer(t));
                 _host.UpdateRequested += (version, reply) => Later(() => RemoteUpdate(version, reply));
                 Say("Hosting on port " + port + ". Waiting for a connection." + (listen.Length > 0 ? " Listening with the listen-only password is on." : ""));

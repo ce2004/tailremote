@@ -1,3 +1,8 @@
+2.1.7
+New feature: Get the remote PC's clipboard. Press Control Shift B while connected and whatever is on the other PC's clipboard, text or files, lands on yours. You no longer have to open a window on that PC to send its clipboard back, and it works when that PC is hosting as a Windows service.
+Bug fixed: changing the output device while connected now switches the sound straight away, instead of only after you disconnect and reconnect.
+Bug fixed: saving a PC that is already saved, with nothing changed, now says it is already saved instead of claiming it updated something.
+
 2.1.6
 New feature: if an update will not start, the service puts the previous version back by itself after a couple of failed starts, so a PC you reach only through TailRemote cannot be stranded by a bad update.
 Changed: TailRemote no longer lets Windows show a "stopped working" or system error box for it. A rare crash now just ends it quietly and it starts again, instead of a box sitting there holding some keys until it is closed.

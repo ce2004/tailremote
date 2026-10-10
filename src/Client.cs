@@ -514,6 +514,17 @@ namespace TailRemote
         /// <summary>Asks the host PC to restart.</summary>
         public void RestartHost() => Write(stackalloc byte[] { Protocol.RestartPc });
 
+        /// <summary>
+        /// Asks the host to send its clipboard here (text or files), the pull that mirrors Send the
+        /// clipboard. What comes back arrives on the file lanes like any other clipboard, through
+        /// ClipboardReceived / ClipboardFilesReceived, and lands on this PC's clipboard. Not for listeners.
+        /// </summary>
+        public void RequestClipboard()
+        {
+            if (_closed || ListenOnly) return;
+            Write(stackalloc byte[] { Protocol.ClipboardRequest });
+        }
+
         /// <summary>Sends clipboard text to the host's clipboard. Never waits. Not for listeners.</summary>
         public void SendClipboard(string text)
         {

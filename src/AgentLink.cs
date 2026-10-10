@@ -20,7 +20,10 @@ namespace TailRemote
     internal static class AgentLink
     {
         private const string PipeName = "TailRemoteAgent";
-        private const byte KeyMessage = (byte)'K', TextMessage = (byte)'T', FilesMessage = (byte)'F';
+        // Service to agent: type a key, set the clipboard (text / files), and ask the agent to read its clipboard.
+        private const byte KeyMessage = (byte)'K', TextMessage = (byte)'T', FilesMessage = (byte)'F', GetMessage = (byte)'G';
+        // Agent to service: the clipboard it read, in answer to a GetMessage (text, or file paths).
+        private const byte ClipTextMessage = (byte)'t', ClipFilesMessage = (byte)'f';
 
         /// <summary>Test only (--chaostest): the test plays the service too, so the pipe is not SYSTEM's.</summary>
         internal static bool TestAnyOwner;
@@ -63,6 +66,40 @@ namespace TailRemote
             public void Text(string text) { if (_pipe != null) _out.TryAdd((TextMessage, Encoding.UTF8.GetBytes(text))); }
             public void Files(string[] paths) { if (_pipe != null) _out.TryAdd((FilesMessage, Encoding.UTF8.GetBytes(string.Join("\n", paths)))); }
 
+            /// <summary>Asks the agent to read its clipboard and send it back; false if no agent is there.</summary>
+            public bool GetClipboard() => _pipe != null && _out.TryAdd((GetMessage, Array.Empty<byte>()));
+
+            /// <summary>What the agent read from its clipboard, in answer to GetClipboard. Raised on the link's read thread.</summary>
+            public Action<string>? ClipboardText;
+            public Action<string[]>? ClipboardFiles;
+
+            /// <summary>
+            /// The clipboard the agent sent back (GetClipboard's answer). One per connected agent: the
+            /// pipe is now two-way (it was one-way, service to agent), so the service can pull as well
+            /// as push. The old copy's thread ends when its pipe is disposed on the next connection.
+            /// </summary>
+            private void ReadLoop(Stream pipe)
+            {
+                byte[] head = new byte[5];
+                try
+                {
+                    while (true)
+                    {
+                        Protocol.ReadExactly(pipe, head);
+                        int n = BitConverter.ToInt32(head, 1);
+                        if (n < 0 || n > 600 << 20) throw new InvalidDataException("a message too big");
+                        byte[] p = new byte[n];
+                        Protocol.ReadExactly(pipe, p);
+                        switch (head[0])
+                        {
+                            case ClipTextMessage: ClipboardText?.Invoke(Encoding.UTF8.GetString(p)); break;
+                            case ClipFilesMessage: ClipboardFiles?.Invoke(Encoding.UTF8.GetString(p).Split('\n', StringSplitOptions.RemoveEmptyEntries)); break;
+                        }
+                    }
+                }
+                catch { } // the agent went: its read thread ends, the accept loop takes the next one
+            }
+
             private void AcceptLoop()
             {
                 var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
@@ -81,13 +118,17 @@ namespace TailRemote
                     first = false;
                     try
                     {
-                        var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.Out, 2, PipeTransmissionMode.Byte,
-                            useFirst ? PipeOptions.FirstPipeInstance : PipeOptions.None, 0, 0, sec);
+                        // Two-way and asynchronous: the service writes keys and clipboard to the agent while a
+                        // thread of its own reads the clipboard the agent sends back. On a plain pipe a waiting
+                        // read holds up every write (as the service link found), so nothing would reach the agent.
+                        var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte,
+                            PipeOptions.Asynchronous | (useFirst ? PipeOptions.FirstPipeInstance : PipeOptions.None), 0, 0, sec);
                         pipe.WaitForConnection();
                         // The newest agent (the session now at the screen) takes over; anything queued for the old one goes.
                         var old = Interlocked.Exchange(ref _pipe, pipe);
                         try { old?.Dispose(); } catch { }
                         while (_out.TryTake(out _)) { }
+                        new Thread(() => ReadLoop(pipe)) { IsBackground = true, Name = "TailRemote agent link in" }.Start();
                         ServiceHost.Log("The agent in the signed-in session is connected.");
                     }
                     catch (Exception e)
@@ -118,15 +159,21 @@ namespace TailRemote
 
         // ================= The agent's side =================
 
-        /// <summary>Keeps connected to the service and does what it is handed. Never returns.</summary>
-        public static void Run(Action<ushort, ushort, bool, bool> key, Action<string> text, Action<string[]> files)
+        /// <summary>
+        /// Keeps connected to the service and does what it is handed. Never returns. getClipboard, when
+        /// given, reads this session's clipboard and hands back text or file paths (on its own thread),
+        /// which are written straight back to the service: the answer to a GetMessage.
+        /// </summary>
+        public static void Run(Action<ushort, ushort, bool, bool> key, Action<string> text, Action<string[]> files,
+            Action<Action<string>, Action<string[]>>? getClipboard = null)
         {
             byte[] head = new byte[5];
             while (true)
             {
                 try
                 {
-                    using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.In);
+                    // Two-way and asynchronous, to match the service: reads come in while a clipboard answer goes back.
+                    using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
                     pipe.Connect(2000);
                     // Really the service: a pipe of this name made by anyone else (an ordinary user's
                     // program, before the service made its own) would be typing as SYSTEM.
@@ -137,6 +184,10 @@ namespace TailRemote
                         Thread.Sleep(5000);
                         continue;
                     }
+                    // The clipboard answer is written from the reader's own thread (getClipboard runs later),
+                    // never while the read loop below is also writing, so one lock keeps writes whole.
+                    var writeGate = new object();
+                    void Reply(byte type, byte[] payload) { try { lock (writeGate) Write(pipe, type, payload); } catch { } }
                     while (true)
                     {
                         Protocol.ReadExactly(pipe, head);
@@ -149,6 +200,11 @@ namespace TailRemote
                             case KeyMessage when n == 5: key(BitConverter.ToUInt16(p, 0), BitConverter.ToUInt16(p, 2), (p[4] & 1) != 0, (p[4] & 2) != 0); break;
                             case TextMessage: text(Encoding.UTF8.GetString(p)); break;
                             case FilesMessage: files(Encoding.UTF8.GetString(p).Split('\n', StringSplitOptions.RemoveEmptyEntries)); break;
+                            case GetMessage:
+                                getClipboard?.Invoke(
+                                    t => Reply(ClipTextMessage, Encoding.UTF8.GetBytes(t)),
+                                    paths => Reply(ClipFilesMessage, Encoding.UTF8.GetBytes(string.Join("\n", paths))));
+                                break;
                         }
                     }
                 }

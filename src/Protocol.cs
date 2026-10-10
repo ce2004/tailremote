@@ -49,6 +49,7 @@ namespace TailRemote
         public const byte Fetch = 10;        // UTF-8 paths, one per line: the host sends them to this controller like Send files
         public const byte InfoRequest = 11;  // the host answers with Info
         public const byte SpeedTestRequest = 12; // the host runs an internet speed test and answers with SpeedResult
+        public const byte ClipboardRequest = 13; // the controller asks the host to send its clipboard here (text or files), like Send the clipboard but pulled
         // Either way
         public const byte Features = 0x40;   // u32 flags
         // 0x41 was clipboard text (up to 1.8.11; it now goes over the file lanes): never reuse it

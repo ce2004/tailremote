@@ -31,6 +31,14 @@ namespace TailRemote
         /// <summary>Clipboard text from the controller. Raised on a network thread.</summary>
         public event Action<string>? ClipboardReceived;
 
+        /// <summary>
+        /// A controller asked for this PC's clipboard (the pull that mirrors Send the clipboard).
+        /// Raised on a network thread; the owner reads the local clipboard and calls SendClipboard /
+        /// SendClipboardFiles, which fan it out to the controllers. The Host itself cannot read the
+        /// clipboard: it lives in a desktop session (the window, or the service's agent).
+        /// </summary>
+        public event Action? ClipboardRequested;
+
         /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
         public Func<bool>? SecureAttention { get; init; }
 
@@ -701,6 +709,10 @@ namespace TailRemote
                         // A normal restart: programs can still ask to save their work.
                         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("shutdown.exe", "/r /t 0") { CreateNoWindow = true, UseShellExecute = false }); }
                         catch (Exception e) { Broadcast("The remote PC could not restart: " + e.Message); }
+                        break;
+                    case Protocol.ClipboardRequest when IsController(s):
+                        // Only a controller may pull the clipboard; a listener never reaches here.
+                        ClipboardRequested?.Invoke();
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);

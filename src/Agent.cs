@@ -67,6 +67,12 @@ namespace TailRemote
             _host.ClipboardFilesReceived += paths => { if (!link.Files(paths)) agent.Files(paths); };
             _host.TransferProgress += t => link.Transfer(t);
             _host.UpdateRequested += ServiceHost.UpdateFor;
+            // A controller pulled this PC's clipboard. The service runs in session 0 and cannot read a
+            // user's clipboard, so the agent at the screen reads it and sends it back, and the service
+            // fans it out to the controllers exactly as Send the clipboard does. SYSTEM opens the files.
+            _host.ClipboardRequested += () => agent.GetClipboard();
+            agent.ClipboardText = text => _host?.SendClipboard(text);
+            agent.ClipboardFiles = paths => _host?.SendClipboardFiles(paths);
             ServiceHost.Log("Hosting on port " + cfg.Port + ", from the service.");
             // Audio settings and device names are never touched here: only Set up audio device, when pressed.
         }
@@ -113,7 +119,8 @@ namespace TailRemote
             // Keys go to whichever desktop has the keyboard: the lock screen, sign-in and UAC prompts too.
             Native.FollowInputDesktop = true;
             var clip = new ClipboardSetter();
-            AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived);
+            var reader = new ClipboardReader();
+            AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived, reader.Read);
             return 0;
         }
 
@@ -164,6 +171,57 @@ namespace TailRemote
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// The mirror of ClipboardSetter: reads this PC's clipboard when a controller pulls it and no
+        /// TailRemote window is open to do it. On a thread of its own, set up for the clipboard (STA),
+        /// for the same reason the setter is. Only text and real files are sent (what Send the clipboard
+        /// sends); anything else, or an empty clipboard, sends nothing, so the controller's stays as it was.
+        /// </summary>
+        private sealed class ClipboardReader
+        {
+            private readonly System.Collections.Concurrent.BlockingCollection<Action> _jobs = new(16);
+
+            public ClipboardReader()
+            {
+                var t = new Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
+                    { IsBackground = true, Name = "TailRemote agent clipboard read" };
+                t.SetApartmentState(ApartmentState.STA);
+                t.Start();
+            }
+
+            public void Read(Action<string> onText, Action<string[]> onFiles) => _jobs.TryAdd(() =>
+            {
+                for (int i = 0; ; i++)
+                {
+                    try
+                    {
+                        if (Clipboard.ContainsFileDropList())
+                        {
+                            var list = Clipboard.GetFileDropList();
+                            var files = new string[list.Count];
+                            list.CopyTo(files, 0);
+                            // Files cut and pasted elsewhere stay listed though they are gone: drop those,
+                            // the same as Send the clipboard, so nothing arrives as an empty set.
+                            files = Array.FindAll(files, f => File.Exists(f) || Directory.Exists(f));
+                            if (files.Length > 0) onFiles(files);
+                        }
+                        else if (Clipboard.ContainsText())
+                        {
+                            string text = Clipboard.GetText();
+                            // Skip over-size text, the same cap as Send the clipboard (SendClipboard): too much to carry.
+                            if (!string.IsNullOrEmpty(text) && !string.IsNullOrWhiteSpace(text) && (long)text.Length * 3 <= FileChannel.MaxText) onText(text);
+                        }
+                        return;
+                    }
+                    catch (Exception e)
+                    {
+                        if (i == 4) { ServiceHost.Log("Could not read the clipboard to send it: " + e.Message); return; }
+                        Thread.Sleep(100); // another program has it open
+                    }
+                }
+            });
         }
     }
 }
