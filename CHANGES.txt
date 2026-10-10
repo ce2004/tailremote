@@ -1,3 +1,26 @@
+2.1.2
+Bug fixed: since 2.1.1, a problem inside a TailRemote window could show a raw error box whose Quit closed TailRemote. It is written down and TailRemote carries on, as before.
+Bug fixed: Control 1 to 9 did nothing at all, not even saying there are no saved PCs.
+Bug fixed: menu items that could not be used yet were skipped by the arrows, so NVDA users never knew they were there, and the menu positions jumped (2 of 17, then 7 of 17). Every item can now be reached, and Enter on one that cannot be used yet says why, such as Connect to a PC first.
+Bug fixed: turning a setting on or off in a menu made NVDA say TailRemote window each time. Now it just says checked or unchecked.
+Bug fixed: Alt F then N did not disconnect, because Restart remote PC used N too. Restart is now O. In Host mode, Copy this PC's IP address is now D, as Y belongs to Apply settings to the service.
+Bug fixed: a backup password that was too short, or the wrong password when restoring, threw the whole backup or restore away. It now asks again and says why.
+Bug fixed: after a dropped connection, the remote speed test waited 90 seconds and Remote PC info and folder lists 15 seconds before saying anything. They now say at once that the connection dropped.
+Bug fixed: Get files and Remote PC info stayed tied to a connection that had dropped and come back, so Get said it was getting files that never came.
+Bug fixed: changing the sound quality while muted (not controlling) brought the full bitrate back, using data for sound nobody heard.
+Bug fixed: with announcements on, taking control again said Sound back to full quality every time.
+Bug fixed: after a mute, a switch between PCs or a long silence, the sound quality could drop at once because of how the connection was minutes earlier.
+Bug fixed: a speed test that Cloudflare refused, or that a Wi-Fi sign-in page answered, was shown as a speed of 0. It now says it could not run, and why.
+Bug fixed: an error while gathering Remote PC info could close TailRemote on the remote PC, including the service.
+Bug fixed: two quick connections (Control 1, then Control 2) could leave File saying Connect while the second was still connecting.
+Bug fixed: restoring settings while a connection had started meanwhile could change the mode under it. Restore checks again just before, and refuses very large files that cannot be backups.
+Bug fixed: Saved PCs showed Control 1 to 9 on each choice, where Enter only fills in the address. The keys are shown on Switch to PC, where they belong.
+Bug fixed: Keyboard shortcuts listed keys for things the current mode does not have.
+Bug fixed: Get files read folders as Size folder. It now says the name, then folder.
+Bug fixed: a cancelled restart of the remote PC left TailRemote saying it was restarting the next time the connection dropped, even much later.
+Bug fixed: the service's update could fail every time while an old copy was still locked, and an update request it could not read got no answer.
+Bug fixed: an unknown battery state on the remote PC was shown as no battery, and a huge folder on it was read whole before being cut to 5000.
+
 2.1.1
 Bug fixed: with Windows' text made larger, the About menu was hidden off the end of the menu bar, so you could not check for updates. Every menu now always shows.
 Bug fixed: NVDA read the first thing in a TailRemote window and then went silent: Tab, the arrows and other windows said nothing. TailRemote's windows now run the way Windows' accessibility expects, and NVDA reads everything in them.

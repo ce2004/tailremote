@@ -97,17 +97,21 @@ namespace TailRemote
                 if (Interlocked.Add(ref moved, n) >= MaxBytes) stop.Cancel();
                 if (atOneSecond < 0 && clock.ElapsedMilliseconds >= 1000) Interlocked.CompareExchange(ref atOneSecond, Interlocked.Read(ref moved), -1);
             }
+            string? problem = null;
             var tasks = Enumerable.Range(0, streams).Select(_ => Task.Run(async () =>
             {
                 while (!stop.IsCancellationRequested)
                 {
                     try { await one(stop.Token, Count); }
                     catch when (stop.IsCancellationRequested) { }
+                    catch (Exception e) { problem = e.Message; return; } // refused or cut off: this stream stops
                 }
             })).ToArray();
             try { await Task.WhenAll(tasks); } catch { }
             double secs = Math.Max(0.5, clock.Elapsed.TotalSeconds - 1);
             long all = Interlocked.Read(ref moved);
+            // Nothing moved is not a speed of zero: the test could not run (blocked, refused, offline).
+            if (all < 1 << 20 && problem != null) throw new IOException("Cloudflare's speed test server could not be used: " + problem);
             total(all);
             long counted = all - Math.Max(0, Interlocked.Read(ref atOneSecond));
             return counted * 8 / secs;
@@ -117,6 +121,8 @@ namespace TailRemote
         {
             using var resp = await http.GetAsync(Server + "/__down?bytes=50000000", HttpCompletionOption.ResponseHeadersRead, token);
             resp.EnsureSuccessStatusCode();
+            // A sign-in page (hotel, café Wi-Fi) answers in its place: that is not the test.
+            if (resp.Content.Headers.ContentType?.MediaType == "text/html") throw new IOException("a web page answered instead (a Wi-Fi sign-in page?)");
             using var s = await resp.Content.ReadAsStreamAsync(token);
             byte[] buf = new byte[64 << 10];
             int n;
@@ -127,6 +133,7 @@ namespace TailRemote
         {
             using var content = new CountingContent(20_000_000, count);
             using var resp = await http.PostAsync(Server + "/__up", content, token);
+            resp.EnsureSuccessStatusCode();
         }
 
         /// <summary>Random bytes for the upload, counted as they go out rather than when the whole post is done.</summary>

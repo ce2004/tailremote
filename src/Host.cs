@@ -618,7 +618,11 @@ namespace TailRemote
                             // Off this thread: a slow drive must not hold up the keys behind it.
                             ThreadPool.QueueUserWorkItem(_ =>
                             {
-                                byte[] body = System.Text.Encoding.UTF8.GetBytes(RemoteTools.ListFolder(path));
+                                // Never let a problem here end the host (or the service): it is said instead.
+                                string listing;
+                                try { listing = RemoteTools.ListFolder(path); }
+                                catch (Exception e) { listing = "E\t" + e.Message; }
+                                byte[] body = System.Text.Encoding.UTF8.GetBytes(listing);
                                 byte[] r = new byte[5 + body.Length];
                                 r[0] = Protocol.FolderList;
                                 id.CopyTo(r, 1);
@@ -639,9 +643,14 @@ namespace TailRemote
                     case Protocol.InfoRequest when IsController(s):
                         ThreadPool.QueueUserWorkItem(_ =>
                         {
-                            var (controlling, listening) = Connected;
-                            string text = RemoteTools.Info(Updater.Current + (SecureAttention != null ? ", running as the Windows service" : "")) +
-                                "\nConnected: " + controlling + " controlling" + (listening > 0 ? ", " + listening + " listening" : "");
+                            string text;
+                            try
+                            {
+                                var (controlling, listening) = Connected;
+                                text = RemoteTools.Info(Updater.Current + (SecureAttention != null ? ", running as the Windows service" : "")) +
+                                    "\nConnected: " + controlling + " controlling" + (listening > 0 ? ", " + listening + " listening" : "");
+                            }
+                            catch (Exception e) { text = "Problem: could not gather this PC's information: " + e.Message; } // never ends the host
                             try { s.Link.Send(s.Stream, Protocol.TextMessage(Protocol.Info, text)); } catch { }
                         });
                         break;

@@ -148,6 +148,15 @@ namespace TailRemote
                 return 0;
             }
             if (args.Length == 1 && args[0] == "--chaostest") return ChaosTest.Run();
+            if (args.Length >= 3 && args[0] == "--testhost" && int.TryParse(args[1], out int testPort))
+            {
+                // A host with no window, for testing a controlling window against (until it is stopped).
+                // Optional fourth: a listen-only password. What it says goes to %TEMP%\tailremote-testhost.txt.
+                string said = Path.Combine(Path.GetTempPath(), "tailremote-testhost.txt");
+                using var host = new Host(testPort, args[2], args.Length > 3 ? args[3] : null, s => { try { File.AppendAllText(said, s + Environment.NewLine); } catch { } });
+                System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+                return 0;
+            }
             if (args.Length >= 1 && args[0] == "--dialogtest")
             {
                 // A blank window with a menu bar like the real one, opening a list and a typing box,
@@ -200,6 +209,10 @@ namespace TailRemote
         /// </summary>
         private static void RunWindow(Func<Form> make) => RunOnWindowThread(() =>
         {
+            // The same safety net as Main's, on this thread too: WinForms keeps it per thread, and
+            // without it a problem in the window showed WinForms' own box, whose Quit closed TailRemote.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) => Crash(e.Exception);
             ApplicationConfiguration.Initialize();
             Application.Run(make());
         });

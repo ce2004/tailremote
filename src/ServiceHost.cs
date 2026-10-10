@@ -382,16 +382,17 @@ namespace TailRemote
             while (WaitHandle.WaitAny(new WaitHandle[] { Stop, CheckNow }) == 1)
             {
                 // A controlling PC's request (File, Update the remote PC) is answered either way.
-                var reply = Interlocked.Exchange(ref _requestReply, null);
-                var requested = Interlocked.Exchange(ref _requested, null);
-                try { TryUpdate(requested, reply); }
+                // Taken as one: the version and who to answer always belong together.
+                var request = Interlocked.Exchange(ref _request, null);
+                var reply = request?.Reply;
+                try { TryUpdate(request?.Want, reply); }
                 catch (Exception e) { Log("Update failed: " + e.Message); reply?.Invoke("The remote PC could not update: " + e.Message); }
                 if (Restarting) { Wake.Set(); return; }
             }
         }
 
-        private static Version? _requested;
-        private static Action<string>? _requestReply;
+        private sealed record UpdateRequest(Version Want, Action<string> Reply);
+        private static UpdateRequest? _request;
 
         /// <summary>
         /// A controlling PC chose File, Update the remote PC: update to that version, which must be
@@ -399,11 +400,10 @@ namespace TailRemote
         /// </summary>
         public static void UpdateFor(string version, Action<string> reply)
         {
-            if (!Version.TryParse(version, out var want)) return;
+            if (!Version.TryParse(version, out var want)) { reply("TailRemote on the remote PC did not understand the version " + version + "."); return; }
             if (want <= Updater.Current) { reply("The remote PC already has TailRemote " + Updater.Current + "."); return; }
             if (Restarting) { reply("TailRemote on the remote PC is already updating."); return; }
-            Interlocked.Exchange(ref _requestReply, reply)?.Invoke("Another controlling PC asked for an update at the same time; it is going ahead.");
-            _requested = want;
+            Interlocked.Exchange(ref _request, new UpdateRequest(want, reply))?.Reply("Another controlling PC asked for an update at the same time; it is going ahead.");
             CheckNow.Set();
         }
 
@@ -435,6 +435,9 @@ namespace TailRemote
             string exe = Environment.ProcessPath!, fresh = exe + ".new", old = exe + ".old";
             File.WriteAllBytes(fresh, data);
             try { File.Delete(old); } catch { }
+            // Still there (antivirus, a lingering handle): a name of its own, cleared up later
+            // with the other leftovers, rather than every update failing until it is freed.
+            if (File.Exists(old)) old = exe + ".old-" + DateTime.UtcNow.Ticks;
             File.Move(exe, old);       // a running exe can be renamed, not overwritten
             try { File.Move(fresh, exe); }
             catch { File.Move(old, exe); throw; }

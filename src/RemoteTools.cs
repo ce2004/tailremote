@@ -64,12 +64,13 @@ namespace TailRemote
                 if (!dir.Exists) return "E\tThat folder is not there any more.\n";
                 int n = 0;
                 const FileAttributes hiddenSystem = FileAttributes.Hidden | FileAttributes.System;
-                foreach (var d in dir.EnumerateDirectories().Where(d => (d.Attributes & hiddenSystem) != hiddenSystem).OrderBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase))
+                // At most MaxEntries + 1 of each are read before sorting: a folder of a million files must not be read whole.
+                foreach (var d in dir.EnumerateDirectories().Where(d => (d.Attributes & hiddenSystem) != hiddenSystem).Take(MaxEntries + 1).OrderBy(d => d.Name, StringComparer.CurrentCultureIgnoreCase))
                 {
                     if (++n > MaxEntries) break;
                     Line('D', d.FullName, d.Name, 0, d.LastWriteTimeUtc.Ticks);
                 }
-                foreach (var f in dir.EnumerateFiles().Where(f => (f.Attributes & hiddenSystem) != hiddenSystem).OrderBy(f => f.Name, StringComparer.CurrentCultureIgnoreCase))
+                foreach (var f in dir.EnumerateFiles().Where(f => (f.Attributes & hiddenSystem) != hiddenSystem).Take(MaxEntries + 1).OrderBy(f => f.Name, StringComparer.CurrentCultureIgnoreCase))
                 {
                     if (++n > MaxEntries) break;
                     Line('F', f.FullName, f.Name, f.Length, f.LastWriteTimeUtc.Ticks);
@@ -94,7 +95,8 @@ namespace TailRemote
                 lines.Add("Memory: " + mem.dwMemoryLoad + " percent used, " + FileChannel.Size((long)mem.ullAvailPhys) + " free of " + FileChannel.Size((long)mem.ullTotalPhys));
             if (GetSystemPowerStatus(out var power))
             {
-                if ((power.BatteryFlag & 128) != 0 || power.BatteryFlag == 255) lines.Add("Battery: none (plugged in)");
+                if (power.BatteryFlag == 255) lines.Add("Battery: unknown"); // Windows cannot tell
+                else if ((power.BatteryFlag & 128) != 0) lines.Add("Battery: none (plugged in)");
                 else lines.Add("Battery: " + (power.BatteryLifePercent <= 100 ? power.BatteryLifePercent + " percent" : "unknown") +
                     (power.ACLineStatus == 1 ? ", plugged in" + ((power.BatteryFlag & 8) != 0 ? " and charging" : "") : ", on battery") +
                     (power.ACLineStatus != 1 && power.BatteryLifeTime != uint.MaxValue ? ", about " + MainForm.Duration(TimeSpan.FromSeconds(power.BatteryLifeTime)) + " left" : ""));

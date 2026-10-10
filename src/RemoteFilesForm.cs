@@ -12,7 +12,7 @@ namespace TailRemote
     /// </summary>
     internal sealed class RemoteFilesForm : Form
     {
-        private readonly Client _client;
+        private readonly Func<Client?> _client; // the connection now: a reconnect makes a new one
         private readonly Action<string> _say;
         private readonly TextBox _where = new() { ReadOnly = true, Width = 640, AccessibleName = "Folder on the remote PC" };
         private readonly ListView _list = new()
@@ -28,7 +28,7 @@ namespace TailRemote
 
         private sealed record Entry(bool Folder, string Path, string Name, long Bytes, long Ticks);
 
-        public RemoteFilesForm(Client client, Action<string> say)
+        public RemoteFilesForm(Func<Client?> client, Action<string> say)
         {
             _client = client;
             _say = say;
@@ -90,7 +90,9 @@ namespace TailRemote
             UseWaitCursor = true;
             try
             {
-                string text = await _client.ListFolderAsync(path);
+                if (_client() is not Client c) { _say("Not connected to the remote PC."); return; }
+                string text = await c.ListFolderAsync(path);
+                if (IsDisposed) return; // closed while waiting
                 if (text.StartsWith("E\t")) { _say(text[2..].Trim()); return; }
                 var entries = text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(Parse).OfType<Entry>().ToList();
                 _path = path;
@@ -99,8 +101,9 @@ namespace TailRemote
                 _list.Items.Clear();
                 foreach (var e in entries)
                 {
-                    var item = new ListViewItem(e.Name) { Tag = e };
-                    item.SubItems.Add(e.Folder ? "folder" : FileChannel.Size(e.Bytes));
+                    // "Desktop, folder", not the Size column saying "folder".
+                    var item = new ListViewItem(e.Folder ? e.Name + ", folder" : e.Name) { Tag = e };
+                    item.SubItems.Add(e.Folder ? "" : FileChannel.Size(e.Bytes));
                     item.SubItems.Add(e.Ticks > 0 ? new DateTime(e.Ticks, DateTimeKind.Utc).ToLocalTime().ToString("g") : "");
                     _list.Items.Add(item);
                 }
@@ -113,12 +116,14 @@ namespace TailRemote
                 _list.Focus();
                 if (entries.Count >= RemoteTools.MaxEntries) _say("Only the first " + RemoteTools.MaxEntries + " are shown.");
             }
-            catch (TimeoutException) { _say("The remote PC did not answer. Try again."); }
-            catch (Exception e) { _say("Could not list the folder: " + e.Message); }
+            catch (TimeoutException) { if (!IsDisposed) _say("The remote PC did not answer. Try again."); }
+            catch (System.IO.IOException e) { if (!IsDisposed) _say("Could not list the folder: " + e.Message); }
+            catch (Exception e) when (!IsDisposed) { _say("Could not list the folder: " + e.Message); }
+            catch { } // closed while waiting: nobody to tell
             finally
             {
                 _loading = false;
-                UseWaitCursor = false;
+                if (!IsDisposed) UseWaitCursor = false;
             }
         }
 
@@ -138,7 +143,7 @@ namespace TailRemote
             if (chosen.Count == 0) { _say("Check the files and folders to get first, with Space."); return; }
             // Whole drives are too much to mean: a folder on one is fine.
             if (_path.Length == 0 && chosen.Any(c => c.Path.TrimEnd('\\').Length <= 2)) { _say("Open the drive and choose folders or files in it."); return; }
-            _client.Fetch(chosen.Select(c => c.Path));
+            if (_client() is not Client client || !client.Fetch(chosen.Select(c => c.Path))) { _say("Not connected to the remote PC, so nothing was asked for."); return; }
             foreach (ListViewItem i in _list.CheckedItems) i.Checked = false;
             _say("Getting " + (chosen.Count == 1 ? chosen[0].Name : chosen.Count + " items") + " into " + FileChannel.Downloads + ". The Files line in the Clipboard menu shows how it goes.");
         }
@@ -149,7 +154,7 @@ namespace TailRemote
     {
         private readonly ListBox _lines = new() { Width = 560, Height = 260, AccessibleName = "About the remote PC" };
 
-        public RemoteInfoForm(Client client, string first, Action<string> say)
+        public RemoteInfoForm(Func<Client?> client, string first, Action<string> say)
         {
             Text = "Remote PC info";
             Font = new System.Drawing.Font("Segoe UI", 10f);
@@ -171,8 +176,15 @@ namespace TailRemote
             {
                 if (e.KeyCode != Keys.F5) return;
                 e.Handled = true;
-                try { Fill(await client.RequestInfoAsync()); say("Refreshed."); }
-                catch { say("The remote PC did not answer."); }
+                try
+                {
+                    if (client() is not Client c) { say("Not connected to the remote PC."); return; }
+                    string text = await c.RequestInfoAsync();
+                    if (IsDisposed) return;
+                    Fill(text);
+                    say("Refreshed.");
+                }
+                catch { if (!IsDisposed) say("The remote PC did not answer."); }
             };
             Menus.FocusWhenShown(this, () => _lines);
         }

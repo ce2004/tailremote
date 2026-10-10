@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -17,9 +18,9 @@ namespace TailRemote
         private static bool _keepOpen;
 
         /// <summary>A setting that is on or off. Enter flips it, the menu stays open and says which.</summary>
-        public static ToolStripMenuItem Check(string text)
+        public static MenuItem Check(string text)
         {
-            var item = new ToolStripMenuItem(text) { Tag = KeepOpenTag };
+            var item = new MenuItem(text) { Tag = KeepOpenTag };
             item.Click += (_, _) =>
             {
                 // Said before the setting's own handlers run, so their message follows it.
@@ -30,16 +31,16 @@ namespace TailRemote
         }
 
         /// <summary>A setting that is on or off but asks first (a window, administrator permission): the menu closes.</summary>
-        public static ToolStripMenuItem CheckAsking(string text)
+        public static MenuItem CheckAsking(string text)
         {
-            var item = new ToolStripMenuItem(text);
+            var item = new MenuItem(text);
             item.Click += (_, _) => item.Checked = !item.Checked;
             return item;
         }
 
-        public static ToolStripMenuItem Action(string text, Action clicked, Keys keys = Keys.None)
+        public static MenuItem Action(string text, Action clicked, Keys keys = Keys.None)
         {
-            var item = new ToolStripMenuItem(text) { ShortcutKeys = keys };
+            var item = new MenuItem(text) { ShortcutKeys = keys };
             item.Click += (_, _) => AfterMenu(clicked);
             return item;
         }
@@ -110,7 +111,7 @@ namespace TailRemote
             };
             dd.ItemClicked += (_, e) =>
             {
-                if (e.ClickedItem?.Tag != KeepOpenTag) return;
+                if (e.ClickedItem?.Tag != KeepOpenTag && e.ClickedItem is not MenuItem { Usable: false }) return;
                 _keepOpen = true;
                 // Cleared once the click has been handled, whichever menus asked to close.
                 dd.BeginInvoke(() => _keepOpen = false);
@@ -132,7 +133,7 @@ namespace TailRemote
     /// </summary>
     internal sealed class MenuChoice
     {
-        public readonly ToolStripMenuItem Menu;
+        public readonly MenuItem Menu;
         private readonly string _title;
         private readonly List<string> _names = new();
         private int _index = -1;
@@ -142,7 +143,7 @@ namespace TailRemote
         public MenuChoice(string title)
         {
             _title = title;
-            Menu = new ToolStripMenuItem(title);
+            Menu = new MenuItem(title);
         }
 
         public int Count => _names.Count;
@@ -160,9 +161,10 @@ namespace TailRemote
         {
             int i = _names.Count;
             _names.Add(name);
-            var item = new ToolStripMenuItem(name.Replace("&", "&&")) { Tag = Menus.KeepOpenTag };
+            var item = new MenuItem(name.Replace("&", "&&")) { Tag = Menus.KeepOpenTag };
             item.Click += (_, _) =>
             {
+                if (!Menu.Usable) { Speech.Speak(Menu.WhyNot); return; }
                 Speech.Speak("checked");
                 SelectedIndex = i;
             };
@@ -274,7 +276,7 @@ namespace TailRemote
     /// <summary>A line of information in a menu (Streaming, Files): Enter says it again, the menu stays open.</summary>
     internal sealed class MenuStatus
     {
-        public readonly ToolStripMenuItem Item = new() { Tag = Menus.KeepOpenTag };
+        public readonly MenuItem Item = new() { Tag = Menus.KeepOpenTag };
         private string _text = "";
 
         public MenuStatus(string text)
@@ -292,6 +294,60 @@ namespace TailRemote
                 _text = value;
                 Item.Text = value.Replace("&", "&&");
             }
+        }
+    }
+
+    /// <summary>
+    /// A menu item that is never greyed out. A greyed-out item cannot be reached with the arrows
+    /// at all, yet NVDA still counted it ("7 of 17" after "2 of 17"), and nobody could find out it
+    /// was there. Setting Enabled to false leaves it in reach: Enter (or its shortcut) says
+    /// WhyNot instead of doing it, and the menu stays open.
+    /// </summary>
+    internal class MenuItem : ToolStripMenuItem
+    {
+        public MenuItem() { }
+        public MenuItem(string text) : base(text) { }
+
+        public bool Usable { get; private set; } = true;
+
+        /// <summary>Said when it is chosen while it cannot be used.</summary>
+        public string WhyNot { get; set; } = "That cannot be used right now.";
+
+        public override bool Enabled
+        {
+            get => base.Enabled;
+            set => Usable = value; // base.Enabled stays true: always in reach
+        }
+
+        protected override void OnClick(EventArgs e)
+        {
+            if (!Usable) { Speech.Speak(WhyNot); return; }
+            base.OnClick(e);
+        }
+
+        /// <summary>Does what choosing it does, without the menu starting to close.</summary>
+        internal void ClickInPlace() => OnClick(EventArgs.Empty);
+
+        protected override ToolStripDropDown CreateDefaultDropDown() => new StayOpenDropDown { OwnerItem = this };
+    }
+
+    /// <summary>
+    /// The drop-down of a MenuItem. Enter on a setting, a status line or something that cannot be
+    /// used right now is handled here, inside the menu: going through the usual click, the menu
+    /// first began to close and gave the window focus (NVDA said "TailRemote window") before
+    /// TailRemote kept it open.
+    /// </summary>
+    internal sealed class StayOpenDropDown : ToolStripDropDownMenu
+    {
+        protected override bool ProcessDialogKey(Keys keyData)
+        {
+            if (keyData == Keys.Enter && Items.Cast<ToolStripItem>().FirstOrDefault(i => i.Selected) is MenuItem item && !item.HasDropDownItems
+                && (item.Tag == Menus.KeepOpenTag || !item.Usable))
+            {
+                item.ClickInPlace();
+                return true;
+            }
+            return base.ProcessDialogKey(keyData);
         }
     }
 }

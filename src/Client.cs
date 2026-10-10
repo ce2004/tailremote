@@ -29,6 +29,7 @@ namespace TailRemote
 
         /// <summary>Why the host said it is going away (Protocol.Leaving*), or 0; and the detail (the new version when updating).</summary>
         public byte Leaving { get; private set; }
+        private long _leavingAt;
         public string LeavingDetail { get; private set; } = "";
 
         public event Action<string>? Status;
@@ -323,6 +324,9 @@ namespace TailRemote
         private void Close(string? why)
         {
             if (Interlocked.Exchange(ref _closing, 1) == 1) return;
+            // A goodbye that did not happen (a restart someone cancelled on that PC) is not why a
+            // connection drops a minute later.
+            if (Leaving != 0 && Environment.TickCount64 - _leavingAt > 60_000) Leaving = 0;
             // The host said why it is going: that, not how the socket happened to break.
             if (why != null) why = Leaving switch
             {
@@ -334,6 +338,11 @@ namespace TailRemote
             };
             DiagLog.Write("client: connection closed" + (why != null ? ": " + why : " by this PC"));
             _closed = true;
+            // Anything waiting for an answer fails now, not after its time runs out.
+            var gone = new System.IO.IOException(why ?? "Disconnected.");
+            Interlocked.Exchange(ref _speedRequest, null)?.TrySetException(gone);
+            Interlocked.Exchange(ref _infoRequest, null)?.TrySetException(gone);
+            foreach (var id in _folderRequests.Keys) if (_folderRequests.TryRemove(id, out var w)) w.TrySetException(gone);
             _toSend.Release();
             try { _tcp.Dispose(); } catch { }
             try { _udp.Dispose(); } catch { }
@@ -439,6 +448,7 @@ namespace TailRemote
         /// <summary>The host's internet speed test (SpeedTest.RunAsync there). Fails after 90 seconds.</summary>
         public Task<string> RequestSpeedTestAsync()
         {
+            if (_closed) return Task.FromException<string>(new System.IO.IOException("Not connected."));
             var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             Interlocked.Exchange(ref _speedRequest, wait)?.TrySetCanceled();
             Write(stackalloc byte[] { Protocol.SpeedTestRequest });
@@ -454,12 +464,14 @@ namespace TailRemote
         /// <summary>Back to the best sound at once (coming to the front), unless the quality is locked.</summary>
         public void StartBest()
         {
+            _judgeAfresh = true;
             if (_lockedStep < 0) lock (_stepGate) SetStep(0);
         }
 
         /// <summary>A folder's contents on the host (see RemoteTools.ListFolder), or "" for the drives. Fails after 15 seconds.</summary>
         public async System.Threading.Tasks.Task<string> ListFolderAsync(string path)
         {
+            if (_closed) throw new System.IO.IOException("Not connected.");
             uint id = (uint)Interlocked.Increment(ref _nextRequest);
             var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             _folderRequests[id] = wait;
@@ -474,11 +486,20 @@ namespace TailRemote
         }
 
         /// <summary>Asks the host to send these files and folders here, like Send files from there.</summary>
-        public void Fetch(IEnumerable<string> paths) => Write(Protocol.TextMessage(Protocol.Fetch, string.Join('\n', paths)));
+        /// False when the connection has closed, so nothing was asked for.
+        public bool Fetch(IEnumerable<string> paths)
+        {
+            if (_closed) return false;
+            Write(Protocol.TextMessage(Protocol.Fetch, string.Join('\n', paths)));
+            return true;
+        }
 
         /// <summary>About the host PC (RemoteTools.Info). Fails after 15 seconds.</summary>
         public System.Threading.Tasks.Task<string> RequestInfoAsync()
         {
+            if (_closed) return Task.FromException<string>(new System.IO.IOException("Not connected."));
+            // Asked again while waiting (F5 twice): the same answer, rather than failing the first.
+            if (Volatile.Read(ref _infoRequest) is { } waiting) return waiting.Task.WaitAsync(TimeSpan.FromSeconds(15));
             var wait = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             Interlocked.Exchange(ref _infoRequest, wait)?.TrySetCanceled();
             Write(stackalloc byte[] { Protocol.InfoRequest });
@@ -534,6 +555,7 @@ namespace TailRemote
                     {
                         LeavingDetail = System.Text.Encoding.UTF8.GetString(m, 2, m.Length - 2);
                         Leaving = m[1];
+                        _leavingAt = Environment.TickCount64;
                         DiagLog.Write("client: host is leaving, reason " + m[1] + " " + LeavingDetail);
                     }
                     else if (m.Length >= 5 && m[0] == Protocol.Features)
@@ -778,6 +800,8 @@ namespace TailRemote
         private readonly int[] _bad = new int[5], _sent = new int[5], _winBytes = new int[5], _winPackets = new int[5]; // the last second, by 0.2 s tick
         private int _badAt, _cleanTicks, _target, _ceiling, _failures;
         private long _shortSince; // since when the sound has been arriving slower than real time
+        private long _silentSince;
+        private volatile bool _judgeAfresh; // forget what was measured: set by a lock, a silence or StartBest
         private long _noHelpUntil, _lastTargetAt, _lastMoveAt, _ceilingUntil, _lastFailAt, _lastUpAt;
         private double _lossBefore, _noHelpLoss;
         private int _qPackets, _qBytes, _qTicks, _winFilled;
@@ -852,8 +876,29 @@ namespace TailRemote
             int bytes = Interlocked.Exchange(ref _qBytes, 0), arrived = Interlocked.Exchange(ref _qPackets, 0), ticksIn = Interlocked.Exchange(ref _qTicks, 0);
             if (TestHoldQuality) return;
             int locked = _lockedStep;
-            if (locked >= 0) { lock (_stepGate) SetStep(locked); return; }
-            if (packets == 0) return; // silence: nothing to judge
+            // Locked, or silent: nothing to judge. After a lock (a mute, a switch) or a long
+            // silence, what was measured before is out of date. Not after a short one: speech
+            // pauses all the time, and forgetting then made it climb back into trouble.
+            if (locked >= 0) { lock (_stepGate) SetStep(locked); _judgeAfresh = true; return; }
+            if (packets == 0)
+            {
+                if (_silentSince == 0) _silentSince = Environment.TickCount64;
+                else if (Environment.TickCount64 - _silentSince > 10_000) _judgeAfresh = true;
+                return;
+            }
+            _silentSince = 0;
+            if (_judgeAfresh)
+            {
+                _judgeAfresh = false;
+                Array.Clear(_bad); Array.Clear(_sent); Array.Clear(_winBytes); Array.Clear(_winPackets); Array.Clear(_winTicks);
+                _winFilled = 0;
+                _shortSince = 0;
+                _target = AudioQuality;
+                _ceilingUntil = 0;
+                _cleanTicks = 0;
+                _fitsSince = 0;
+                _noHelpUntil = 0;
+            }
             // Only sound that never came: what arrived late was counted lost first, then
             // late, and lateness is not a bandwidth problem a lower bitrate could fix.
             int bad = Math.Max(0, lost - late);

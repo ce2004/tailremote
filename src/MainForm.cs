@@ -21,40 +21,41 @@ namespace TailRemote
         private readonly MenuChoice _captureFrom = new("C&apture sound from (what other PCs hear)");
         private bool _fillingCapture;
         private readonly MenuChoice _saved = new("Sa&ved PCs");
-        private readonly ToolStripMenuItem _savePc = new("Save t&his PC");
-        private readonly ToolStripMenuItem _forgetPc = new("&Forget the chosen saved PC");
+        private readonly MenuItem _savePc = new("Save t&his PC");
+        private readonly MenuItem _forgetPc = new("&Forget the chosen saved PC") { WhyNot = "Choose a saved PC first, in Saved PCs." };
         private readonly MenuText _listenPassword = new("&Listen-only password", "A second password that lets someone hear this PC but not control it. Leave it empty for none:", secret: true);
-        private readonly ToolStripMenuItem _sendClipboard = new("Send the clip&board") { ShortcutKeys = Keys.Control | Keys.B };
-        private readonly ToolStripMenuItem _sendFiles = new("Send f&iles") { ShortcutKeys = Keys.Control | Keys.I };
-        private readonly ToolStripMenuItem _sendFolder = new("Send a folder and everything in i&t") { ShortcutKeys = Keys.Control | Keys.T };
+        private readonly MenuItem _sendClipboard = new("Send the clip&board") { ShortcutKeys = Keys.Control | Keys.B };
+        private readonly MenuItem _sendFiles = new("Send f&iles") { ShortcutKeys = Keys.Control | Keys.I };
+        private readonly MenuItem _sendFolder = new("Send a folder and everything in i&t") { ShortcutKeys = Keys.Control | Keys.T };
         // Files: first in the Clipboard menu. While files move, it opens a line per file.
         private readonly MenuStatus _transferStatus = new("");
-        private readonly ToolStripMenuItem _transferStop = new("&Stop the file transfer") { Enabled = false };
+        private readonly MenuItem _transferStop = new("&Stop the file transfer") { Enabled = false, WhyNot = "Nothing is being sent or received." };
         // Where Send files and Send a folder from the other PC are saved: the menu item says where.
-        private readonly ToolStripMenuItem _pickReceiveFolder = new("Pic&k where received files go");
-        private readonly ToolStripMenuItem _logging = Menus.Check("Enable lo&gging (writes TailRemote-log.txt next to TailRemote)");
-        private readonly ToolStripMenuItem _sounds = new("Sounds for connecting, clipboard and fi&les...");
-        private readonly ToolStripMenuItem _speedUp = Menus.Check("Catch up b&y fast-forwarding the sound, same pitch (otherwise it skips ahead)");
-        private readonly ToolStripMenuItem _startup = Menus.CheckAsking("Start &hosting when Windows starts (asks for administrator)...");
-        private readonly ToolStripMenuItem _service = Menus.CheckAsking("Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts; Control Alt End sends Control Alt Delete...");
+        private readonly MenuItem _pickReceiveFolder = new("Pic&k where received files go");
+        private readonly MenuItem _logging = Menus.Check("Enable lo&gging (writes TailRemote-log.txt next to TailRemote)");
+        private readonly MenuItem _sounds = new("Sounds for connecting, clipboard and fi&les...");
+        private readonly MenuItem _speedUp = Menus.Check("Catch up b&y fast-forwarding the sound, same pitch (otherwise it skips ahead)");
+        private readonly MenuItem _startup = Menus.CheckAsking("Start &hosting when Windows starts (asks for administrator)...");
+        // (WhyNot for _startup is set in the constructor: CheckAsking makes it.)
+        private readonly MenuItem _service = Menus.CheckAsking("Run as a Windows servi&ce: works at the lock screen, sign-in and UAC prompts; Control Alt End sends Control Alt Delete...");
         private bool _settingService; // set while the checkbox is changed by code, not by the user
-        private readonly ToolStripMenuItem _go = new();
-        private readonly ToolStripMenuItem _toggle = new("Control &remote PC") { ShortcutKeyDisplayString = "Ctrl+Shift+Enter" };
-        private readonly ToolStripMenuItem _update = new("Check for &updates (you have " + Updater.Current + ")") { ShortcutKeys = Keys.Control | Keys.U };
-        private readonly ToolStripMenuItem _audioSetup = new("Set up au&dio device...");
-        private readonly ToolStripMenuItem _audioRemove = new("Remove audio de&vice...");
-        private readonly ToolStripMenuItem _portEditor = new("Port &editor...");
-        private readonly ToolStripMenuItem _restart = new("Restart remote PC and reco&nnect...");
-        private readonly ToolStripMenuItem _updateRemote = new("Update the remote P&C to this PC's version");
-        private readonly ToolStripMenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
-        private readonly ToolStripMenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
-        private readonly ToolStripMenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
-        private readonly ToolStripMenuItem _muteLocal = Menus.Check("&Mute the remote PC while you are not controlling it (it stays connected)");
-        private readonly ToolStripMenuItem _switchTo = new("Switch &to PC");
-        private readonly ToolStripMenuItem _speedHere = new("Internet &speed test on this PC...");
-        private readonly ToolStripMenuItem _speedRemote = new("Internet speed test on the r&emote PC...");
-        private readonly ToolStripMenuItem _backup = new("&Back up settings to a file...");
-        private readonly ToolStripMenuItem _restore = new("&Restore settings from a backup...");
+        private readonly MenuItem _go = new() { WhyNot = "Still connecting." };
+        private readonly MenuItem _toggle = new("Control &remote PC") { ShortcutKeyDisplayString = "Ctrl+Shift+Enter" };
+        private readonly MenuItem _update = new("Check for &updates (you have " + Updater.Current + ")") { ShortcutKeys = Keys.Control | Keys.U, WhyNot = "Already checking for updates." };
+        private readonly MenuItem _audioSetup = new("Set up au&dio device...") { WhyNot = "Already working on the audio device." };
+        private readonly MenuItem _audioRemove = new("Remove audio de&vice...") { WhyNot = "Already working on the audio device." };
+        private readonly MenuItem _portEditor = new("Port &editor...");
+        private readonly MenuItem _restart = new("Restart rem&ote PC and reconnect...");
+        private readonly MenuItem _updateRemote = new("Update the remote P&C to this PC's version");
+        private readonly MenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
+        private readonly MenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
+        private readonly MenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
+        private readonly MenuItem _muteLocal = Menus.Check("&Mute the remote PC while you are not controlling it (it stays connected)");
+        private readonly MenuItem _switchTo = new("Switch &to PC");
+        private readonly MenuItem _speedHere = new("Internet &speed test on this PC...") { WhyNot = "A speed test is already running on this PC." };
+        private readonly MenuItem _speedRemote = new("Internet speed test on the r&emote PC...");
+        private readonly MenuItem _backup = new("&Back up settings to a file...");
+        private readonly MenuItem _restore = new("&Restore settings from a backup...");
         // Several PCs at once: the one in front is _client; these wait in the background, connected
         // but silent, until switched to (Control 1 to 9, or File, Switch to PC).
         private sealed record Parked(string Name, string Address, int Port, string Password, Client Client);
@@ -68,7 +69,7 @@ namespace TailRemote
         private string? _expectUpdate; // the remote PC said it is updating TailRemote to this version: say when it is back
 
         // Host: this PC's addresses, to give the other PC. Enter copies the best one.
-        private readonly ToolStripMenuItem _copyAddress = new();
+        private readonly MenuItem _copyAddress = new();
         private string? _bestAddress;
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
@@ -114,7 +115,7 @@ namespace TailRemote
             };
 
             // The menu bar (Alt, then the arrows): File, Clipboard, Settings.
-            var file = new ToolStripMenuItem("&File");
+            var file = new MenuItem("&File");
             file.DropDownItems.AddRange(new ToolStripItem[]
             {
                 _go, _switchTo, _toggle, _restart, _remoteInfo, _updateRemote, _streaming.Item, new ToolStripSeparator(),
@@ -123,12 +124,12 @@ namespace TailRemote
                 _savePc, _forgetPc, new ToolStripSeparator(),
                 Menus.Action("E&xit", ExitForGood),
             });
-            var clip = new ToolStripMenuItem("&Clipboard");
+            var clip = new MenuItem("&Clipboard");
             clip.DropDownItems.AddRange(new ToolStripItem[]
             {
                 _transferStatus.Item, _sendClipboard, _sendFiles, _sendFolder, _getFiles, _transferStop, new ToolStripSeparator(), _pickReceiveFolder,
             });
-            var set = new ToolStripMenuItem("&Settings");
+            var set = new MenuItem("&Settings");
             set.DropDownItems.AddRange(new ToolStripItem[]
             {
                 _quality.Menu, _announceQuality, _muteLocal, _device.Menu, _captureFrom.Menu, _speedUp, _sounds, new ToolStripSeparator(),
@@ -168,7 +169,8 @@ namespace TailRemote
             _quality.SelectedIndexChanged += (_, _) =>
             {
                 SaveSettings();
-                if (_client != null) _client.LockedStep = _quality.SelectedIndex - 1;
+                // Muted, it stays at the lowest until it is unmuted, which then uses this choice.
+                if (_client != null && !_client.Muted) _client.LockedStep = _quality.SelectedIndex - 1;
             };
             _speedUp.CheckedChanged += (_, _) => { SaveSettings(); if (_player != null) _player.SpeedUp = _speedUp.Checked; };
             DiagLog.Enabled = _settings.Logging;
@@ -267,7 +269,7 @@ namespace TailRemote
             if (tailscale != null) parts.Add("Tailscale " + tailscale);
             parts.Add("name " + Environment.MachineName);
             _bestAddress = lan.Count > 0 ? lan[0].Ip : tailscale;
-            string text = "Cop&y this PC's IP address: " + string.Join(", ", parts).Replace("&", "&&");
+            string text = "Copy this PC's IP a&ddress: " + string.Join(", ", parts).Replace("&", "&&");
             if (_copyAddress.Text != text) _copyAddress.Text = text;
             _copyAddress.Enabled = _bestAddress != null;
         }
@@ -302,6 +304,7 @@ namespace TailRemote
             _startup.Available = host;
             _service.Available = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
+            _startup.WhyNot = "Not needed: the TailRemote service already starts with Windows.";
             UpdateButtons();
         }
 
@@ -312,8 +315,15 @@ namespace TailRemote
             // Alt C and Alt S are the Clipboard and Settings menus, so the button uses other letters.
             if (HostMode) _go.Text = _service.Checked ? "Appl&y settings to the service" : _host == null ? "Start &hosting" : "Stop &hosting";
             else _go.Text = _client == null && !_reconnecting ? "Co&nnect" : "Disco&nnect";
-            _toggle.Enabled = _client != null && !_client.ListenOnly;
-            _restart.Enabled = _updateRemote.Enabled = _remoteInfo.Enabled = _getFiles.Enabled = _speedRemote.Enabled = _client != null && !_client.ListenOnly;
+            bool canUse = _client != null && !_client.ListenOnly;
+            string why = _client == null ? "Connect to a PC first." : "Not on a listen-only connection: it needs the control password.";
+            foreach (var item in new[] { _toggle, _restart, _updateRemote, _remoteInfo, _getFiles, _speedRemote })
+            {
+                item.Enabled = canUse;
+                item.WhyNot = why;
+            }
+            if (_speedRemoteRunning) { _speedRemote.Enabled = false; _speedRemote.WhyNot = "A speed test is already running on the remote PC."; }
+            _mode.Menu.WhyNot = "Disconnect, or stop hosting, first.";
             EnsureServiceLink();
             SaveResumeState();
         }
@@ -659,7 +669,7 @@ namespace TailRemote
             try { text = await c.RequestInfoAsync(); }
             catch { Say("The remote PC did not answer."); return; }
             if (_client != c) return;
-            using var f = new RemoteInfoForm(c, text, Say);
+            using var f = new RemoteInfoForm(() => _client, text, Say);
             f.ShowDialog(this);
         }
 
@@ -667,7 +677,7 @@ namespace TailRemote
         {
             if (!CanUseRemote(out var c)) return;
             Doing("getting files from the remote PC");
-            using var f = new RemoteFilesForm(c, Say);
+            using var f = new RemoteFilesForm(() => _client, Say);
             f.ShowDialog(this);
         }
 
@@ -696,14 +706,17 @@ namespace TailRemote
         }
 
         /// <summary>Control 1 to 9: connect to that saved PC, leaving the one connected now.</summary>
-        protected override void OnKeyDown(KeyEventArgs e)
+        // Here, not OnKeyDown: the window is blank with nothing in it to have focus, so its key
+        // events never came and Control 1 to 9 did nothing at all. Command keys always arrive here.
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            base.OnKeyDown(e);
-            if (e.Control && !e.Alt && !e.Shift && e.KeyCode >= Keys.D1 && e.KeyCode <= Keys.D9)
+            Keys key = keyData & Keys.KeyCode;
+            if ((keyData & Keys.Modifiers) == Keys.Control && key >= Keys.D1 && key <= Keys.D9)
             {
-                e.Handled = e.SuppressKeyPress = true;
-                QuickConnect(e.KeyCode - Keys.D0);
+                QuickConnect(key - Keys.D0);
+                return true;
             }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void QuickConnect(int n)
@@ -843,16 +856,19 @@ namespace TailRemote
             finally { _speedHere.Enabled = true; }
         }
 
+        private bool _speedRemoteRunning;
+
         private async void SpeedTestRemote()
         {
             if (!CanUseRemote(out var c)) return;
             Doing("testing the remote PC's internet speed");
-            _speedRemote.Enabled = false;
+            _speedRemoteRunning = true;
+            UpdateButtons();
             Say("The remote PC is testing its internet speed. It takes about 20 seconds, and its sound may break up meanwhile.");
             string text;
             try { text = await c.RequestSpeedTestAsync(); }
             catch { text = "Problem: the remote PC did not answer."; }
-            finally { UpdateButtons(); }
+            finally { _speedRemoteRunning = false; UpdateButtons(); }
             ShowSpeed("The remote PC's internet speed", text);
         }
 
@@ -890,14 +906,20 @@ namespace TailRemote
             return done.Task;
         }
 
+        /// <summary>Asks until it is long enough (saying why first), or null when cancelled.</summary>
         private string? AskBackupPassword(string prompt)
         {
-            using var f = new TextForm("Backup password", prompt, "", secret: true);
-            if (f.ShowDialog(this) != DialogResult.OK) return null;
-            if (f.Value.Length >= MinPasswordLength) return f.Value;
-            Say("The backup password needs at least " + MinPasswordLength + " characters.");
-            return null;
+            string? problem = null;
+            while (true)
+            {
+                using var f = new TextForm("Backup password", problem == null ? prompt : problem + " " + prompt, "", secret: true);
+                if (f.ShowDialog(this) != DialogResult.OK) return null;
+                if (f.Value.Length >= MinPasswordLength) return f.Value;
+                problem = "That has " + f.Value.Length + (f.Value.Length == 1 ? " character" : " characters") + ": it needs at least " + MinPasswordLength + ".";
+            }
         }
+
+        private bool Busy => _client != null || _host != null || _reconnecting || _connecting || _parked.Count > 0;
 
         private async void BackupSettings()
         {
@@ -913,7 +935,7 @@ namespace TailRemote
             {
                 System.IO.File.WriteAllBytes(path, _settings.Export(pw));
                 int n = _settings.SavedPcs.Count;
-                Say("Backed up every setting and " + n + (n == 1 ? " saved PC" : " saved PCs") + " to " + path + ".");
+                Say("Backed up every setting and " + (n == 0 ? "no" : n.ToString()) + (n == 1 ? " saved PC" : " saved PCs") + " to " + path + ".");
             }
             catch (Exception e) { Say("Could not write the backup: " + e.Message); }
         }
@@ -921,19 +943,35 @@ namespace TailRemote
         private async void RestoreSettings()
         {
             Doing("restoring settings");
-            if (_client != null || _host != null || _reconnecting || _connecting || _parked.Count > 0) { Say("Disconnect, or stop hosting, first."); return; }
+            if (Busy) { Say("Disconnect, or stop hosting, first."); return; }
             string? path;
             try { path = await PickBackupFile(save: false); }
             catch (Exception e) { Say("Could not open the file box: " + e.Message); return; }
             if (path == null) return;
-            string? pw = AskBackupPassword("The backup's password:");
-            if (pw == null) return;
-            Settings restored;
-            try { restored = Settings.Import(System.IO.File.ReadAllBytes(path), pw); }
-            catch (Exception e) { Say(e.Message); return; }
+            byte[] data;
+            try
+            {
+                // A backup is a few kilobytes: anything big is some other file, not read whole.
+                if (new System.IO.FileInfo(path).Length > 4 << 20) { Say("That is not a TailRemote settings backup: it is far too big."); return; }
+                data = System.IO.File.ReadAllBytes(path);
+            }
+            catch (Exception e) { Say("Could not read the file: " + e.Message); return; }
+            Settings? restored = null;
+            string? problem = null;
+            while (restored == null)
+            {
+                string? pw = AskBackupPassword((problem != null ? problem + " " : "") + "The backup's password:");
+                if (pw == null) return;
+                try { restored = Settings.Import(data, pw); }
+                catch (System.Security.Cryptography.CryptographicException) { problem = "That password is not the backup's."; }
+                catch (Exception e) when (e.Message.Contains("password", StringComparison.OrdinalIgnoreCase)) { problem = e.Message; }
+                catch (Exception e) { Say(e.Message); return; }
+            }
             int n = restored.SavedPcs.Count;
             if (MessageBox.Show(this, "Replace TailRemote's settings on this PC with the backup's? It has " + n + (n == 1 ? " saved PC" : " saved PCs") + ".",
                     "Restore settings", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            // Again: the window could be used while the boxes were open (a connection started meanwhile).
+            if (Busy) { Say("Not restored: disconnect, or stop hosting, first."); return; }
             _settings.CopyFrom(restored);
             _settings.Save();
             LoadIntoWindow();
@@ -1133,8 +1171,7 @@ namespace TailRemote
             _saved.Add("None: type the address");
             for (int n = 0; n < _settings.SavedPcs.Count; n++)
             {
-                var item = _saved.Add(_settings.SavedPcs[n].ToString());
-                if (n < 9) item.ShortcutKeyDisplayString = "Ctrl+" + (n + 1); // Control 1 to 9 connect to it (OnKeyDown)
+                _saved.Add(_settings.SavedPcs[n].ToString()); // (Control 1 to 9 belong to Switch to PC, which connects)
             }
             int i = _settings.SavedPcs.FindIndex(p => p.Address == _settings.Address && p.Port == _settings.Port);
             _saved.SelectedIndex = i + 1;
@@ -1217,6 +1254,8 @@ namespace TailRemote
                 c.LockedStep = _quality.SelectedIndex - 1;
                 c.StartBest();
             }
+            // Muting and unmuting move the quality on purpose: nothing to announce.
+            _qualitySaid = c.AudioQuality;
         }
 
         private void ModeChanged(bool remote)
@@ -1498,8 +1537,13 @@ namespace TailRemote
             catch { } // an abandoned attempt failing: nobody is waiting for it
             finally
             {
-                _connecting = false;
-                _go.Enabled = true;
+                // Only the latest attempt: an abandoned one finishing late (after Control 2 started
+                // another) must not say the new one is done connecting.
+                if (attempt == _attempt)
+                {
+                    _connecting = false;
+                    _go.Enabled = true;
+                }
                 UpdateButtons();
                 UpdateTitle();
             }
@@ -1615,7 +1659,7 @@ namespace TailRemote
         private async void RemoteUpdate(string requested, Action<string> reply)
         {
             Doing("updating for the controlling PC");
-            if (!Version.TryParse(requested, out var want)) return;
+            if (!Version.TryParse(requested, out var want)) { reply("TailRemote on the remote PC did not understand the version " + requested + "."); return; }
             if (_updating) { reply("TailRemote on the remote PC is already updating."); return; }
             if (want <= Updater.Current) { reply("The remote PC already has TailRemote " + Updater.Current + "."); return; }
             try

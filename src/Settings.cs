@@ -64,7 +64,9 @@ namespace TailRemote
         /// <summary>What was running when TailRemote last closed: "host", "connect" or "". Used by --resume.</summary>
         public string ResumeState { get; set; } = "";
 
-        private static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
+        // TAILREMOTE_SETTINGS_DIR: test copies keep their settings apart from the real ones.
+        private static string Dir => Environment.GetEnvironmentVariable("TAILREMOTE_SETTINGS_DIR") is { Length: > 0 } test ? test
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
         internal static string FilePath => Path.Combine(Dir, "settings.json");
         // Save() writes here first, then atomically replaces FilePath, so a crash or power loss
         // mid-write can never leave a half-written settings.json as the live file.

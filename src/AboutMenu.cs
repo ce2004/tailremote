@@ -17,7 +17,7 @@ namespace TailRemote
 
         public static ToolStripMenuItem Build(Form owner, MenuStrip bar, ToolStripMenuItem update)
         {
-            var about = new ToolStripMenuItem("&About");
+            var about = new MenuItem("&About");
             about.DropDownItems.AddRange(new ToolStripItem[]
             {
                 update,
@@ -123,7 +123,7 @@ namespace TailRemote
             {
                 foreach (ToolStripItem i in items)
                 {
-                    if (i is not ToolStripMenuItem m) continue;
+                    if (i is not ToolStripMenuItem m || !m.Available) continue; // only what this mode has
                     if (m.ShortcutKeys != Keys.None)
                         lines.Add(m.Text!.Replace("&&", "\u0001").Replace("&", "").Replace("\u0001", "&").TrimEnd('.') + ": " + KeyWords(m.ShortcutKeys));
                     Walk(m.DropDownItems);
