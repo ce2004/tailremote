@@ -10,8 +10,12 @@ using System.Threading;
 
 namespace TailRemote
 {
-    /// <summary>How one picture is sent: its widest (0: as it is), quality (1 to 100 for JPEG; Lossless for PNG, every pixel exact), and the most pictures a second.</summary>
-    internal readonly record struct VideoSettings(int MaxWidth, int Quality, int Fps)
+    /// <summary>
+    /// How the screen is sent: its widest (0: as it is), the still pictures' quality (1 to 100 for JPEG;
+    /// Lossless for PNG, every pixel exact) and most a second, and H.264's bitrate while things move
+    /// (kbit/s; 0: still pictures only).
+    /// </summary>
+    internal readonly record struct VideoSettings(int MaxWidth, int Quality, int Fps, int VideoKbps = 0)
     {
         public const int Lossless = 101;
 
@@ -138,32 +142,242 @@ namespace TailRemote
         [DllImport("gdi32.dll")] private static extern int GetDIBits(IntPtr dc, IntPtr bmp, uint start, uint lines, byte[] bits, ref BITMAPINFOHEADER info, uint usage);
     }
 
+    /// <summary>A way to take the screen: the picture now (at most this wide), waiting up to waitMs for a change. Null: nothing to take.</summary>
+    internal delegate Frame? ScreenTaker(int maxWidth, int waitMs, out bool changed);
+
     /// <summary>
-    /// The screen as a stream of updates, one per viewer. Each update holds only what changed since
-    /// the last one that viewer got (64-pixel tiles, those side by side joined into strips, each a
-    /// JPEG), or everything for a fresh start: a still screen costs nothing, typing costs a few kB.
+    /// The screen as this PC can take it: Desktop Duplication (Windows hands over the screen only when it
+    /// changes, as fast as it changes), else GDI's copy. In the service's agent it follows the desktop
+    /// that has the keyboard first, so the lock screen, the sign-in screen and UAC prompts are taken too.
+    /// One thread at a time.
+    /// </summary>
+    internal sealed class ScreenSource : IDisposable
+    {
+        private readonly DesktopDuplication _dd = new();
+        private long _gdiAt;
+        private int _gdiGap = 33;
+        private Frame? _gdiLast;
+        private Frame? _scaled, _scaledFrom;
+        private int _scaledWidth;
+
+        // Taking and letting go take turns (a viewer's thread may be taking when hosting stops).
+        private readonly object _gate = new();
+        private bool _disposed;
+
+        public Frame? Take(int maxWidth, int waitMs, out bool changed)
+        {
+            changed = false;
+            lock (_gate) return _disposed ? null : TakeNow(maxWidth, waitMs, out changed);
+        }
+
+        private Frame? TakeNow(int maxWidth, int waitMs, out bool changed)
+        {
+            // Real pixels, and the pointer where it really is: the agent is not told the display's scaling otherwise.
+            IntPtr dpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
+            try
+            {
+                if (Native.FollowInputDesktop) Native.FollowInputDesktopNow();
+                var f = _dd.Take(waitMs, out changed);
+                if (f == null) return FromGdi(maxWidth, out changed);
+                _gdiLast = null;
+                if (maxWidth <= 0 || f.Width <= maxWidth) return f;
+                if (!changed && ReferenceEquals(_scaledFrom, f) && _scaledWidth == maxWidth && _scaled != null) return _scaled;
+                _scaledFrom = f; _scaledWidth = maxWidth;
+                _scaled = Smaller(f, maxWidth);
+                return _scaled;
+            }
+            finally { SetThreadDpiAwarenessContext(dpi); }
+        }
+
+        /// <summary>
+        /// GDI's copy, which never says what changed: about 30 a second while the screen changes, then
+        /// less and less often (down to twice a second) while it stays the same, so a still screen costs
+        /// little; the same picture is handed back (changed false) when nothing changed.
+        /// </summary>
+        private Frame? FromGdi(int maxWidth, out bool changed)
+        {
+            changed = false;
+            long wait = _gdiGap - (Environment.TickCount64 - _gdiAt);
+            if (wait > 0) Thread.Sleep((int)wait);
+            _gdiAt = Environment.TickCount64;
+            var f = ScreenCapture.Capture(maxWidth);
+            if (f == null) return null;
+            if (_gdiLast != null && _gdiLast.Width == f.Width && _gdiLast.Height == f.Height && _gdiLast.Pixels.AsSpan().SequenceEqual(f.Pixels))
+            {
+                _gdiGap = Math.Min(500, _gdiGap * 2);
+                return _gdiLast;
+            }
+            _gdiGap = 33;
+            _gdiLast = f;
+            changed = true;
+            return f;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+        /// <summary>A smaller copy (a slow line's step): each pixel the average of the ones it covers, so text stays as readable as it can.</summary>
+        private static Frame Smaller(Frame f, int maxWidth)
+        {
+            int ow = maxWidth, oh = Math.Max(1, (int)((long)f.Height * maxWidth / f.Width));
+            var o = new byte[ow * oh * 4];
+            System.Threading.Tasks.Parallel.For(0, oh, y =>
+            {
+                int y0 = y * f.Height / oh, y1 = Math.Max(y0 + 1, (y + 1) * f.Height / oh);
+                for (int x = 0; x < ow; x++)
+                {
+                    int x0 = x * f.Width / ow, x1 = Math.Max(x0 + 1, (x + 1) * f.Width / ow);
+                    int b = 0, g = 0, r = 0, n = 0;
+                    for (int sy = y0; sy < y1; sy++)
+                        for (int sx = x0; sx < x1; sx++)
+                        {
+                            int i = (sy * f.Width + sx) * 4;
+                            b += f.Pixels[i]; g += f.Pixels[i + 1]; r += f.Pixels[i + 2]; n++;
+                        }
+                    int k = (y * ow + x) * 4;
+                    o[k] = (byte)(b / n); o[k + 1] = (byte)(g / n); o[k + 2] = (byte)(r / n); o[k + 3] = 255;
+                }
+            });
+            return new Frame { Width = ow, Height = oh, Pixels = o };
+        }
+
+        public void Dispose() { lock (_gate) { _disposed = true; _dd.Dispose(); } }
+    }
+
+    /// <summary>
+    /// The screen as a stream of updates, one per viewer, the way game streaming and video calls do it,
+    /// with exact still pictures on top:
+    ///  - While things move (scrolling, a window dragged, a video playing: much of the screen changing
+    ///    within half a second), H.264 (H264Encoder: the graphics chip's encoder, or Windows' own in
+    ///    software), every change, up to 60 a second.
+    ///  - Otherwise (typing, menus, a still screen), still pictures of only what changed: 64-pixel tiles,
+    ///    those side by side joined into strips, JPEG or lossless PNG. Once moving stops, the whole
+    ///    screen comes again this way, so what is left on the viewer's screen is exact.
+    /// A still screen costs nothing: the screen is only looked at again when Windows says it changed.
+    /// Where H.264 will not work, still pictures carry everything, and H.264 is tried again later.
     ///
-    /// An update: u8 1, u16 width, u16 height, u8 flags (1 = everything), u16 strips, then per strip
+    /// Still pictures: u8 1, u16 width, u16 height, u8 flags (1 = everything), u16 strips, then per strip
     /// u16 x, u16 y, u16 width, u16 height, i32 length, JPEG (or PNG, when lossless).
+    /// H.264: u8 2, u16 width, u16 height, u8 flags (1 = key frame), then the frame (Annex B).
     /// </summary>
     internal sealed class ScreenVideo
     {
         public const int Tile = 64;
-        private readonly Func<int, Frame?> _capture;
-        private readonly Dictionary<int, Frame> _sent = new(); // what each viewer has now
+        public const byte StillPicture = 1, VideoFrame = 2;
+        private readonly ScreenTaker _take;
+        private readonly object _taking = new();
+        private readonly Dictionary<int, Viewer> _viewers = new();
         private static readonly ImageCodecInfo Jpeg = ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
 
-        public ScreenVideo(Func<int, Frame?> capture) => _capture = capture;
+        /// <summary>Test only: no H.264, still pictures only (the tests of still pictures need exact pixels).</summary>
+        public bool NoVideo;
 
-        public int Viewers { get { lock (_sent) return _sent.Count; } }
+        private sealed class Viewer
+        {
+            public Frame? Has;    // what the viewer has from still pictures: what changes are worked out from
+            public Frame? Seen;   // the last picture taken for this viewer
+            public H264Encoder? Encoder;
+            public bool Moving, NeedsWhole;
+            public long VideoOffUntil; // H.264 would not start here: still pictures only until then
+            public readonly Queue<(long At, bool[] Tiles)> Changes = new(); // which tiles changed, when
+        }
 
-        /// <summary>The next update for this viewer: null if there is no picture to take, empty if nothing changed.</summary>
+        public ScreenVideo(ScreenTaker take) => _take = take;
+        public ScreenVideo(Func<int, Frame?> take) : this((int w, int _, out bool changed) => { changed = true; return take(w); }) { }
+
+        public int Viewers { get { lock (_viewers) return _viewers.Count; } }
+
+        /// <summary>Test only: this viewer is being sent H.264 now.</summary>
+        public bool IsMoving(int viewer) { lock (_viewers) return _viewers.TryGetValue(viewer, out var v) && v.Moving; }
+
+        /// <summary>The next update for this viewer: null if there is no picture to take, empty if there is nothing new to send.</summary>
         public byte[]? Update(int viewer, bool everything, VideoSettings settings)
         {
-            var f = _capture(settings.MaxWidth);
+            Viewer v;
+            lock (_viewers) if (!_viewers.TryGetValue(viewer, out v!)) _viewers[viewer] = v = new Viewer();
+            Frame? f;
+            lock (_taking) f = _take(settings.MaxWidth, 16, out _);
             if (f == null) return null;
-            Frame? had;
-            lock (_sent) _sent.TryGetValue(viewer, out had);
+            long now = Environment.TickCount64;
+            double part = 0;
+            if (!ReferenceEquals(f, v.Seen))
+            {
+                bool[]? tiles = v.Seen == null || v.Seen.Width != f.Width || v.Seen.Height != f.Height ? null : ChangedTiles(v.Seen, f);
+                if (tiles == null) { v.Changes.Clear(); part = 1; } // a new size: no history to judge motion by
+                else
+                {
+                    int n = 0;
+                    foreach (bool t in tiles) if (t) n++;
+                    part = (double)n / Math.Max(1, tiles.Length);
+                    if (n > 0) v.Changes.Enqueue((now, tiles));
+                }
+                v.Seen = f;
+            }
+            while (v.Changes.Count > 0 && now - v.Changes.Peek().At > 1000) v.Changes.Dequeue();
+            var (halfFrames, halfArea) = Motion(v, now, 500);
+            var (secondFrames, secondArea) = Motion(v, now, 1000);
+            bool mayMove = !NoVideo && settings.VideoKbps > 0 && now >= v.VideoOffUntil;
+            // Moving: change again and again (4 times or more within half a second) over a real part of
+            // the screen together (a fifth of it: a scroll, a drag, a video). One big change (Alt Tab, a
+            // new page) is one exact picture; typing, menus and the mouse cover too little; all stay exact.
+            if (!v.Moving && mayMove && halfFrames >= 4 && halfArea >= 0.2) { v.Moving = true; everything = true; }
+            if (v.Moving && (!mayMove || secondFrames < 3 || secondArea < 0.05))
+            {
+                v.Moving = false;
+                v.NeedsWhole = true; // what H.264 left on the viewer's screen is replaced by an exact picture
+                v.Encoder?.Dispose(); v.Encoder = null;
+            }
+            if (v.Moving)
+            {
+                if (part == 0 && !everything) return Array.Empty<byte>();
+                byte[]? frame = Encode(v, f, everything, settings.VideoKbps);
+                if (frame != null) return frame;
+                // H.264 will not work here (no encoder, or it failed): still pictures carry everything, and
+                // it is tried again in a minute.
+                v.Moving = false; v.NeedsWhole = true; v.VideoOffUntil = now + 60_000;
+            }
+            if (v.NeedsWhole) everything = true;
+            if (part == 0 && !everything && v.Has != null) return Array.Empty<byte>();
+            byte[] update = Stills(v, f, everything, settings);
+            if (everything && update.Length > 0) v.NeedsWhole = false;
+            return update;
+        }
+
+        private static byte[]? Encode(Viewer v, Frame f, bool key, int kbps)
+        {
+            int w = f.Width & ~1, h = f.Height & ~1;
+            if (v.Encoder == null || v.Encoder.Width != w || v.Encoder.Height != h)
+            {
+                v.Encoder?.Dispose();
+                v.Encoder = H264Encoder.Create(w, h, 60, kbps);
+                if (v.Encoder == null) return null;
+                key = true;
+            }
+            v.Encoder.SetBitrate(kbps);
+            byte[]? data = v.Encoder.Encode(f, key, out bool isKey);
+            if (data == null)
+            {
+                // The graphics chip's encoder failed: Windows' own from now on, straight away.
+                bool wasHardware = v.Encoder.Hardware;
+                v.Encoder.Dispose(); v.Encoder = null;
+                if (!wasHardware) return null;
+                H264Encoder.HardwareFailed();
+                v.Encoder = H264Encoder.Create(w, h, 60, kbps);
+                data = v.Encoder?.Encode(f, true, out isKey);
+                if (data == null) { v.Encoder?.Dispose(); v.Encoder = null; return null; }
+            }
+            if (data.Length == 0) return Array.Empty<byte>(); // the encoder is still filling up
+            byte[] m = new byte[6 + data.Length];
+            m[0] = VideoFrame;
+            BitConverter.TryWriteBytes(m.AsSpan(1), (ushort)w);
+            BitConverter.TryWriteBytes(m.AsSpan(3), (ushort)h);
+            m[5] = (byte)(isKey ? 1 : 0);
+            data.CopyTo(m, 6);
+            return m;
+        }
+
+        private static byte[] Stills(Viewer v, Frame f, bool everything, VideoSettings settings)
+        {
+            Frame? had = v.Has;
             bool all = everything || had == null || had.Width != f.Width || had.Height != f.Height;
             var strips = new List<Rectangle>();
             for (int y = 0; y < f.Height; y += Tile)
@@ -181,7 +395,7 @@ namespace TailRemote
             using var ms = new MemoryStream();
             using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
             {
-                w.Write((byte)1); w.Write((ushort)f.Width); w.Write((ushort)f.Height); w.Write((byte)(all ? 1 : 0)); w.Write((ushort)strips.Count);
+                w.Write(StillPicture); w.Write((ushort)f.Width); w.Write((ushort)f.Height); w.Write((byte)(all ? 1 : 0)); w.Write((ushort)strips.Count);
                 bool lossless = settings.Quality >= VideoSettings.Lossless;
                 using var q = new EncoderParameters(1);
                 q.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)Math.Clamp(settings.Quality, 1, 100));
@@ -200,11 +414,49 @@ namespace TailRemote
                     ms.Position = end;
                 }
             }
-            lock (_sent) _sent[viewer] = f;
+            v.Has = f;
             return ms.ToArray();
         }
 
-        public void Forget(int viewer) { lock (_sent) _sent.Remove(viewer); }
+        public void Forget(int viewer)
+        {
+            Viewer? v;
+            lock (_viewers) { if (!_viewers.Remove(viewer, out v)) return; }
+            v.Encoder?.Dispose();
+        }
+
+        /// <summary>Which tiles changed between two pictures of the same size.</summary>
+        private static bool[] ChangedTiles(Frame a, Frame b)
+        {
+            int across = (b.Width + Tile - 1) / Tile, down = (b.Height + Tile - 1) / Tile;
+            var map = new bool[across * down];
+            for (int ty = 0; ty < down; ty++)
+                for (int tx = 0; tx < across; tx++)
+                {
+                    int x = tx * Tile, y = ty * Tile;
+                    map[ty * across + tx] = Changed(a, b, x, y, Math.Min(Tile, b.Width - x), Math.Min(Tile, b.Height - y));
+                }
+            return map;
+        }
+
+        /// <summary>Within the last ms: how many pictures changed, and how much of the screen changed in any of them (the tiles together, 0 to 1).</summary>
+        private static (int Frames, double Area) Motion(Viewer v, long now, int ms)
+        {
+            bool[]? union = null;
+            int frames = 0;
+            foreach (var (at, tiles) in v.Changes)
+            {
+                if (now - at > ms) continue;
+                frames++;
+                union ??= new bool[tiles.Length];
+                if (union.Length != tiles.Length) continue;
+                for (int i = 0; i < tiles.Length; i++) union[i] |= tiles[i];
+            }
+            if (union == null) return (0, 0);
+            int n = 0;
+            foreach (bool t in union) if (t) n++;
+            return (frames, (double)n / union.Length);
+        }
 
         private static bool Changed(Frame a, Frame b, int x, int y, int w, int h)
         {
@@ -230,22 +482,34 @@ namespace TailRemote
         }
     }
 
-    /// <summary>The viewer's copy of the remote screen, kept up to date from the updates. Lock Gate to read Picture.</summary>
+    /// <summary>
+    /// The viewer's copy of the remote screen, kept up to date from the updates: still pictures drawn
+    /// in where they go, H.264 frames decoded (Windows' own decoder) over the whole of it. Lock Gate to
+    /// read Picture.
+    /// </summary>
     internal sealed class VideoCanvas : IDisposable
     {
         public readonly object Gate = new();
         public Bitmap? Picture { get; private set; }
+        private H264Decoder? _decoder;
+        private byte[]? _decoded;
+        // Decoding (the stream's thread) and closing (the window's) take turns: freeing the decoder in the
+        // middle of a frame would crash the process.
+        private readonly object _decoding = new();
+        private bool _disposed;
 
         /// <summary>
-        /// Applies one update; returns how many strips it held. Throws on a damaged one. Decoded before
-        /// the lock is taken, so a big picture never holds up the window drawing the last one. Only JPEG
-        /// and PNG of exactly the size given are taken: anything else (another image kind, a size that
-        /// does not fit, a length past the end) is damage.
+        /// Applies one update; returns how many pieces it held (0: an H.264 frame not out yet), or -1 when
+        /// the H.264 stream cannot go on from here (ask for a key frame). Throws on a damaged one. Still
+        /// pictures are decoded before the lock is taken, so a big one never holds up the window drawing
+        /// the last; only JPEG and PNG of exactly the size given are taken.
         /// </summary>
         public int Apply(byte[] m, int offset)
         {
+            if (m.Length - offset < 6) throw new InvalidDataException("a picture cut short");
+            if (m[offset] == ScreenVideo.VideoFrame) return ApplyVideo(m, offset);
             using var r = new BinaryReader(new MemoryStream(m, offset, m.Length - offset));
-            if (r.ReadByte() != 1) throw new InvalidDataException("a picture of a kind this version does not know");
+            if (r.ReadByte() != ScreenVideo.StillPicture) throw new InvalidDataException("a picture of a kind this version does not know");
             int width = r.ReadUInt16(), height = r.ReadUInt16();
             bool all = (r.ReadByte() & 1) != 0;
             int count = r.ReadUInt16();
@@ -283,10 +547,51 @@ namespace TailRemote
             return count;
         }
 
-        /// <summary>A pixel of the copy (tests), or Empty if there is none yet.</summary>
-        public Color At(int x, int y) { lock (Gate) return Picture == null || x >= Picture.Width || y >= Picture.Height ? Color.Empty : Picture.GetPixel(x, y); }
+        private int ApplyVideo(byte[] m, int offset)
+        {
+            int width = BitConverter.ToUInt16(m, offset + 1), height = BitConverter.ToUInt16(m, offset + 3);
+            if (width < 16 || height < 16) throw new InvalidDataException("a video frame of no size");
+            if ((long)width * height > 8192L * 8192) throw new InvalidDataException("a video frame far too big");
+            bool got;
+            lock (_decoding)
+            {
+                if (_disposed) return 0;
+                _decoder ??= H264Decoder.Create();
+                if (_decoder == null) return -1;
+                if (_decoded == null || _decoded.Length != width * height * 4) _decoded = new byte[width * height * 4];
+                if (!_decoder.Decode(m, offset + 6, m.Length - offset - 6, width, height, _decoded, out got))
+                {
+                    _decoder.Dispose(); _decoder = null; // a fresh decoder for the key frame asked for
+                    return -1;
+                }
+            }
+            if (!got) return 0;
+            lock (Gate)
+            {
+                if (Picture == null || Picture.Width != width || Picture.Height != height)
+                {
+                    Picture?.Dispose();
+                    Picture = new Bitmap(width, height, PixelFormat.Format32bppRgb);
+                }
+                var d = Picture.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+                try
+                {
+                    for (int row = 0; row < height; row++)
+                        Marshal.Copy(_decoded, row * width * 4, d.Scan0 + row * d.Stride, width * 4);
+                }
+                finally { Picture.UnlockBits(d); }
+            }
+            return 1;
+        }
 
-        public void Dispose() { lock (Gate) { Picture?.Dispose(); Picture = null; } }
+        /// <summary>A pixel of the copy (tests), or Empty if there is none yet.</summary>
+        public System.Drawing.Color At(int x, int y) { lock (Gate) return Picture == null || x >= Picture.Width || y >= Picture.Height ? System.Drawing.Color.Empty : Picture.GetPixel(x, y); }
+
+        public void Dispose()
+        {
+            lock (Gate) { Picture?.Dispose(); Picture = null; }
+            lock (_decoding) { _disposed = true; _decoder?.Dispose(); _decoder = null; }
+        }
     }
 
     /// <summary>
@@ -304,7 +609,11 @@ namespace TailRemote
         public event Action<string>? Note;
         /// <summary>Raised once, when this stream is disposed.</summary>
         public event Action? Stopped;
-        public int Pictures, LastStrips, Reconnects;
+        public int Pictures, LastStrips, Reconnects, VideoFrames;
+        private readonly Queue<long> _times = new();
+
+        /// <summary>Pictures shown in the last second: the frame rate, for the title bar.</summary>
+        public int PerSecond { get { lock (_times) { long t = Environment.TickCount64; while (_times.Count > 0 && t - _times.Peek() > 1000) _times.Dequeue(); return _times.Count; } } }
         public long Bytes;
         private readonly Func<(TcpClient, SecureLink)?> _dial;
         private volatile bool _stop;
@@ -363,7 +672,11 @@ namespace TailRemote
                                 {
                                     uint number = BitConverter.ToUInt32(buffer, 1);
                                     byte[] update = buffer.AsSpan(5, n - 5).ToArray();
-                                    LastStrips = Canvas.Apply(update, 0);
+                                    int pieces = Canvas.Apply(update, 0);
+                                    if (pieces < 0) { Send(new[] { Protocol.VideoAgain }); pieces = 0; } // the H.264 stream broke here: a key frame, please
+                                    LastStrips = pieces;
+                                    if (update.Length > 0 && update[0] == ScreenVideo.VideoFrame) Interlocked.Increment(ref VideoFrames);
+                                    lock (_times) { long t = Environment.TickCount64; _times.Enqueue(t); while (_times.Count > 0 && t - _times.Peek() > 1000) _times.Dequeue(); }
                                     saw = true;
                                     Interlocked.Increment(ref Pictures);
                                     Interlocked.Add(ref Bytes, n);

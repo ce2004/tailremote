@@ -1,3 +1,10 @@
+3.1.0
+New feature: smooth video of the remote screen, up to 60 frames a second, the way game streaming and video calls do it. While things move on the remote PC, such as scrolling, dragging a window or a video playing, it streams H.264 video, using the remote PC's graphics chip when it has one and Windows' own encoder when it does not. As soon as things stop moving, an exact picture follows, every pixel as on the remote screen.
+New feature: the remote screen's title bar says how many frames a second are coming.
+Changed: the remote screen is now taken the way Windows hands it out the moment it changes, so a still screen costs nothing and changes show straight away. When Kova runs as the service there, that includes the welcome screen, the lock screen and administrator prompts.
+Changed: the remote screen no longer sends fewer pictures when a PC runs on battery.
+Changed: the remote PC only takes in its sound while a PC is listening, and stops a few seconds after nobody is. Like the screen, nothing is taken or sent unless someone asks for it.
+
 3.0.0
 New feature: see the remote PC's screen. While connected, press Control Shift S (File, Show the remote screen) and a window shows it, kept up to date as it changes. NVDA plus R reads it with Windows' text recognition. Escape closes it, F5 gets a whole new picture, and Control Shift Enter controls the remote PC from there.
 New feature: the picture follows your connection by itself, like the sound does: as sharp as the line carries, up to every pixel exactly as on the remote screen, and lighter the moment the line cannot keep up. There is nothing to set.

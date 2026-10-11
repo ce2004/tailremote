@@ -174,15 +174,6 @@ namespace TailRemote
             return SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 1;
         }
 
-        // ---- Power ----
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct SYSTEM_POWER_STATUS { public byte ACLineStatus, BatteryFlag, BatteryLifePercent, SystemStatusFlag; public int BatteryLifeTime, BatteryFullLifeTime; }
-        [DllImport("kernel32.dll")] private static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
-
-        /// <summary>Running on battery right now (unplugged): the remote screen sends fewer pictures to spare it.</summary>
-        public static bool OnBattery() => GetSystemPowerStatus(out var s) && s.ACLineStatus == 0;
-
         // ---- DPAPI ----
 
         [StructLayout(LayoutKind.Sequential)]

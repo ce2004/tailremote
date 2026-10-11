@@ -9,10 +9,11 @@
     <Product>Kova</Product>
     <AssemblyTitle>Kova</AssemblyTitle>
     <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks> <!-- Desktop Duplication and Media Foundation are called through their COM tables (Dxgi.cs, H264.cs) -->
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>3.0.0</Version>
+    <Version>3.1.0</Version>
     <!-- ARM64 by default; "dotnet publish -r win-x64" builds the x64 copy. -->
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-arm64</RuntimeIdentifier>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

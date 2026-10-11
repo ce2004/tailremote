@@ -112,7 +112,8 @@ namespace TailRemote
             _key = Protocol.DeriveKey(password, _salt);
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword, _salt);
             _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
-            var screen = new ScreenVideo(ScreenCapture.Capture);
+            _screenSource = new ScreenSource();
+            var screen = new ScreenVideo(_screenSource.Take);
             VideoUpdate = screen.Update;
             VideoForget = screen.Forget;
 
@@ -141,7 +142,8 @@ namespace TailRemote
             new Thread(LogLoop) { IsBackground = true, Name = "Kova host log" }.Start();
             new Thread(KeySafety) { IsBackground = true, Name = "Kova key safety" }.Start();
 
-            lock (_gate) StartCapture();
+            // No capture yet: the sound is taken only while some PC wants it (AudioDemand).
+            new Thread(AudioDemand) { IsBackground = true, Name = "Kova sound on demand" }.Start();
             _wifi = new WlanStreaming("host"); // steady Wi-Fi while hosting
             new Thread(AcceptLoop) { IsBackground = true, Name = "Kova accept" }.Start();
             new Thread(UdpLoop) { IsBackground = true, Name = "Kova host udp" }.Start();
@@ -151,6 +153,7 @@ namespace TailRemote
         {
             _stop = true;
             _wifi?.Dispose();
+            _screenSource?.Dispose();
             try { _listener.Stop(); } catch { }
             try { _udp.Dispose(); } catch { }
             LoopbackCapture? c;
@@ -402,14 +405,74 @@ namespace TailRemote
                 // the audio nonce, and two captures counting at once would repeat one. Outside
                 // _gate, because stopping waits for the capture thread.
                 StopCapture(old);
-                lock (_gate) StartCapture();
+                // Taken again only if some PC is listening now; otherwise AudioDemand starts it,
+                // on the new device, when one does.
+                if (old != null) lock (_gate) StartCapture();
             }
         }
 
         private readonly object _switching = new();
         private uint _nextSeq;
+        private readonly AutoResetEvent _audioNudge = new(false);
 
-        /// <summary>Capture runs for as long as this PC hosts; with nobody connected it sends nothing. Call under _gate.</summary>
+        /// <summary>Some PC wants sound now: ready, not muted (AudioPause), and its UDP hello came in the last 3 seconds.</summary>
+        private bool SoundWanted()
+        {
+            long now = Environment.TickCount64;
+            foreach (var s in AllSessions())
+                if (s.Ready && !s.Paused && s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// The sound is taken and encoded only while some PC wants it: nobody connected, everyone muted
+        /// or gone quiet, and the capture stops, so hosting idle costs nothing. It starts the moment a PC
+        /// wants it (nudged by its hello, its features or its unmute; else within a quarter second), and
+        /// stops only after 10 seconds with nobody, so a reconnect or a brief mute never reopens the
+        /// device. Packet numbers carry on from where the last capture stopped (StopCapture), so no
+        /// session ever sees one repeated.
+        /// </summary>
+        private void AudioDemand()
+        {
+            long unwantedSince = 0;
+            while (!_stop)
+            {
+                _audioNudge.WaitOne(250);
+                if (_stop) return;
+                bool wanted = SoundWanted();
+                bool running;
+                lock (_gate) running = _capture != null;
+                if (wanted)
+                {
+                    unwantedSince = 0;
+                    if (!running) lock (_switching) lock (_gate) StartCapture();
+                }
+                else if (running)
+                {
+                    long now = Environment.TickCount64;
+                    if (unwantedSince == 0) unwantedSince = now;
+                    else if (now - unwantedSince >= 10_000)
+                    {
+                        lock (_switching)
+                        {
+                            LoopbackCapture? old;
+                            lock (_gate)
+                            {
+                                if (SoundWanted()) { unwantedSince = 0; continue; }
+                                old = _capture;
+                                _capture = null;
+                            }
+                            StopCapture(old); // outside _gate: it waits for the capture thread
+                            DiagLog.Write("host: nobody wants the sound; stopped taking it");
+                        }
+                        unwantedSince = 0;
+                    }
+                }
+                else unwantedSince = 0;
+            }
+        }
+
+        /// <summary>Starts taking the sound (AudioDemand: only while some PC wants it). Call under _gate.</summary>
         private void StartCapture()
         {
             if (_stop || _capture != null) return;
@@ -749,6 +812,7 @@ namespace TailRemote
         public Func<int, bool, VideoSettings, byte[]?> VideoUpdate { get; set; }
         public Action<int> VideoForget { get; set; }
         private int _nextViewer, _viewers;
+        private ScreenSource? _screenSource; // this PC's own screen (not the service's: its agent has its own); let go of with the host
         public int TestViewers => Volatile.Read(ref _viewers);
 
         /// <summary>Test only: the line to every controller is no faster than this (bytes a second), as on a slow connection.</summary>
@@ -764,9 +828,10 @@ namespace TailRemote
         /// like the sound: down a step (VideoSettings.Ladder) the moment pictures are slow to arrive or
         /// would take more than that pace, up a step after a while of quick ones, up to every pixel exact.
         /// After a step down it does not climb back above it for a while (30 s, doubling, up to 5 minutes),
-        /// and the step is kept for the controller's next video line. A still screen is looked at less and
-        /// less often, down to once a second (and climbs, sent again whole at the better quality); on
-        /// battery at most 5 pictures a second: watching a quiet screen costs next to nothing.
+        /// and the step is kept for the controller's next video line. A still screen is only looked at
+        /// again when Windows says it changed (and climbs, sent again whole at the better quality).
+        /// While things move, H.264 frames go up to 60 a second, up to 4 on their way at once, at most of
+        /// the pace (ScreenVideo decides which).
         /// </summary>
         private void VideoLane(Session owner, TcpClient tcp, SecureLink link)
         {
@@ -847,7 +912,7 @@ namespace TailRemote
             try
             {
                 uint number = 0;
-                int idleMs = 0;
+                bool lastWasVideo = false;
                 long lastSent = Environment.TickCount64;
                 string? said = null;
                 while (!_stop && Volatile.Read(ref closed) == 0 && IsController(owner))
@@ -860,8 +925,11 @@ namespace TailRemote
                         got.WaitOne(1000);
                         continue;
                     }
-                    var settings = VideoSettings.Ladder[step];
-                    int fps = Native.OnBattery() ? Math.Min(settings.Fps, 5) : settings.Fps;
+                    // H.264's share of the line while things move: most of the pace, less on the lower steps.
+                    double linePace = Math.Max(16 << 10, Math.Min(TestPaceCap, Volatile.Read(ref owner.Pace)));
+                    int kbps = (int)Math.Clamp(linePace * 8 / 1000 * 0.7 * Math.Pow(0.7, Math.Max(0, step - VideoSettings.Start)), 250, 40_000);
+                    var settings = VideoSettings.Ladder[step] with { VideoKbps = kbps };
+                    int fps = settings.Fps;
                     bool all = Interlocked.Exchange(ref whole, 0) == 1;
                     byte[]? update;
                     try { update = VideoUpdate(viewer, all, settings); }
@@ -892,10 +960,12 @@ namespace TailRemote
                         // picture climbs as it would have. Better now than the last whole picture: all of
                         // it again, at this quality (a still screen is when there is room for it).
                         if (MayClimb(now) && now - goodSince > (step >= VideoSettings.Start ? 2000 : 5000)) { step--; goodSince = now; owner.VideoClimbed = true; }
-                        if (step < wholeStep) { Volatile.Write(ref whole, 1); continue; }
-                        idleMs = Math.Min(1000, Math.Max(1000 / fps, idleMs * 2));
+                        // (Only after still pictures: while things move, a whole picture would be a key frame.)
+                        if (!lastWasVideo && step < wholeStep) { Volatile.Write(ref whole, 1); continue; }
                         if (now - lastSent > 5000) { Send(Protocol.VideoStill, default); lastSent = now; }
-                        got.WaitOne(idleMs);
+                        // Taking the screen already waited for a change (Windows says the moment there is
+                        // one), so only a moment more here: anything new shows straight away.
+                        got.WaitOne(5);
                         continue;
                     }
                     if (update.Length + 5 > SecureLink.MaxSend - 1024)
@@ -905,8 +975,9 @@ namespace TailRemote
                         Volatile.Write(ref whole, 1);
                         continue;
                     }
-                    idleMs = 0;
-                    if (all) wholeStep = step;
+                    bool video = update[0] == ScreenVideo.VideoFrame;
+                    lastWasVideo = video;
+                    if (all && !video) wholeStep = step;
                     number++;
                     byte[] m = new byte[5 + update.Length];
                     m[0] = Protocol.VideoPicture;
@@ -915,7 +986,23 @@ namespace TailRemote
                     long sentAt = Environment.TickCount64; // before sending: the time the line takes to carry it counts
                     lock (sendGate) link.Send(stream, m);
                     lastSent = Environment.TickCount64;
-                    // One picture on the way at a time: the next waits until this one is on their screen.
+                    if (video)
+                    {
+                        // Moving: up to 4 frames on their way at once, so 60 a second gets through a line
+                        // with a delay; never more, so nothing queues up. Not getting through in 2 seconds:
+                        // a step down and a key frame.
+                        while (Volatile.Read(ref closed) == 0 && number - Volatile.Read(ref acked) >= 4 && Environment.TickCount64 - sentAt < 2000) got.WaitOne(10);
+                        long tv = Environment.TickCount64;
+                        if (number - Volatile.Read(ref acked) >= 4) { StepDown(tv, 1); Volatile.Write(ref whole, 1); continue; }
+                        if (number - Volatile.Read(ref acked) >= 3) goodSince = tv; // the line is full: no climbing
+                        else if (MayClimb(tv) && tv - goodSince > (step >= VideoSettings.Start ? 2000 : 5000)) { step--; goodSince = tv; owner.VideoClimbed = true; }
+                        // At most 60 a second, and no faster than the line carries: until then, whatever wakes
+                        // this (each confirmation does) it goes back to waiting.
+                        long frameDue = now + (long)Math.Max(1000.0 / 60, m.Length * 1000.0 / linePace);
+                        while (Volatile.Read(ref closed) == 0 && Environment.TickCount64 < frameDue) got.WaitOne((int)Math.Max(1, frameDue - Environment.TickCount64));
+                        continue;
+                    }
+                    // A still picture: on its way alone; the next waits until this one is on their screen.
                     while (Volatile.Read(ref closed) == 0 && Volatile.Read(ref acked) != number && Environment.TickCount64 - sentAt < 15_000) got.WaitOne(500);
                     if (Volatile.Read(ref closed) == 1) break;
                     long t = Environment.TickCount64;
@@ -943,8 +1030,8 @@ namespace TailRemote
                         step--; goodSince = t; owner.VideoClimbed = true;
                         if (VideoSettings.Ladder[step].MaxWidth != VideoSettings.Ladder[was].MaxWidth) Volatile.Write(ref whole, 1);
                     }
-                    int wait = (int)Math.Max(1000.0 / fps, lineMs) - (int)(Environment.TickCount64 - now);
-                    if (wait > 0) got.WaitOne(wait);
+                    long due = now + (long)Math.Max(1000.0 / fps, lineMs);
+                    while (Volatile.Read(ref closed) == 0 && Volatile.Read(ref whole) == 0 && Environment.TickCount64 < due) got.WaitOne((int)Math.Max(1, due - Environment.TickCount64));
                 }
             }
             catch { }
@@ -1090,6 +1177,7 @@ namespace TailRemote
                         break;
                     case Protocol.AudioPause when m.Length == 2:
                         s.Paused = m[1] != 0;
+                        if (!s.Paused) _audioNudge.Set(); // unmuted: the sound starts at once, not on the next check
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);
@@ -1101,6 +1189,7 @@ namespace TailRemote
                     case Protocol.Features when m.Length >= 5:
                         s.PeerFeatures = BitConverter.ToUInt32(m, 1);
                         s.Ready = true;
+                        _audioNudge.Set();
                         break;
                     // Anything else is from a newer version: ignore it.
                 }
@@ -1245,7 +1334,9 @@ namespace TailRemote
                 if (stamp <= s.HelloStamp) continue;
                 s.HelloStamp = stamp;
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);
-                Volatile.Write(ref s.HeardAt, Environment.TickCount64);
+                long heard = Environment.TickCount64;
+                // Its first hello (or the first after a quiet spell): the sound may need starting.
+                if (heard - Interlocked.Exchange(ref s.HeardAt, heard) >= 3000 && Volatile.Read(ref _capture) == null) _audioNudge.Set();
                 // Straight back, on the same path the sound takes: the client's audio ping.
                 // Signed like the hello, so nobody else can fake the ping the sound and the file pacing go by.
                 byte[] pong = new byte[Protocol.UdpPongBytes];

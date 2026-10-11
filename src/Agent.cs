@@ -126,7 +126,7 @@ namespace TailRemote
             var reader = new ClipboardReader();
             // The remote screen is taken here, at the screen: the service in session 0 cannot see it.
             AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived, reader.Read,
-                new ScreenVideo(ScreenCapture.Capture));
+                new ScreenVideo(new ScreenSource().Take));
             return 0;
         }
 

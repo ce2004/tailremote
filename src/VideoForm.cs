@@ -37,7 +37,7 @@ namespace TailRemote
             WindowState = FormWindowState.Maximized;
             BackColor = Color.Black;
             Controls.Add(_view);
-            _follow.Tick += (_, _) => Follow();
+            _follow.Tick += (_, _) => { Follow(); ShowRate(); };
             Shown += (_, _) => { Follow(); _follow.Start(); };
             Resize += (_, _) =>
             {
@@ -46,6 +46,14 @@ namespace TailRemote
                 if (minimized != _minimized) { _minimized = minimized; _stream?.Pause(minimized); }
             };
             Menus.FocusWhenShown(this, () => _view);
+        }
+
+        /// <summary>The frames a second in the title bar while pictures come; just the name while the screen is still.</summary>
+        private void ShowRate()
+        {
+            int fps = _stream?.PerSecond ?? 0;
+            string t = fps > 0 ? "Kova - remote screen, " + fps + (fps == 1 ? " frame" : " frames") + " a second" : "Kova - remote screen";
+            if (Text != t) Text = t;
         }
 
         /// <summary>Watching whichever connection is in front now: a new one after a reconnect or a switch of PC.</summary>
@@ -144,7 +152,7 @@ namespace TailRemote
                             double scale = Math.Min((double)ClientSize.Width / p.Width, (double)ClientSize.Height / p.Height);
                             int w = Math.Max(1, (int)(p.Width * scale)), h = Math.Max(1, (int)(p.Height * scale));
                             // Exactly its size when it fits: no blur at all on the text. Otherwise smoothed, the
-                            // quick way: up to 15 times a second, the costly way would weigh on the battery.
+                            // quick way: up to 60 times a second, the costly way would hold up the window.
                             g.InterpolationMode = Math.Abs(scale - 1) < 0.001 ? InterpolationMode.NearestNeighbor : InterpolationMode.Bilinear;
                             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                             g.DrawImage(p, new Rectangle((ClientSize.Width - w) / 2, (ClientSize.Height - h) / 2, w, h));

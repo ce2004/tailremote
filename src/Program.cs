@@ -315,10 +315,36 @@ namespace TailRemote
                 }
                 if (width < 320 || height < 200) return Done("FAIL: the picture was only " + width + " by " + height + ".", 1);
                 if (colours < 3) return Done("FAIL: the picture was one flat colour (" + width + " by " + height + "): the screen was not really taken.", 1);
-                // Keep watching a few seconds: it climbs, and anything that changes on the screen arrives.
-                System.Threading.Thread.Sleep(8000);
+                // Something moving on the real screen for 4 seconds (a small test window, then gone): the
+                // service's agent takes it with Desktop Duplication and it comes as H.264, if this PC can.
+                int framesBefore = watch.VideoFrames, peak = 0;
+                var shown = new System.Threading.ManualResetEventSlim();
+                var ui = new System.Threading.Thread(() =>
+                {
+                    using var f = new Form { Text = "Kova screen test", FormBorderStyle = FormBorderStyle.None, WindowState = FormWindowState.Maximized, TopMost = true, BackColor = System.Drawing.Color.Black };
+                    int tick = 0;
+                    var timer = new System.Windows.Forms.Timer { Interval = 15 };
+                    timer.Tick += (_, _) => { tick++; f.Invalidate(); if (tick > 260) f.Close(); };
+                    f.Paint += (_, e) =>
+                    {
+                        int x = tick * 13 % Math.Max(1, f.Width - 200), y = tick * 7 % Math.Max(1, f.Height - 200);
+                        e.Graphics.FillRectangle(System.Drawing.Brushes.Orange, x, y, 200, 200);
+                        e.Graphics.FillEllipse(System.Drawing.Brushes.SkyBlue, f.Width - x - 200, f.Height - y - 200, 200, 200);
+                    };
+                    f.Shown += (_, _) => { timer.Start(); shown.Set(); };
+                    Application.Run(f);
+                    timer.Dispose();
+                });
+                ui.SetApartmentState(System.Threading.ApartmentState.STA);
+                ui.Start();
+                shown.Wait(5000);
+                for (int i = 0; i < 40; i++) { System.Threading.Thread.Sleep(100); peak = Math.Max(peak, watch.PerSecond); }
+                ui.Join(10_000);
+                int videoFrames = watch.VideoFrames - framesBefore;
+                System.Threading.Thread.Sleep(3000); // and still again: an exact picture
                 return Done("ok. The service at version " + c.HostVersion + " showed the real screen, " + width + " by " + height + ", " + colours +
-                    " different colours sampled, first picture after " + firstMs + " ms, " + watch.Pictures + " pictures and " + (watch.Bytes / 1024) + " kB in all.", 0);
+                    " different colours sampled, first picture after " + firstMs + " ms; with things moving: " + videoFrames + " H.264 frames, up to " + peak +
+                    " pictures a second; " + watch.Pictures + " pictures and " + (watch.Bytes / 1024) + " kB in all.", 0);
             }
             catch (Exception e) { return Done("FAIL: " + e.Message, 1); }
         }
@@ -894,8 +920,38 @@ namespace TailRemote
                     for (int i = 0; i < 100 && onlyListening.HostVersion == null; i++) System.Threading.Thread.Sleep(20);
                     if (onlyListening.CanWatch || onlyListening.WatchScreen() != null) return Fail("a listener could watch the screen");
                 }
+                // H.264, where this PC has an encoder: things moving go as video, many a second, and once
+                // still, an exact picture again. (Some Windows have none that works: still pictures then.)
+                bool hasH264;
+                using (var probe = H264Encoder.Create(64, 64, 30, 500)) hasH264 = probe != null;
+                string h264Note = "no H.264 encoder on this PC, still pictures only";
+                if (hasH264)
+                {
+                    var moving = new TestScreen();
+                    var video = new ScreenVideo(moving.Take);
+                    host.VideoUpdate = video.Update;
+                    host.VideoForget = video.Forget;
+                    bool go = true;
+                    var mover = new System.Threading.Thread(() => { int i = 0; while (go) { i++; moving.SquareX = 20 + i * 9 % 560; moving.SquareY = 40 + i * 5 % 260; System.Threading.Thread.Sleep(16); } }) { IsBackground = true };
+                    using (var watch = c.WatchScreen()!)
+                    {
+                        mover.Start();
+                        for (int i = 0; i < 400 && watch.VideoFrames < 30; i++) System.Threading.Thread.Sleep(25);
+                        if (watch.VideoFrames < 30) { go = false; return Fail("moving things did not go as H.264 (" + watch.VideoFrames + " frames)"); }
+                        int peak = 0;
+                        for (int i = 0; i < 20; i++) { System.Threading.Thread.Sleep(100); peak = Math.Max(peak, watch.PerSecond); }
+                        go = false;
+                        mover.Join();
+                        bool Exact() => watch.Canvas.At(moving.SquareX + 5, moving.SquareY + 5) == moving.At(moving.SquareX + 5, moving.SquareY + 5)
+                            && watch.Canvas.At(5, 5) == moving.At(5, 5) && watch.Canvas.At(600, 300) == moving.At(600, 300);
+                        for (int i = 0; i < 400 && !Exact(); i++) System.Threading.Thread.Sleep(25);
+                        if (!Exact()) return Fail("once things stopped moving, the picture did not become exact again");
+                        if (peak < 25) return Fail("only " + peak + " frames a second while things moved");
+                        h264Note = "H.264 at " + peak + " frames a second while moving, exact once still";
+                    }
+                }
                 var real = ScreenCapture.Capture(0);
-                lossless += " | remote screen: exact, follows changes, pauses, climbs to lossless, says why, listeners refused; this screen " +
+                lossless += " | remote screen: exact, follows changes, pauses, climbs to lossless, says why, listeners refused; " + h264Note + "; this screen " +
                     (real == null ? "cannot be taken here" : real.Width + " by " + real.Height);
             }
 

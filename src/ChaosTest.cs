@@ -40,7 +40,9 @@ namespace TailRemote
             Thread.Sleep(500);
             GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
             long memBefore = GC.GetTotalMemory(true);
-            int threadsBefore = Process.GetCurrentProcess().Threads.Count;
+            // Threads of our own, not .NET's worker pool: the pool keeps idle workers a while after work
+            // spread over the cores (the remote screen's colour conversion), which is reuse, not a leak.
+            int threadsBefore = Process.GetCurrentProcess().Threads.Count - ThreadPool.ThreadCount;
 
             Scenario("time left in words, up to days", 5, () =>
             {
@@ -666,7 +668,7 @@ namespace TailRemote
                 Scenario("the remote screen on a slow line (20 KB/s) with the screen always changing: it steps down and keeps up; then a fast line and a still screen: it climbs back to every pixel exact", 180, () =>
                 {
                     var test = new TestScreen();
-                    var screen = new ScreenVideo(test.Take);
+                    var screen = new ScreenVideo(test.Take) { NoVideo = true }; // the still pictures' steps are what this is about
                     host.VideoUpdate = screen.Update;
                     host.VideoForget = screen.Forget;
                     bool moving = true;
@@ -692,6 +694,34 @@ namespace TailRemote
                             : "FAIL: it did not climb back to exact (step " + host.TestVideoStep + ")";
                     }
                     finally { moving = false; Host.TestPaceCap = double.MaxValue; }
+                });
+
+                Scenario("the remote screen while things move: H.264, its line cut in the middle, it comes back with a key frame, and is exact once still", 90, () =>
+                {
+                    using (var probe = H264Encoder.Create(64, 64, 30, 500)) if (probe == null) return "no H.264 encoder on this PC: still pictures only (nothing to test)";
+                    var test = new TestScreen();
+                    var screen = new ScreenVideo(test.Take);
+                    host.VideoUpdate = screen.Update;
+                    host.VideoForget = screen.Forget;
+                    bool go = true;
+                    var mover = new Thread(() => { int i = 0; while (go) { i++; test.SquareX = 20 + i * 11 % 560; test.SquareY = 30 + i * 7 % 280; Thread.Sleep(16); } }) { IsBackground = true };
+                    try
+                    {
+                        using var watch = ctrl.WatchScreen()!;
+                        mover.Start();
+                        if (!WaitFor(() => watch.VideoFrames >= 20, 10_000)) return "FAIL: moving things did not go as H.264";
+                        int before = watch.VideoFrames;
+                        watch.TestCut();
+                        if (!WaitFor(() => watch.Reconnects >= 1 && watch.VideoFrames > before + 20, 15_000)) return "FAIL: after the cut, H.264 did not come back";
+                        int peak = 0;
+                        for (int i = 0; i < 20; i++) { Thread.Sleep(100); peak = Math.Max(peak, watch.PerSecond); }
+                        go = false;
+                        mover.Join();
+                        bool exact = WaitFor(() => watch.Canvas.At(test.SquareX + 5, test.SquareY + 5) == test.At(test.SquareX + 5, test.SquareY + 5) && watch.Canvas.At(5, 5) == test.At(5, 5), 10_000);
+                        if (!exact) return "FAIL: once still, the picture did not become exact";
+                        return "H.264 at up to " + peak + " frames a second, back after the cut with a key frame, exact once still";
+                    }
+                    finally { go = false; }
                 });
 
                 Scenario("9 PCs watch the screen at once: 8 see it, the 9th is told why", 60, () =>
@@ -858,10 +888,10 @@ namespace TailRemote
             Thread.Sleep(3000);
             GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
             long memAfter = GC.GetTotalMemory(true);
-            int threadsAfter = Process.GetCurrentProcess().Threads.Count;
+            int threadsAfter = Process.GetCurrentProcess().Threads.Count - ThreadPool.ThreadCount;
             // Memory is checked by the three-round clipboard scenario; here only threads (the test itself holds its own data).
             Add("leaks", threadsAfter - threadsBefore < 30,
-                "memory " + (memBefore >> 20) + " MB before, " + (memAfter >> 20) + " MB after; threads " + threadsBefore + " before, " + threadsAfter + " after");
+                "memory " + (memBefore >> 20) + " MB before, " + (memAfter >> 20) + " MB after; threads of its own " + threadsBefore + " before, " + threadsAfter + " after (and " + ThreadPool.ThreadCount + " in .NET's worker pool)");
             host.Dispose();
 
             string text = (_failures == 0 ? "ALL PASSED" : _failures + " FAILED") + Environment.NewLine + string.Join(Environment.NewLine, Report);
