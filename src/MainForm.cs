@@ -1920,8 +1920,15 @@ namespace TailRemote
         private void OfferServiceUpdate()
         {
             var v = ServiceHost.InstalledVersion();
-            if (v == null || !_service.Checked || v >= Updater.Current) return;
+            if (v == null || !_service.Checked) return;
+            // The file's version says nothing just after an update when this window runs the
+            // installed copy itself: updating put the new version in that file, while the service
+            // still runs the old one in memory, so it was never told. Right after an update, always
+            // tell it: the service compares GitHub with what it really runs, so if it is already
+            // current, nothing happens.
+            if (!_updated && v >= Updater.Current) return;
             if (ServiceHost.NudgeUpdate()) Log("The TailRemote service is updating itself to version " + Updater.Current + ".");
+            else Say("Could not ask the TailRemote service to update itself. If it is still on an older version, press Apply settings to the service.");
         }
 
         private async void StartupChanged()

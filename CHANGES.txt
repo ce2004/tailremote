@@ -1,3 +1,6 @@
+2.2.1
+Bug fixed: on a PC that runs the TailRemote service, updating with Check for updates left the service on the old version until you pressed Apply settings to the service. The service now updates by itself straight after, and if it cannot be reached, TailRemote says so.
+
 2.2.0
 Changed: logging in is much harder to attack when your PC is open to the internet. Every connection now makes its own one-time keys, so someone who records your traffic can no longer try passwords against it, and even if your password leaks later, recorded sessions stay locked.
 Changed: each host now uses its own random value to protect the password, instead of one shared by every copy of TailRemote, so guessing work done against one PC is no use against another.
