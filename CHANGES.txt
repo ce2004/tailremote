@@ -1,3 +1,10 @@
+3.0.0
+New feature: see the remote PC's screen. While connected, press Control Shift S (File, Show the remote screen) and a window shows it, kept up to date as it changes. NVDA plus R reads it with Windows' text recognition. Escape closes it, F5 gets a whole new picture, and Control Shift Enter controls the remote PC from there.
+New feature: the picture follows your connection by itself, like the sound does: as sharp as the line carries, up to every pixel exactly as on the remote screen, and lighter the moment the line cannot keep up. There is nothing to set.
+New feature: when Kova runs as a Windows service on the remote PC, you see its lock screen, sign-in screen and administrator prompts too.
+Changed: the screen is only taken while you watch it. It is off unless you open it, and paused while its window is minimized. A still screen costs almost nothing, and a PC on battery sends at most 5 pictures a second.
+Changed: Kova 2.3 and 3.0 still connect to each other. Only seeing the screen needs both PCs on 3.0.
+
 2.3.0
 Changed: TailRemote is now called Kova. It works on any network, not just Tailscale, and video is on the way. The download is Kova-x64.exe or Kova-arm64.exe, files you receive go to Downloads, Kova, and the project lives at github.com/ce2004/kova.
 Changed: be careful updating to Kova, and have another way to control each PC before you start, such as Remote Desktop or someone sitting at it. TailRemote cannot update itself to Kova: download Kova from github.com/ce2004/kova on every PC. Kova starts with fresh settings, so set your password again and add your saved PCs again. On a PC that runs TailRemote as a Windows service, turn off Run as a Windows service in TailRemote first, then open Kova, set the same password and turn it on there. Doing that cuts off the TailRemote connection to that PC, so do it with your other way in. Every PC must be on Kova: older versions cannot connect to it and say the other PC has a different version.

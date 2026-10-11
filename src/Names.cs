@@ -19,9 +19,12 @@ namespace TailRemote
         public static string InstalledExe => Path.Combine(InstallDir, "Kova.exe");
         public static string DataDir => Path.Combine(ProgramData, "Kova");
 
-        public const string FilesPipe = "KovaFiles";   // the window's link to the service
-        public const string AgentPipe = "KovaAgent";   // the service's link to its agent
-        public const string UpdatePipe = "KovaUpdate"; // the window's nudge to update the service
+        public static string FilesPipe => "KovaFiles" + TestPipes;   // the window's link to the service
+        public static string AgentPipe => "KovaAgent" + TestPipes;   // the service's link to its agent
+        public static string UpdatePipe => "KovaUpdate" + TestPipes; // the window's nudge to update the service
+
+        /// <summary>The chaos test only: its pipes get this added, so on a PC with a real Kova service it never meets that one.</summary>
+        internal static string TestPipes = "";
 
         public static string FirewallRule(int port) => "Kova port " + port;
 

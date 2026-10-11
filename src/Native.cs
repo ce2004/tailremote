@@ -131,6 +131,9 @@ namespace TailRemote
             else NativeService.CloseDesktop(d);
         }
 
+        /// <summary>This thread onto the desktop that has the keyboard now (the agent's screen pictures: the lock screen and UAC prompts too).</summary>
+        public static void FollowInputDesktopNow() => FollowDesktop();
+
         /// <summary>Call before a thread that sent keys ends: puts it back on its own desktop and closes the one it followed.</summary>
         public static void LeaveDesktop()
         {
@@ -170,6 +173,15 @@ namespace TailRemote
             input.u.ki.dwFlags = (extended ? KEYEVENTF_EXTENDEDKEY : 0) | (up ? KEYEVENTF_KEYUP : 0);
             return SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>()) == 1;
         }
+
+        // ---- Power ----
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SYSTEM_POWER_STATUS { public byte ACLineStatus, BatteryFlag, BatteryLifePercent, SystemStatusFlag; public int BatteryLifeTime, BatteryFullLifeTime; }
+        [DllImport("kernel32.dll")] private static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS status);
+
+        /// <summary>Running on battery right now (unplugged): the remote screen sends fewer pictures to spare it.</summary>
+        public static bool OnBattery() => GetSystemPowerStatus(out var s) && s.ACLineStatus == 0;
 
         // ---- DPAPI ----
 

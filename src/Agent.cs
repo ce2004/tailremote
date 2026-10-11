@@ -57,6 +57,9 @@ namespace TailRemote
                 }
             }
             if (_host == null) return;
+            // The screen is the agent's to see (the service is in session 0): pictures come from it.
+            _host.VideoUpdate = agent.Video;
+            _host.VideoForget = agent.ForgetVideo;
             // The TailRemote window, when open, does the clipboard and sends files through the service
             // (ServiceLink), as the signed-in user; it must be in the session at the screen. Without a
             // window, what the controlling PC sends goes onto the clipboard through the agent.
@@ -121,7 +124,9 @@ namespace TailRemote
             Native.FollowInputDesktop = true;
             var clip = new ClipboardSetter();
             var reader = new ClipboardReader();
-            AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived, reader.Read);
+            // The remote screen is taken here, at the screen: the service in session 0 cannot see it.
+            AgentLink.Run((vk, scan, up, ext) => Native.SendKey(vk, scan, up, ext), clip.Arrived, clip.FilesArrived, reader.Read,
+                new ScreenVideo(ScreenCapture.Capture));
             return 0;
         }
 

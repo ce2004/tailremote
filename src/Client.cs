@@ -153,6 +153,7 @@ namespace TailRemote
                 {
                     ListenOnly = role[0] == Protocol.RoleListen,
                     _hostUdp = new IPEndPoint(hostEp.Address, port),
+                    _laneHost = hostEp, _laneKey = key, _hostNonce = hostNonce, _myNonce = myNonce,
                 };
                 if (lockedStep >= 0)
                 {
@@ -203,6 +204,56 @@ namespace TailRemote
                 if (files != null) Keep(filesTo!, files);
                 udp?.Dispose(); tcp.Dispose(); throw;
             }
+        }
+
+        // What a further lane (the remote screen) needs: where the host is, and this login's keys.
+        private IPEndPoint _laneHost = null!;
+        private byte[] _laneKey = null!, _hostNonce = null!, _myNonce = null!;
+
+        /// <summary>The host can show its screen to this PC: it is new enough, and this PC controls it (not listen-only).</summary>
+        public bool CanWatch => !ListenOnly && (_peerFeatures & Protocol.FeatureVideo) != 0;
+        private int _watching; // remote screens open now: while there are, the pace is worked out as for files
+
+        /// <summary>
+        /// Starts watching the host's screen, or null if it cannot show it. The stream keeps itself
+        /// connected (and stops trying once this connection is closed); dispose it to stop watching.
+        /// </summary>
+        public VideoStream? WatchScreen()
+        {
+            if (!CanWatch || _closed) return null;
+            var host = _laneHost; var token = _token; var key = _laneKey; var hostNonce = _hostNonce; var myNonce = _myNonce;
+            Interlocked.Increment(ref _watching);
+            var stream = new VideoStream(() => _closed ? null : OpenVideoLane(host, token, key, hostNonce, myNonce));
+            stream.Stopped += () => Interlocked.Decrement(ref _watching);
+            return stream;
+        }
+
+        /// <summary>A video lane: proven with this login's key, on keys of its own (both PCs' fresh values). Null if it could not be opened.</summary>
+        private static (TcpClient, SecureLink)? OpenVideoLane(IPEndPoint host, byte[] token, byte[] key, byte[] hostNonce, byte[] myNonce)
+        {
+            var tcp = new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true };
+            tcp.Client.DualMode = true;
+            try
+            {
+                if (!tcp.ConnectAsync(host.Address, host.Port).Wait(5000)) throw new TimeoutException();
+                var s = tcp.GetStream();
+                s.ReadTimeout = 5000;
+                byte[] hello = new byte[Protocol.HelloBytes];
+                Protocol.ReadExactly(s, hello);
+                if (!hello.AsSpan(0, 4).SequenceEqual(Protocol.Magic) || !Protocol.CheckOk(hello)) throw new InvalidOperationException(Protocol.DamagedLogin);
+                byte[] laneValue = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+                byte[] channel = new byte[16];
+                byte[] answer = new byte[Protocol.AnswerBytes];
+                Protocol.VideoMagic.CopyTo(answer, 0);
+                token.CopyTo(answer, 4);
+                channel.CopyTo(answer, 12);
+                laneValue.CopyTo(answer, 28);
+                Protocol.LaneProof(key, hello.AsSpan(4, 16), channel, laneValue).CopyTo(answer, Protocol.LaneProofAt);
+                Protocol.AddCheck(answer);
+                s.Write(answer);
+                return (tcp, new SecureLink(key, hostNonce, myNonce, isHost: false, Protocol.VideoPurpose(hello.AsSpan(4, 16), laneValue), maxReceive: SecureLink.MaxSend));
+            }
+            catch { tcp.Dispose(); return null; }
         }
 
         // File channels whose main connection dropped, each kept for the next connection to its own
@@ -338,7 +389,7 @@ namespace TailRemote
             long now = Environment.TickCount64;
             _pings.Enqueue((now, rttMs));
             while (_pings.Count > 0 && now - _pings.Peek().At > 30_000) _pings.Dequeue();
-            bool busy = _files?.Busy == true;
+            bool busy = _files?.Busy == true || Volatile.Read(ref _watching) > 0; // the remote screen is paced like files
             int floor = _pings.Min(p => p.Ms);
             // A LAN, or Tailscale going direct to a PC nearby: the line's own delay is a few ms.
             // There it starts fast and doubles while the sound is fine; further away it starts
@@ -1133,7 +1184,7 @@ namespace TailRemote
                 }
                 // The UDP hello (and its pong, the audio ping): once a second, or ten times a second
                 // while files are going either way, so the pacing sees queueing at once.
-                if (now - lastHello >= (_files?.Busy == true ? 100 : 1000))
+                if (now - lastHello >= (_files?.Busy == true || Volatile.Read(ref _watching) > 0 ? 100 : 1000))
                 {
                     lastHello = now;
                     BitConverter.TryWriteBytes(hello.AsSpan(9), Stopwatch.GetTimestamp()); // the host sends it straight back

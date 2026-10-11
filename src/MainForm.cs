@@ -48,6 +48,9 @@ namespace TailRemote
         private readonly MenuItem _restart = new("Restart rem&ote PC and reconnect...");
         private readonly MenuItem _updateRemote = new("Update the remote P&C to this PC's version");
         private readonly MenuItem _remoteInfo = new("Remote PC &info...") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.I };
+        // The remote screen: off unless opened (nothing is taken or sent until then); opened again, it closes.
+        private readonly MenuItem _watch = new("Show the remote &screen") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.S };
+        private VideoForm? _screen;
         private readonly MenuItem _getFiles = new("&Get files from the remote PC...") { ShortcutKeys = Keys.Control | Keys.G };
         private readonly MenuItem _getClipboard = new("Get the remote PC's clip&board") { ShortcutKeys = Keys.Control | Keys.Shift | Keys.B };
         private readonly MenuItem _announceQuality = Menus.Check("A&nnounce when the sound quality changes");
@@ -121,7 +124,7 @@ namespace TailRemote
             var file = new MenuItem("&File");
             file.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _go, _switchTo, _toggle, _restart, _remoteInfo, _updateRemote, _streaming.Item, new ToolStripSeparator(),
+                _go, _switchTo, _toggle, _watch, _restart, _remoteInfo, _updateRemote, _streaming.Item, new ToolStripSeparator(),
                 _speedHere, _speedRemote, new ToolStripSeparator(),
                 _mode.Menu, _saved.Menu, _address.Item, _port.Item, _password.Item, _listenPassword.Item, _copyAddress,
                 _savePc, _forgetPc, new ToolStripSeparator(),
@@ -228,6 +231,7 @@ namespace TailRemote
             _restart.Click += (_, _) => Menus.AfterMenu(() => RestartRemote());
             _updateRemote.Click += (_, _) => Menus.AfterMenu(() => UpdateRemote());
             _remoteInfo.Click += (_, _) => Menus.AfterMenu(() => RemoteInfo());
+            _watch.Click += (_, _) => Menus.AfterMenu(() => ShowScreen());
             _getFiles.Click += (_, _) => Menus.AfterMenu(() => GetFiles());
             _getClipboard.Click += (_, _) => Menus.AfterMenu(() => GetClipboard());
             _speedHere.Click += (_, _) => Menus.AfterMenu(() => SpeedTestHere());
@@ -313,7 +317,7 @@ namespace TailRemote
             _quality.Menu.Available = !host; // the host always sends the best unless asked for less
             _streaming.Item.Available = !host;
             _toggle.Available = !host;
-            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _getFiles.Available = _getClipboard.Available = _speedRemote.Available = _switchTo.Available = !host;
+            _restart.Available = _updateRemote.Available = _remoteInfo.Available = _watch.Available = _getFiles.Available = _getClipboard.Available = _speedRemote.Available = _switchTo.Available = !host;
             _announceQuality.Available = _muteLocal.Available = _rideOut.Available = !host;
             _startup.Available = host;
             _service.Available = host;
@@ -734,6 +738,24 @@ namespace TailRemote
             }
             c.RequestUpdate(want);
             Say("Asked the remote PC to update to Kova " + want + ".");
+        }
+
+        /// <summary>Opens the remote screen, or closes it if it is open: on or off, nothing else to choose (it follows the line by itself).</summary>
+        private void ShowScreen()
+        {
+            Doing("showing the remote screen");
+            if (_screen != null && !_screen.IsDisposed)
+            {
+                _screen.Close();
+                Say("Stopped showing the remote screen.");
+                return;
+            }
+            if (_client == null) { Say("Connect to a PC first."); return; }
+            if (_client.ListenOnly) { Say("A listen-only connection cannot see the remote screen."); return; }
+            if (!_client.CanWatch) { Say("The remote PC's Kova is too old to show its screen. Update it there."); return; }
+            _screen = new VideoForm(() => _client, Say, () => _keys?.Toggle());
+            _screen.FormClosed += (_, _) => _screen = null;
+            _screen.Show(this);
         }
 
         private async void RemoteInfo()

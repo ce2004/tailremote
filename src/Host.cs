@@ -83,6 +83,10 @@ namespace TailRemote
             public required byte[] Key, HostNonce, ClientNonce;
             public FileChannel? Files; // under _gate
             public double Pace = 8 << 20; // bytes a second the host may send this controller files at (FilePace)
+            // The remote screen's step on the ladder and its climbing back-off, kept for its next video line.
+            public int VideoStep = -1, VideoFloor;
+            public long VideoFloorUntil, VideoLastDown, VideoBackoffMs = 30_000;
+            public bool VideoClimbed;
             public uint PeerFeatures;
             public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
@@ -108,6 +112,9 @@ namespace TailRemote
             _key = Protocol.DeriveKey(password, _salt);
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword, _salt);
             _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
+            var screen = new ScreenVideo(ScreenCapture.Capture);
+            VideoUpdate = screen.Update;
+            VideoForget = screen.Forget;
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
             _listener.Server.DualMode = true;
@@ -532,6 +539,25 @@ namespace TailRemote
                 // Damaged on the way (or junk): hang up. Never counted as a wrong password, so
                 // a bad link cannot get a PC blocked, and the client simply tries again.
                 if (!Protocol.CheckOk(answer)) { tcp.Dispose(); return; }
+                if (answer.AsSpan(0, 4).SequenceEqual(Protocol.VideoMagic))
+                {
+                    // A controller watching the screen: proven like a file lane, then it has a thread of its own.
+                    Session? owner = null;
+                    for (int i = 0; i < 40 && owner == null; i++)
+                    {
+                        lock (_gate) owner = _controllers.Find(c => c.Token.AsSpan().SequenceEqual(answer.AsSpan(4, 8)) && c.Address.Equals(remote));
+                        if (owner == null) Thread.Sleep(50);
+                    }
+                    if (owner == null) { tcp.Dispose(); return; }
+                    if (!CryptographicOperations.FixedTimeEquals(answer.AsSpan(Protocol.LaneProofAt, 32),
+                            Protocol.LaneProof(owner.Key, nonce, answer.AsSpan(12, 16), answer.AsSpan(28, 16))))
+                    { tcp.Dispose(); return; }
+                    EndHandshake(remote, tcp); counted = false; // a viewer must not hold a login's place
+                    using var link = new SecureLink(owner.Key, owner.HostNonce, owner.ClientNonce, isHost: true,
+                        Protocol.VideoPurpose(nonce, answer.AsSpan(28, 16)), maxReceive: 64 << 10, maxSend: SecureLink.MaxSend);
+                    VideoLane(owner, tcp, link);
+                    return;
+                }
                 if (answer.AsSpan(0, 4).SequenceEqual(Protocol.FileMagic))
                 {
                     // The controller's second connection, for files.
@@ -712,6 +738,226 @@ namespace TailRemote
         }
 
         private bool IsController(Session s) { lock (_gate) return _controllers.Contains(s); }
+
+        // ---- The remote screen ----
+
+        /// <summary>
+        /// The screen as updates for each viewer (ScreenVideo.Update: null, no picture to take; empty,
+        /// nothing changed). This PC's own screen unless set: the service hands it to its agent, which
+        /// is at the screen (Agent.StartHosting). Nothing is taken unless someone watches.
+        /// </summary>
+        public Func<int, bool, VideoSettings, byte[]?> VideoUpdate { get; set; }
+        public Action<int> VideoForget { get; set; }
+        private int _nextViewer, _viewers;
+        public int TestViewers => Volatile.Read(ref _viewers);
+
+        /// <summary>Test only: the line to every controller is no faster than this (bytes a second), as on a slow connection.</summary>
+        public static double TestPaceCap = double.MaxValue;
+
+        /// <summary>Test only: the remote screen's step for the controllers (the highest: the worst picture), or -1.</summary>
+        public int TestVideoStep { get { lock (_gate) return _controllers.Count == 0 ? -1 : _controllers.Max(c => c.VideoStep); } }
+
+        /// <summary>
+        /// One controller watching: a picture, then wait until it is on their screen, then the next, no
+        /// faster than the line to them carries (the pace the controller works out from the sound's ping
+        /// while it watches, the same as for files). How good the pictures are follows the line by itself,
+        /// like the sound: down a step (VideoSettings.Ladder) the moment pictures are slow to arrive or
+        /// would take more than that pace, up a step after a while of quick ones, up to every pixel exact.
+        /// After a step down it does not climb back above it for a while (30 s, doubling, up to 5 minutes),
+        /// and the step is kept for the controller's next video line. A still screen is looked at less and
+        /// less often, down to once a second (and climbs, sent again whole at the better quality); on
+        /// battery at most 5 pictures a second: watching a quiet screen costs next to nothing.
+        /// </summary>
+        private void VideoLane(Session owner, TcpClient tcp, SecureLink link)
+        {
+            var stream = tcp.GetStream();
+            tcp.NoDelay = true;
+            tcp.SendTimeout = 60_000; // a whole picture on a slow line takes a while: judged by the steps, not cut off
+            stream.ReadTimeout = Timeout.Infinite; // the reader below ends when the line does
+            var sendGate = new object();
+            void Send(byte type, ReadOnlySpan<byte> body)
+            {
+                byte[] m = new byte[1 + body.Length];
+                m[0] = type;
+                body.CopyTo(m.AsSpan(1));
+                lock (sendGate) link.Send(stream, m);
+            }
+            if (Interlocked.Increment(ref _viewers) > Protocol.MaxViewers)
+            {
+                try { Send(Protocol.VideoNote, System.Text.Encoding.UTF8.GetBytes("No picture: " + Protocol.MaxViewers + " PCs are already watching this screen.")); } catch { }
+                Interlocked.Decrement(ref _viewers);
+                return;
+            }
+            int viewer = Interlocked.Increment(ref _nextViewer);
+            var priority = Thread.CurrentThread.Priority;
+            Thread.CurrentThread.Priority = ThreadPriority.BelowNormal; // keys and sound always come first
+            // Where this controller's pictures stood last time (a dropped line comes back where it was);
+            // the first time, from the pace: a slow line does not start with big pictures.
+            double startPace = Math.Min(TestPaceCap, Volatile.Read(ref owner.Pace));
+            int step = owner.VideoStep >= 0 ? owner.VideoStep
+                : startPace < (64 << 10) ? VideoSettings.Ladder.Length - 1
+                : startPace < (256 << 10) ? VideoSettings.Ladder.Length - 2
+                : startPace < (1 << 20) ? VideoSettings.Ladder.Length - 3
+                : VideoSettings.Start;
+            int wholeStep = int.MaxValue; // the step the last whole picture went at
+            long goodSince = Environment.TickCount64;
+            int slow = 0;
+            int whole = 1, paused = 0, closed = 0; // whole: set by either thread, taken by the loop (Interlocked)
+            uint acked = 0;
+            var got = new AutoResetEvent(false);
+            bool MayClimb(long t) => step > 0 && (step - 1 >= owner.VideoFloor || t > owner.VideoFloorUntil);
+            void StepDown(long t, int by)
+            {
+                int was = step;
+                step = Math.Min(VideoSettings.Ladder.Length - 1, step + by);
+                slow = 0; goodSince = t;
+                // Longer only when it falls again soon after climbing back (a line that cannot hold the
+                // better step, so it would go up and down for ever); a burst of steps down is one fall.
+                if (t - owner.VideoLastDown > 120_000) owner.VideoBackoffMs = 30_000;
+                else if (owner.VideoClimbed) owner.VideoBackoffMs = Math.Min(owner.VideoBackoffMs * 2, 300_000);
+                owner.VideoClimbed = false;
+                owner.VideoLastDown = t; owner.VideoFloor = step; owner.VideoFloorUntil = t + owner.VideoBackoffMs;
+                if (VideoSettings.Ladder[step].MaxWidth != VideoSettings.Ladder[was].MaxWidth) Volatile.Write(ref whole, 1);
+            }
+            new Thread(() =>
+            {
+                byte[]? b = null;
+                try
+                {
+                    while (true)
+                    {
+                        int n = link.Receive(stream, ref b);
+                        if (n < 1) continue;
+                        switch (b![0])
+                        {
+                            case Protocol.VideoGot when n == 5: Volatile.Write(ref acked, BitConverter.ToUInt32(b, 1)); got.Set(); break;
+                            case Protocol.VideoAgain: Volatile.Write(ref whole, 1); got.Set(); break;
+                            case Protocol.VideoPause when n == 2:
+                                Volatile.Write(ref paused, b[1] != 0 ? 1 : 0);
+                                if (b[1] == 0) Volatile.Write(ref whole, 1);
+                                got.Set();
+                                break;
+                        }
+                    }
+                }
+                catch { }
+                Volatile.Write(ref closed, 1);
+                got.Set();
+            }) { IsBackground = true, Name = "Kova remote screen in" }.Start();
+            try
+            {
+                uint number = 0;
+                int idleMs = 0;
+                long lastSent = Environment.TickCount64;
+                string? said = null;
+                while (!_stop && Volatile.Read(ref closed) == 0 && IsController(owner))
+                {
+                    long now = Environment.TickCount64;
+                    owner.VideoStep = step;
+                    if (Volatile.Read(ref paused) == 1)
+                    {
+                        if (now - lastSent > 5000) { Send(Protocol.VideoStill, default); lastSent = now; }
+                        got.WaitOne(1000);
+                        continue;
+                    }
+                    var settings = VideoSettings.Ladder[step];
+                    int fps = Native.OnBattery() ? Math.Min(settings.Fps, 5) : settings.Fps;
+                    bool all = Interlocked.Exchange(ref whole, 0) == 1;
+                    byte[]? update;
+                    try { update = VideoUpdate(viewer, all, settings); }
+                    catch { update = null; }
+                    if (ReferenceEquals(update, AgentLink.TooSlow))
+                    {
+                        // The agent did not have the picture ready in time (a big screen, a busy PC): that
+                        // is the screen being too much at this step, not "no picture". A step down, quietly.
+                        if (step < VideoSettings.Ladder.Length - 1) StepDown(now, 1);
+                        Volatile.Write(ref whole, 1);
+                        continue;
+                    }
+                    if (update == null)
+                    {
+                        string why = FileUser != null
+                            ? "No picture: there is no screen to show at the moment. It comes as soon as there is."
+                            : "No picture right now. The lock screen and administrator prompts can only be seen when Kova runs as a Windows service there.";
+                        if (said != why) { Send(Protocol.VideoNote, System.Text.Encoding.UTF8.GetBytes(why)); said = why; lastSent = now; }
+                        else if (now - lastSent > 5000) { Send(Protocol.VideoStill, default); lastSent = now; }
+                        Volatile.Write(ref whole, 1);
+                        got.WaitOne(1000);
+                        continue;
+                    }
+                    said = null;
+                    if (update.Length == 0)
+                    {
+                        // Still: nothing to measure the line by, so the last good measures stand, and the
+                        // picture climbs as it would have. Better now than the last whole picture: all of
+                        // it again, at this quality (a still screen is when there is room for it).
+                        if (MayClimb(now) && now - goodSince > (step >= VideoSettings.Start ? 2000 : 5000)) { step--; goodSince = now; owner.VideoClimbed = true; }
+                        if (step < wholeStep) { Volatile.Write(ref whole, 1); continue; }
+                        idleMs = Math.Min(1000, Math.Max(1000 / fps, idleMs * 2));
+                        if (now - lastSent > 5000) { Send(Protocol.VideoStill, default); lastSent = now; }
+                        got.WaitOne(idleMs);
+                        continue;
+                    }
+                    if (update.Length + 5 > SecureLink.MaxSend - 1024)
+                    {
+                        // Too big to send at all (lossless on an enormous screen): the next step down.
+                        StepDown(now, 1);
+                        Volatile.Write(ref whole, 1);
+                        continue;
+                    }
+                    idleMs = 0;
+                    if (all) wholeStep = step;
+                    number++;
+                    byte[] m = new byte[5 + update.Length];
+                    m[0] = Protocol.VideoPicture;
+                    BitConverter.TryWriteBytes(m.AsSpan(1), number);
+                    update.CopyTo(m, 5);
+                    long sentAt = Environment.TickCount64; // before sending: the time the line takes to carry it counts
+                    lock (sendGate) link.Send(stream, m);
+                    lastSent = Environment.TickCount64;
+                    // One picture on the way at a time: the next waits until this one is on their screen.
+                    while (Volatile.Read(ref closed) == 0 && Volatile.Read(ref acked) != number && Environment.TickCount64 - sentAt < 15_000) got.WaitOne(500);
+                    if (Volatile.Read(ref closed) == 1) break;
+                    long t = Environment.TickCount64;
+                    if (Volatile.Read(ref acked) != number)
+                    {
+                        // Not on their screen in 15 seconds: far too much for this line. Two steps down,
+                        // and a whole picture at that size, rather than giving up.
+                        StepDown(t, 2);
+                        Volatile.Write(ref whole, 1);
+                        continue;
+                    }
+                    long tookMs = t - sentAt;
+                    double pace = Math.Max(16 << 10, Math.Min(TestPaceCap, Volatile.Read(ref owner.Pace)));
+                    double lineMs = m.Length * 1000.0 / pace;
+                    // Following the line: slow to arrive (twice running), or more than the pace allows at
+                    // this many pictures a second, is a step down; a while of quick ones, a step up. A
+                    // whole picture is expected to take longer, so it only counts when very slow.
+                    bool tooSlow = all ? tookMs > 3000 : tookMs > 600 || lineMs > 1000.0 / fps * 1.5;
+                    slow = tooSlow ? slow + 1 : 0;
+                    if (slow >= 2 && step < VideoSettings.Ladder.Length - 1) StepDown(t, 1);
+                    else if (tooSlow || tookMs > 250 || lineMs > 1000.0 / fps * 0.5) { if (!all) goodSince = t; }
+                    else if (MayClimb(t) && t - goodSince > (step >= VideoSettings.Start ? 2000 : 5000))
+                    {
+                        int was = step;
+                        step--; goodSince = t; owner.VideoClimbed = true;
+                        if (VideoSettings.Ladder[step].MaxWidth != VideoSettings.Ladder[was].MaxWidth) Volatile.Write(ref whole, 1);
+                    }
+                    int wait = (int)Math.Max(1000.0 / fps, lineMs) - (int)(Environment.TickCount64 - now);
+                    if (wait > 0) got.WaitOne(wait);
+                }
+            }
+            catch { }
+            finally
+            {
+                owner.VideoStep = step;
+                Volatile.Write(ref closed, 1);
+                try { tcp.Dispose(); } catch { }
+                try { VideoForget(viewer); } catch { }
+                Interlocked.Decrement(ref _viewers);
+                Thread.CurrentThread.Priority = priority;
+            }
+        }
 
         private void ReadLoop(Session s)
         {

@@ -95,6 +95,7 @@ namespace TailRemote
                 if (args.Length == 3 && int.TryParse(args[2], out int windowPid)) ServiceHost.WindowPid = windowPid;
                 return args[1] == "install" ? ServiceHost.Install() : ServiceHost.Remove();
             }
+            if (args.Length == 1 && args[0] == "--screentest-service") return ServiceScreenTest();
             if (args.Length == 1 && args[0] == "--service") return ServiceHost.RunService();
             if (args.Length == 1 && args[0] == "--agent") return Agent.Run();
             if (args.Length == 2 && args[0] == "--capturetest") return CaptureTest(args[1]);
@@ -273,6 +274,53 @@ namespace TailRemote
             t.Start();
             t.Join();
             failed?.Throw();
+        }
+
+        /// <summary>
+        /// --screentest-service, as administrator: the installed Kova service shows the real screen. Logs in
+        /// on this PC with the service's own saved password (never written anywhere), watches, and checks
+        /// that a real picture comes from the agent at the screen and changes are followed.
+        /// Writes %TEMP%\kova-servicescreen.txt ("ok. ..." or "FAIL: ...").
+        /// </summary>
+        private static int ServiceScreenTest()
+        {
+            string outPath = Path.Combine(Path.GetTempPath(), "kova-servicescreen.txt");
+            int Done(string text, int code) { File.WriteAllText(outPath, text); return code; }
+            try
+            {
+                var cfg = ServiceHost.LoadConfig();
+                if (cfg == null) return Done("FAIL: no Kova service settings here (run as administrator, with the service installed).", 1);
+                string password = ServiceHost.Config.Open(cfg.PasswordEnc);
+                using var p = new Player(Player.NoDevice, _ => { });
+                using var c = Client.Connect("127.0.0.1", cfg.Port, password, p, _ => { });
+                for (int i = 0; i < 100 && c.HostVersion == null; i++) System.Threading.Thread.Sleep(20);
+                if (!c.CanWatch) return Done("FAIL: the service (version " + c.HostVersion + ") does not offer its screen.", 1);
+                using var watch = c.WatchScreen()!;
+                string? note = null;
+                watch.Note += t => note = t;
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                for (int i = 0; i < 800 && watch.Pictures < 1; i++) System.Threading.Thread.Sleep(25);
+                if (watch.Pictures < 1) return Done("FAIL: no picture from the service in 20 seconds" + (note != null ? "; it said: " + note : "") + ".", 1);
+                long firstMs = clock.ElapsedMilliseconds;
+                int width, height, colours;
+                lock (watch.Canvas.Gate)
+                {
+                    var pic = watch.Canvas.Picture!;
+                    width = pic.Width; height = pic.Height;
+                    var seen = new System.Collections.Generic.HashSet<int>();
+                    for (int y = 0; y < height; y += Math.Max(1, height / 40))
+                        for (int x = 0; x < width; x += Math.Max(1, width / 40))
+                            seen.Add(pic.GetPixel(x, y).ToArgb());
+                    colours = seen.Count;
+                }
+                if (width < 320 || height < 200) return Done("FAIL: the picture was only " + width + " by " + height + ".", 1);
+                if (colours < 3) return Done("FAIL: the picture was one flat colour (" + width + " by " + height + "): the screen was not really taken.", 1);
+                // Keep watching a few seconds: it climbs, and anything that changes on the screen arrives.
+                System.Threading.Thread.Sleep(8000);
+                return Done("ok. The service at version " + c.HostVersion + " showed the real screen, " + width + " by " + height + ", " + colours +
+                    " different colours sampled, first picture after " + firstMs + " ms, " + watch.Pictures + " pictures and " + (watch.Bytes / 1024) + " kB in all.", 0);
+            }
+            catch (Exception e) { return Done("FAIL: " + e.Message, 1); }
         }
 
         /// <summary>Copies that build.ps1 moved aside while they were running; gone once they have exited.</summary>
@@ -773,6 +821,83 @@ namespace TailRemote
             for (int i = 0; i < 100 && !log.Any(l => l.Contains("cannot update itself")); i++) System.Threading.Thread.Sleep(20);
             if (!log.Any(l => l.Contains("cannot update itself"))) return Fail("the update request got no answer");
             lossless += " | remote folders, info, get files, send files into a folder, update answer";
+
+            // The remote screen. The encoder: a still screen sends nothing, a small change only a few
+            // strips, and lossless comes back exact. Then for real, host to client: nothing is taken
+            // until someone watches; the picture is right and follows a change; pausing stops it; on a
+            // fast line it climbs to every pixel exact; a host with no picture says why; a listener
+            // cannot watch; and nothing is kept once watching stops.
+            {
+                var test = new TestScreen();
+                var enc = new ScreenVideo(test.Take);
+                var exact = new VideoSettings(0, VideoSettings.Lossless, 15);
+                byte[] whole = enc.Update(1, true, exact)!;
+                using (var canvas = new VideoCanvas())
+                {
+                    canvas.Apply(whole, 0);
+                    foreach (var (x, y) in new[] { (0, 0), (115, 120), (639, 359), (300, 50) })
+                        if (canvas.At(x, y) != test.At(x, y)) return Fail("a lossless picture is not exact at " + x + "," + y);
+                    if (enc.Update(1, false, exact)!.Length != 0) return Fail("a still screen sent a picture");
+                    test.SquareX = 400; test.SquareY = 200;
+                    byte[] change = enc.Update(1, false, exact)!;
+                    int strips = canvas.Apply(change, 0);
+                    if (strips == 0 || strips > 4) return Fail("moving one square sent " + strips + " strips");
+                    if (canvas.At(410, 210) != test.At(410, 210) || canvas.At(110, 110) != test.At(110, 110)) return Fail("the change did not land exactly");
+                    if (change.Length * 5 > whole.Length) return Fail("a small change cost " + change.Length + " bytes, the whole screen " + whole.Length);
+                }
+
+                test.SquareX = 100; test.SquareY = 100;
+                var screen = new ScreenVideo(test.Take);
+                host.VideoUpdate = screen.Update;
+                host.VideoForget = screen.Forget;
+                if (host.TestViewers != 0 || screen.Viewers != 0) return Fail("the screen was being taken before anyone watched");
+                if (!c.CanWatch) return Fail("the host did not offer its screen");
+                using (var watch = c.WatchScreen()!)
+                {
+                    for (int i = 0; i < 200 && watch.Pictures < 1; i++) System.Threading.Thread.Sleep(25);
+                    if (watch.Pictures < 1) return Fail("no picture of the screen arrived");
+                    foreach (var (x, y) in new[] { (5, 5), (320, 180), (110, 110), (630, 350) })
+                        if (!TestScreen.Near(watch.Canvas.At(x, y), test.At(x, y), 40)) return Fail("the picture is wrong at " + x + "," + y);
+                    test.SquareX = 400; test.SquareY = 200;
+                    bool Shows() => TestScreen.Near(watch.Canvas.At(410, 210), test.At(410, 210), 40) && TestScreen.Near(watch.Canvas.At(110, 110), test.At(110, 110), 40);
+                    for (int i = 0; i < 200 && !Shows(); i++) System.Threading.Thread.Sleep(25);
+                    if (!Shows()) return Fail("a change on the screen did not show");
+                    // On a fast line, still: it climbs to every pixel exact by itself.
+                    bool Exact() => watch.Canvas.At(410, 210) == test.At(410, 210) && watch.Canvas.At(300, 50) == test.At(300, 50) && watch.Canvas.At(5, 300) == test.At(5, 300);
+                    for (int i = 0; i < 600 && !Exact(); i++) System.Threading.Thread.Sleep(25);
+                    if (!Exact()) return Fail("on a fast line the picture never became exact");
+                    watch.Pause(true);
+                    System.Threading.Thread.Sleep(300);
+                    int paused = watch.Pictures;
+                    test.SquareX = 200; test.SquareY = 40;
+                    System.Threading.Thread.Sleep(1200);
+                    if (watch.Pictures != paused) return Fail("pictures kept coming while paused");
+                    watch.Pause(false);
+                    bool Moved() => TestScreen.Near(watch.Canvas.At(210, 50), test.At(210, 50), 40);
+                    for (int i = 0; i < 200 && !Moved(); i++) System.Threading.Thread.Sleep(25);
+                    if (!Moved()) return Fail("the picture did not come back after a pause");
+                    if (host.TestViewers != 1 || screen.Viewers != 1) return Fail("watching once counted " + host.TestViewers + " viewers");
+                }
+                for (int i = 0; i < 200 && (host.TestViewers != 0 || screen.Viewers != 0); i++) System.Threading.Thread.Sleep(25);
+                if (host.TestViewers != 0 || screen.Viewers != 0) return Fail("the host kept taking pictures after watching stopped");
+
+                host.VideoUpdate = (_, _, _) => null; // nothing to show (the lock screen, from the window)
+                string? note = null;
+                using (var watch = c.WatchScreen()!)
+                {
+                    watch.Note += t => note = t;
+                    for (int i = 0; i < 200 && note == null; i++) System.Threading.Thread.Sleep(25);
+                }
+                if (note == null || !note.StartsWith("No picture")) return Fail("a host with no picture did not say why");
+                using (var onlyListening = Client.Connect("127.0.0.1", 47999, "listen", new Player(Player.NoDevice, _ => { }), _ => { }))
+                {
+                    for (int i = 0; i < 100 && onlyListening.HostVersion == null; i++) System.Threading.Thread.Sleep(20);
+                    if (onlyListening.CanWatch || onlyListening.WatchScreen() != null) return Fail("a listener could watch the screen");
+                }
+                var real = ScreenCapture.Capture(0);
+                lossless += " | remote screen: exact, follows changes, pauses, climbs to lossless, says why, listeners refused; this screen " +
+                    (real == null ? "cannot be taken here" : real.Width + " by " + real.Height);
+            }
 
             // A host that updates says so: the controlling PC reports the update, never a broken connection.
             string? goneWhy = null;

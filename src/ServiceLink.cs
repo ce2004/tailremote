@@ -23,7 +23,7 @@ namespace TailRemote
     /// </summary>
     internal static class ServiceLink
     {
-        private const string PipeName = Names.FilesPipe;
+        private static string PipeName => Names.FilesPipe;
         // Window to agent:
         private const byte SendText = (byte)'t', SendClipFiles = (byte)'f', SendDownloads = (byte)'d', CancelAll = (byte)'x', ReceiveIn = (byte)'o';
         // Agent to window:

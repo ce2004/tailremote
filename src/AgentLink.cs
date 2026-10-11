@@ -19,11 +19,19 @@ namespace TailRemote
     /// </summary>
     internal static class AgentLink
     {
-        private const string PipeName = Names.AgentPipe;
+        private static string PipeName => Names.AgentPipe;
         // Service to agent: type a key, set the clipboard (text / files), and ask the agent to read its clipboard.
         private const byte KeyMessage = (byte)'K', TextMessage = (byte)'T', FilesMessage = (byte)'F', GetMessage = (byte)'G';
         // Agent to service: the clipboard it read, in answer to a GetMessage (text, or file paths).
         private const byte ClipTextMessage = (byte)'t', ClipFilesMessage = (byte)'f';
+        // The remote screen, which only the agent can see: the service asks for a viewer's next picture
+        // (i32 request, i32 viewer, u8 whole, u16 widest, u8 quality, u8 most a second) and the agent
+        // answers (i32 request, u8 1 + the update, or u8 0: no picture to take). 'X' (i32 viewer): that
+        // viewer has gone.
+        private const byte VideoMessage = (byte)'V', VideoForgetMessage = (byte)'X', VideoReplyMessage = (byte)'v';
+
+        /// <summary>The agent did not have the picture ready in time: too much at this step, not "no picture" (Host steps down).</summary>
+        public static readonly byte[] TooSlow = new byte[1];
 
         /// <summary>Test only (--chaostest): the test plays the service too, so the pipe is not SYSTEM's.</summary>
         internal static bool TestAnyOwner;
@@ -69,6 +77,36 @@ namespace TailRemote
             /// <summary>Asks the agent to read its clipboard and send it back; false if no agent is there.</summary>
             public bool GetClipboard() => _pipe != null && _out.TryAdd((GetMessage, Array.Empty<byte>()));
 
+            private readonly ConcurrentDictionary<int, System.Threading.Tasks.TaskCompletionSource<byte[]?>> _videoWaits = new();
+            private int _nextVideo;
+
+            /// <summary>
+            /// A viewer's next picture update, from the agent at the screen (ScreenVideo.Update): null if
+            /// there is no agent (nobody's session yet), TooSlow if it did not answer within 5 seconds.
+            /// </summary>
+            public byte[]? Video(int viewer, bool whole, VideoSettings settings)
+            {
+                if (_pipe == null) return null;
+                int id = Interlocked.Increment(ref _nextVideo);
+                var wait = new System.Threading.Tasks.TaskCompletionSource<byte[]?>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+                _videoWaits[id] = wait;
+                try
+                {
+                    byte[] m = new byte[13];
+                    BitConverter.TryWriteBytes(m.AsSpan(0), id);
+                    BitConverter.TryWriteBytes(m.AsSpan(4), viewer);
+                    m[8] = (byte)(whole ? 1 : 0);
+                    BitConverter.TryWriteBytes(m.AsSpan(9), (ushort)settings.MaxWidth);
+                    m[11] = (byte)settings.Quality;
+                    m[12] = (byte)settings.Fps;
+                    if (!_out.TryAdd((VideoMessage, m))) return TooSlow;
+                    return wait.Task.Wait(5000) ? wait.Task.Result : _pipe == null ? null : TooSlow;
+                }
+                finally { _videoWaits.TryRemove(id, out _); }
+            }
+
+            public void ForgetVideo(int viewer) { if (_pipe != null) _out.TryAdd((VideoForgetMessage, BitConverter.GetBytes(viewer)), 1000); }
+
             /// <summary>What the agent read from its clipboard, in answer to GetClipboard. Raised on the link's read thread.</summary>
             public Action<string>? ClipboardText;
             public Action<string[]>? ClipboardFiles;
@@ -94,6 +132,10 @@ namespace TailRemote
                         {
                             case ClipTextMessage: ClipboardText?.Invoke(Encoding.UTF8.GetString(p)); break;
                             case ClipFilesMessage: ClipboardFiles?.Invoke(Encoding.UTF8.GetString(p).Split('\n', StringSplitOptions.RemoveEmptyEntries)); break;
+                            case VideoReplyMessage when n >= 5:
+                                if (_videoWaits.TryGetValue(BitConverter.ToInt32(p, 0), out var wait))
+                                    wait.TrySetResult(p[4] == 1 ? p.AsSpan(5).ToArray() : null);
+                                break;
                         }
                     }
                 }
@@ -165,9 +207,18 @@ namespace TailRemote
         /// which are written straight back to the service: the answer to a GetMessage.
         /// </summary>
         public static void Run(Action<ushort, ushort, bool, bool> key, Action<string> text, Action<string[]> files,
-            Action<Action<string>, Action<string[]>>? getClipboard = null)
+            Action<Action<string>, Action<string[]>>? getClipboard = null, ScreenVideo? screen = null)
         {
             byte[] head = new byte[5];
+            // Pictures are taken on a thread of their own (below normal: keys first), one at a time, never
+            // holding up the keys read here. It follows the desktop with the keyboard, like the keys.
+            var pictures = new BlockingCollection<Action>(64);
+            // The newest request for each viewer: an older one still queued (the service gave up waiting
+            // on it) is skipped, so the agent never takes pictures nobody waits for.
+            var newest = new ConcurrentDictionary<int, int>();
+            var worker = new Thread(() => { foreach (var job in pictures.GetConsumingEnumerable()) try { job(); } catch { } })
+                { IsBackground = true, Name = "Kova agent screen", Priority = ThreadPriority.BelowNormal };
+            worker.Start();
             while (true)
             {
                 try
@@ -205,6 +256,31 @@ namespace TailRemote
                                     t => Reply(ClipTextMessage, Encoding.UTF8.GetBytes(t)),
                                     paths => Reply(ClipFilesMessage, Encoding.UTF8.GetBytes(string.Join("\n", paths))));
                                 break;
+                            case VideoMessage when n == 13 && screen != null:
+                                {
+                                    int id = BitConverter.ToInt32(p, 0), viewer = BitConverter.ToInt32(p, 4);
+                                    bool whole = p[8] == 1;
+                                    var settings = new VideoSettings(BitConverter.ToUInt16(p, 9), p[11], p[12]);
+                                    newest[viewer] = id;
+                                    pictures.TryAdd(() =>
+                                    {
+                                        if (newest.TryGetValue(viewer, out int latest) && latest != id) return;
+                                        byte[]? update = screen.Update(viewer, whole, settings);
+                                        byte[] r = new byte[5 + (update?.Length ?? 0)];
+                                        BitConverter.TryWriteBytes(r.AsSpan(0), id);
+                                        r[4] = (byte)(update == null ? 0 : 1);
+                                        update?.CopyTo(r, 5);
+                                        Reply(VideoReplyMessage, r);
+                                    });
+                                    break;
+                                }
+                            case VideoForgetMessage when n == 4 && screen != null:
+                                {
+                                    int viewer = BitConverter.ToInt32(p, 0);
+                                    newest.TryRemove(viewer, out _);
+                                    pictures.TryAdd(() => screen.Forget(viewer), 1000);
+                                    break;
+                                }
                         }
                     }
                 }

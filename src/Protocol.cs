@@ -46,6 +46,25 @@ namespace TailRemote
         public static readonly byte[] FileMagic = "TRFA"u8.ToArray();
         public const int LaneProofAt = 44;
 
+        /// <summary>
+        /// A video lane (the remote screen): laid out like a file lane ("KVD1", session token, 16 zero
+        /// bytes, the lane's fresh random value, LaneProof), on keys of its own (VideoPurpose). Then the
+        /// host sends pictures, each confirmed (VideoGot) before the next is sent, so they never queue up
+        /// on a slow line; how good they are follows the line by itself (VideoSettings.Ladder).
+        /// </summary>
+        public static readonly byte[] VideoMagic = "KVD1"u8.ToArray();
+        // 1 was going to be the viewer's own settings: never use it (the picture adapts by itself)
+        public const byte VideoGot = 2;             // viewer: u32 picture number, now on its screen: the next may come
+        public const byte VideoAgain = 3;           // viewer: a whole new picture, please
+        public const byte VideoPause = 4;           // viewer: u8 1 = nothing to look at (minimized): no pictures taken or sent; 0 = carry on
+        public const byte VideoPicture = 0x81;      // host: u32 number, then an update (ScreenVideo)
+        public const byte VideoNote = 0x82;         // host: UTF-8, why there is no picture
+        public const byte VideoStill = 0x83;        // host: nothing changed, the line is alive
+        public const int MaxViewers = 8;
+
+        public static string VideoPurpose(ReadOnlySpan<byte> hostValue, ReadOnlySpan<byte> clientValue) =>
+            "video " + Convert.ToHexString(hostValue) + Convert.ToHexString(clientValue) + " ";
+
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
         public const byte Ping = 2;     // stamp i64
@@ -103,6 +122,7 @@ namespace TailRemote
         // an offer of a kind it does not know without answering, so the controller only sends one to
         // a host that says it takes them.
         public const uint FeatureSendTo = 256;
+        public const uint FeatureVideo = 512; // the remote screen (video lanes)
 
         /// <summary>
         /// The bitrate steps, best first. 5 ms packets down to 128 kbit/s (Opus's
@@ -124,7 +144,7 @@ namespace TailRemote
         public static int WireKbps(int step) => OpusSteps[step].Kbps + 1000 / OpusSteps[step].Ms * PacketOverheadBytes * 8 / 1000;
 
         /// <summary>What this version supports, sent to the other side after login.</summary>
-        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureRemoteTools | FeatureSendTo;
+        public const uint OurFeatures = FeatureClipboard | FeatureFiles | FeatureRestart | FeatureRemoteTools | FeatureSendTo | FeatureVideo;
 
 
         // ---- The login, damage-proof ----

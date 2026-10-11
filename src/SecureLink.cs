@@ -24,14 +24,15 @@ namespace TailRemote
         private readonly AesGcm _send, _recv, _audio;
         private readonly object _sendLock = new();
         private ulong _sendCounter, _recvCounter;
-        private readonly int _maxReceive;
+        private readonly int _maxReceive, _maxSend;
         private readonly byte[] _recvHead = new byte[8];
         private const int HeadBytes = 8; // u32 length, then the length with every bit flipped
 
         /// <summary>purpose keeps a second connection (files) on keys of its own.</summary>
-        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "", int maxReceive = MaxMessage)
+        public SecureLink(byte[] key, byte[] hostNonce, byte[] clientNonce, bool isHost, string purpose = "", int maxReceive = MaxMessage, int maxSend = MaxMessage)
         {
             _maxReceive = maxReceive;
+            _maxSend = maxSend;
             byte[] salt = new byte[32];
             hostNonce.CopyTo(salt, 0);
             clientNonce.CopyTo(salt, 16);
@@ -79,10 +80,14 @@ namespace TailRemote
         }
 
         public const int MaxMessage = 8 * 1024 * 1024;
+        // The most the remote screen's line may send in one message (a whole lossless picture of a big
+        // screen). Every other link sends at most MaxMessage, as the other side receives no more.
+        public const int MaxSend = 64 * 1024 * 1024;
 
         /// <summary>Sends one message as [u32 length][ciphertext][tag]. Safe from any thread.</summary>
         public void Send(Stream s, ReadOnlySpan<byte> message)
         {
+            if (message.Length > _maxSend) throw new ArgumentException("Message too large.");
             byte[] frame = Frame(message.Length);
             Span<byte> nonce = stackalloc byte[12];
             lock (_sendLock)
@@ -101,6 +106,7 @@ namespace TailRemote
         /// </summary>
         public byte[] Seal(ReadOnlySpan<byte> message)
         {
+            if (message.Length > _maxSend) throw new ArgumentException("Message too large.");
             byte[] frame = Frame(message.Length);
             Span<byte> nonce = stackalloc byte[12];
             lock (_sendLock)
@@ -113,7 +119,7 @@ namespace TailRemote
 
         private static byte[] Frame(int length)
         {
-            if (length > MaxMessage) throw new ArgumentException("Message too large.");
+            if (length > MaxSend) throw new ArgumentException("Message too large.");
             byte[] frame = new byte[HeadBytes + length + TagSize];
             BitConverter.TryWriteBytes(frame.AsSpan(0, 4), length);
             BitConverter.TryWriteBytes(frame.AsSpan(4, 4), ~length);
@@ -127,7 +133,7 @@ namespace TailRemote
         /// </summary>
         public void Send(Stream s, ReadOnlySpan<byte> message, ref byte[]? frame)
         {
-            if (message.Length > MaxMessage) throw new ArgumentException("Message too large.");
+            if (message.Length > _maxSend) throw new ArgumentException("Message too large.");
             int size = HeadBytes + message.Length + TagSize;
             if (frame == null || frame.Length < size) frame = new byte[Math.Max(size, 64 << 10)];
             BitConverter.TryWriteBytes(frame.AsSpan(0, 4), message.Length);

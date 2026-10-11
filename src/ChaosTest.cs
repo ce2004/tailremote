@@ -30,6 +30,7 @@ namespace TailRemote
         public static int Run()
         {
             Host.WrongPasswordDelayMs = 0;
+            Names.TestPipes = "Chaos"; // never the real service's pipes, on a PC that runs it
             if (Environment.GetEnvironmentVariable("CHAOS_TRACE") != null) DiagLog.Enabled = true;
             if (Directory.Exists(Root)) Directory.Delete(Root, true);
             Directory.CreateDirectory(Root);
@@ -568,7 +569,8 @@ namespace TailRemote
                     var server = new AgentLink.Server();
                     var got = new System.Collections.Concurrent.ConcurrentQueue<(ushort Vk, bool Up)>();
                     string? text = null;
-                    new Thread(() => AgentLink.Run((vk, scan, up, ext) => got.Enqueue((vk, up)), t => text = t, _ => { })) { IsBackground = true }.Start();
+                    var agentScreen = new TestScreen();
+                    new Thread(() => AgentLink.Run((vk, scan, up, ext) => got.Enqueue((vk, up)), t => text = t, _ => { }, null, new ScreenVideo(agentScreen.Take))) { IsBackground = true }.Start();
                     Thread.Sleep(1500); // the agent connects
                     Native.KeySink = server.Key; // every key the host types goes to the agent from here
                     try
@@ -580,7 +582,17 @@ namespace TailRemote
                     }
                     finally { if (CurrentGeneration == gen) Native.KeySink = null; }
                     bool ok = got.Count == 40 && got.All(k => k.Vk == 0x87) && text == "for the clipboard, with no window open";
-                    return ok ? "all 40 key presses and releases reached the agent, in order, and the clipboard text too" : "FAIL: " + got.Count + " of 40 keys, text " + (text ?? "none");
+                    if (!ok) return "FAIL: " + got.Count + " of 40 keys, text " + (text ?? "none");
+                    // The remote screen, which only the agent can see: pictures come from it, through the service.
+                    host.VideoUpdate = server.Video;
+                    host.VideoForget = server.ForgetVideo;
+                    using (var watch = ctrl.WatchScreen()!)
+                    {
+                        if (!WaitFor(() => watch.Pictures >= 1, 10_000)) return "FAIL: no picture came from the agent";
+                        agentScreen.SquareX = 420;
+                        if (!WaitFor(() => TestScreen.Near(watch.Canvas.At(430, 110), agentScreen.At(430, 110), 40), 10_000)) return "FAIL: a change at the agent's screen did not show";
+                    }
+                    return "all 40 key presses and releases reached the agent, in order, the clipboard text too, and the agent's screen was seen and followed";
                 });
 
                 Scenario("hosting as the service: the window sends and receives through the agent", 60, () =>
@@ -629,6 +641,110 @@ namespace TailRemote
                         && sameFile && windowFiles != null && windowSaw != null;
                     return ok ? "text both ways, a file each way, the window saw the transfer finish, and a pipe not owned by SYSTEM was refused"
                         : "FAIL: controller got " + toController + ", window got " + toWindow + ", files to controller " + (controllerFiles != null) + ", files to window " + (windowFiles != null) + ", window saw the end " + (windowSaw != null);
+                });
+
+                Scenario("the remote screen: its line cut 3 times, it comes back each time with the picture right", 60, () =>
+                {
+                    var test = new TestScreen();
+                    var screen = new ScreenVideo(test.Take);
+                    host.VideoUpdate = screen.Update;
+                    host.VideoForget = screen.Forget;
+                    using var watch = ctrl.WatchScreen();
+                    if (watch == null) return "FAIL: the host did not offer its screen";
+                    if (!WaitFor(() => watch.Pictures >= 1, 5000)) return "FAIL: no first picture";
+                    for (int k = 1; k <= 3; k++)
+                    {
+                        int before = watch.Pictures;
+                        test.SquareX = 60 * k;
+                        watch.TestCut();
+                        if (!WaitFor(() => watch.Reconnects >= k && watch.Pictures > before, 10_000)) return "FAIL: it did not come back after cut " + k;
+                    }
+                    bool right = WaitFor(() => TestScreen.Near(watch.Canvas.At(185, 105), test.At(185, 105), 40) && TestScreen.Near(watch.Canvas.At(5, 5), test.At(5, 5), 40), 5000);
+                    return right ? "came back all 3 times, with the picture right" : "FAIL: the picture was wrong after coming back";
+                });
+
+                Scenario("the remote screen on a slow line (20 KB/s) with the screen always changing: it steps down and keeps up; then a fast line and a still screen: it climbs back to every pixel exact", 180, () =>
+                {
+                    var test = new TestScreen();
+                    var screen = new ScreenVideo(test.Take);
+                    host.VideoUpdate = screen.Update;
+                    host.VideoForget = screen.Forget;
+                    bool moving = true;
+                    new Thread(() => { int i = 0; var rnd = new Random(5); while (moving) { test.SquareX = rnd.Next(0, 560); test.SquareY = rnd.Next(0, 300); Thread.Sleep(30); i++; } }) { IsBackground = true }.Start();
+                    try
+                    {
+                        using var watch = ctrl.WatchScreen()!;
+                        if (!WaitFor(() => watch.Pictures >= 1, 10_000)) return "FAIL: no first picture";
+                        if (!WaitFor(() => host.TestVideoStep <= VideoSettings.Start, 10_000)) return "FAIL: a fast line did not start at a good step (" + host.TestVideoStep + ")";
+                        Host.TestPaceCap = 20 << 10; // now the line slows down, mid-stream
+                        if (!WaitFor(() => host.TestVideoStep > VideoSettings.Start + 1, 20_000)) return "FAIL: it never stepped down on a slow line (step " + host.TestVideoStep + ")";
+                        int slowStep = host.TestVideoStep;
+                        int before = watch.Pictures;
+                        Thread.Sleep(5000);
+                        int perSecond = (watch.Pictures - before) / 5;
+                        if (perSecond < 2) return "FAIL: only " + perSecond + " pictures a second at step " + slowStep + " on a slow line";
+                        moving = false;
+                        Host.TestPaceCap = double.MaxValue;
+                        var climbing = Stopwatch.StartNew();
+                        bool exact = WaitFor(() => host.TestVideoStep == 0 &&
+                            watch.Canvas.At(test.SquareX + 5, test.SquareY + 5) == test.At(test.SquareX + 5, test.SquareY + 5) && watch.Canvas.At(5, 5) == test.At(5, 5), 120_000);
+                        return exact ? "on the slow line it went down to step " + slowStep + " and kept " + perSecond + " pictures a second; on a fast line it climbed back to every pixel exact in " + (int)climbing.Elapsed.TotalSeconds + " s"
+                            : "FAIL: it did not climb back to exact (step " + host.TestVideoStep + ")";
+                    }
+                    finally { moving = false; Host.TestPaceCap = double.MaxValue; }
+                });
+
+                Scenario("9 PCs watch the screen at once: 8 see it, the 9th is told why", 60, () =>
+                {
+                    var test = new TestScreen();
+                    var screen = new ScreenVideo(test.Take);
+                    host.VideoUpdate = screen.Update;
+                    host.VideoForget = screen.Forget;
+                    var pcs = Enumerable.Range(0, 9).Select(_ => Connect(Password)).ToList();
+                    var streams = new List<VideoStream>();
+                    string? told = null;
+                    try
+                    {
+                        for (int i = 0; i < 8; i++) streams.Add(pcs[i].WatchScreen()!);
+                        bool all = WaitFor(() => streams.All(v => v.Pictures >= 1), 15_000);
+                        var ninth = pcs[8].WatchScreen()!;
+                        ninth.Note += t => told ??= t;
+                        streams.Add(ninth);
+                        WaitFor(() => told != null, 8000);
+                        if (!all) return "FAIL: only " + streams.Take(8).Count(v => v.Pictures >= 1) + " of 8 saw the screen";
+                        if (told == null || !told.Contains("already watching") || ninth.Pictures != 0) return "FAIL: the 9th was told " + (told ?? "nothing") + " and saw " + ninth.Pictures + " pictures";
+                        return "8 saw the screen; the 9th was told: " + told;
+                    }
+                    finally
+                    {
+                        foreach (var v in streams) v.Dispose();
+                        foreach (var pc in pcs) pc.Dispose();
+                    }
+                });
+
+                Scenario("the remote screen while 128 MB moves: pictures keep coming, the file arrives whole, the line stays quick", 120, () =>
+                {
+                    var test = new TestScreen();
+                    var screen = new ScreenVideo(test.Take);
+                    host.VideoUpdate = screen.Update;
+                    host.VideoForget = screen.Forget;
+                    bool moving = true;
+                    new Thread(() => { int i = 0; while (moving) { test.SquareX = 20 + i++ * 7 % 560; Thread.Sleep(40); } }) { IsBackground = true }.Start();
+                    try
+                    {
+                        using var watch = ctrl.WatchScreen()!;
+                        if (!WaitFor(() => watch.Pictures >= 1, 5000)) return "FAIL: no first picture";
+                        int before = watch.Pictures;
+                        var clock = Stopwatch.StartNew();
+                        double speed = Timed(host, ctrl, "with-the-screen.bin", 128, () => ctrl.Files!.SendFiles(new[] { Big("with-the-screen.bin", 128) }));
+                        int during = watch.Pictures - before;
+                        int ping = ctrl.LastPingMs;
+                        if (speed <= 0) return "FAIL: the file did not arrive whole";
+                        if (during < 3) return "FAIL: only " + during + " pictures while the file moved";
+                        if (ping > 500) return "FAIL: the line was slow, ping " + ping + " ms";
+                        return "the file arrived at " + speed.ToString("0") + " MB/s with " + during + " pictures meanwhile, ping " + ping + " ms";
+                    }
+                    finally { moving = false; }
                 });
 
                 Scenario("the main connection damaged in the middle of 256 MB: it reconnects and the transfer carries on", 120, () =>
@@ -784,6 +900,12 @@ namespace TailRemote
         {
             var p = new Player(Player.NoDevice, _ => { });
             return Client.Connect("127.0.0.1", Port, password, p, _ => { });
+        }
+
+        private static bool WaitFor(Func<bool> done, int ms)
+        {
+            for (int i = 0; i < ms / 25 && !done(); i++) Thread.Sleep(25);
+            return done();
         }
 
         private static bool WaitClosed(Client c, int ms)
