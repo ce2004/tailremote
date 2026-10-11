@@ -1,11 +1,11 @@
-# Builds TailRemote into bin\<arch>, even while it is running.
+# Builds Kova into bin\<arch>, even while it is running.
 #
 #   build.bat              quick: this PC's own arch only, no trimming or compression (seconds)
 #   build.bat arm64 / x64  quick, that arch
 #   build.bat full         both architectures, exactly as a release is built
 #
 # A running exe cannot be overwritten, but it can be moved: the running copy is
-# moved to %LOCALAPPDATA%\TailRemote\old (emptied right after), the new one is
+# moved to %LOCALAPPDATA%\Kova\old (emptied right after), the new one is
 # copied into its place, the old copy is closed (it saves whether it was
 # hosting or connected) and the new one starts with --resume to carry on.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args2)
@@ -20,7 +20,7 @@ if ($Arch.Count -eq 0) { $Arch = if ($full) { @('arm64', 'x64') } else { @($nati
 
 $dotnet = Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe'
 if (-not (Test-Path $dotnet)) { $dotnet = 'dotnet' }
-$oldDir = Join-Path $env:LOCALAPPDATA 'TailRemote\old'
+$oldDir = Join-Path $env:LOCALAPPDATA 'Kova\old'
 $quick = if ($full) { @() } else { @('-p:PublishTrimmed=false', '-p:EnableCompressionInSingleFile=false') }
 
 foreach ($a in $Arch) {
@@ -29,15 +29,15 @@ foreach ($a in $Arch) {
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
     $dest = Join-Path $PSScriptRoot "bin\$a"
-    $exe = Join-Path $dest 'TailRemote.exe'
+    $exe = Join-Path $dest 'Kova.exe'
     New-Item -ItemType Directory -Force $dest | Out-Null
 
-    $running = @(Get-Process TailRemote -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
+    $running = @(Get-Process Kova -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
     if (Test-Path $exe) {
         New-Item -ItemType Directory -Force $oldDir | Out-Null
-        Move-Item $exe (Join-Path $oldDir ("TailRemote-$a-" + [DateTime]::Now.Ticks + '.exe'))
+        Move-Item $exe (Join-Path $oldDir ("Kova-$a-" + [DateTime]::Now.Ticks + '.exe'))
     }
-    Copy-Item "$pub\TailRemote.exe" $exe
+    Copy-Item "$pub\Kova.exe" $exe
 
     foreach ($p in $running) {
         $p.CloseMainWindow() | Out-Null

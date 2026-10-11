@@ -27,7 +27,7 @@ namespace TailRemote
     /// </summary>
     internal static class AudioSetup
     {
-        public const string DeviceName = "TailRemote";
+        public const string DeviceName = "Kova";
 
         // Newest first; a missing pack answers 404 at once and the next is tried.
         private static readonly string[] PackUrls =
@@ -61,7 +61,7 @@ namespace TailRemote
             catch { return null; }
         }
 
-        /// <summary>Set up: VB-Cable is named TailRemote and is the default output.</summary>
+        /// <summary>Set up: VB-Cable is named Kova and is the default output.</summary>
         public static bool IsReady()
         {
             var d = FindCable();
@@ -128,7 +128,7 @@ namespace TailRemote
                 }
             }
 
-            report("Naming the device TailRemote and making it the default output.", 100);
+            report("Naming the device " + DeviceName + " and making it the default output.", 100);
             Configure();
         }
 
@@ -148,7 +148,7 @@ namespace TailRemote
         private static async Task<byte[]> DownloadAsync(Action<string, int> report, CancellationToken ct)
         {
             using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-            h.DefaultRequestHeaders.UserAgent.ParseAdd("TailRemote/" + Updater.Current);
+            h.DefaultRequestHeaders.UserAgent.ParseAdd("Kova/" + Updater.Current);
             var giveUp = DateTime.UtcNow.AddMinutes(3);
             while (true)
             {
@@ -172,7 +172,7 @@ namespace TailRemote
                         }
                         return ms.ToArray();
                     }
-                    throw new InvalidOperationException("vb-audio.com no longer has the VB-Cable download where TailRemote expects it. Check for a TailRemote update.");
+                    throw new InvalidOperationException("vb-audio.com no longer has the VB-Cable download where Kova expects it. Check for a Kova update.");
                 }
                 catch (Exception e) when (e is HttpRequestException || e is IOException || (e is TaskCanceledException && !ct.IsCancellationRequested))
                 {
@@ -406,7 +406,7 @@ namespace TailRemote
                 {
                     coll.Item(i, out var dev);
                     if (Wasapi.ReadString(dev, PkeyInterface, 2) != "VB-Audio Virtual Cable") continue;
-                    if (Wasapi.ReadString(dev, PkeyDevice, 2) is "TailRemote" or "CABLE Input") continue;
+                    if (Wasapi.ReadString(dev, PkeyDevice, 2) is DeviceName or "CABLE Input") continue;
                     dev.GetId(out string id);
                     ids.Add(id);
                 }

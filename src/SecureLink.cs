@@ -36,11 +36,11 @@ namespace TailRemote
             hostNonce.CopyTo(salt, 0);
             clientNonce.CopyTo(salt, 16);
             byte[] Derive(string info) => HKDF.DeriveKey(HashAlgorithmName.SHA256, key, 32, salt, System.Text.Encoding.ASCII.GetBytes(purpose + info));
-            byte[] toHost = Derive("TailRemote tcp to host"), toClient = Derive("TailRemote tcp to client");
+            byte[] toHost = Derive("Kova tcp to host"), toClient = Derive("Kova tcp to client");
             _send = new AesGcm(isHost ? toClient : toHost, TagSize);
             _recv = new AesGcm(isHost ? toHost : toClient, TagSize);
-            _audio = new AesGcm(Derive("TailRemote audio"), TagSize);
-            _helloKey = Derive("TailRemote udp hello");
+            _audio = new AesGcm(Derive("Kova audio"), TagSize);
+            _helloKey = Derive("Kova udp hello");
         }
 
         // The UDP hello tells the host where to send the sound. Its token used to be enough, and
@@ -175,17 +175,25 @@ namespace TailRemote
             return message;
         }
 
-        // The audio nonce is the wire sequence number (a u32), and the audio key never rotates, so
-        // reusing a nonce under AES-GCM would be catastrophic. At typical packet rates the real
-        // wraparound is many months away, but refuse well before that rather than silently reuse one:
-        // the caller (Host.cs) already wraps SealAudio in try/catch and drops the packet on failure.
-        private const uint AudioSeqWrapGuard = 0xF0000000;
+        // The audio nonce is the wire sequence number (a u32), and the audio key never rotates within
+        // a connection, so reusing a nonce under AES-GCM would be catastrophic. The numbers come from
+        // the host's capture counter, which runs for as long as it hosts, so the limit is how far this
+        // connection has gone from its own first packet: a limit on the number itself silenced every
+        // connection, new ones too, after about 233 days of hosting. The host ends a connection that
+        // nears it (AudioWornOut), and it reconnects with new keys.
+        private const uint AudioSeqSpan = 0xF0000000;
+        private uint _audioFirst;
+        private bool _audioStarted;
+
+        /// <summary>True when this connection's audio has come so far that it needs new keys. Capture thread only.</summary>
+        public bool AudioWornOut(uint seq) => _audioStarted && seq - _audioFirst >= AudioSeqSpan;
 
         /// <summary>Seals an audio packet in place: [type][u32 seq][payload][tag]. Capture thread only.</summary>
         public void SealAudio(byte[] packet, int payloadLength)
         {
             uint seq = BitConverter.ToUInt32(packet, 1);
-            if (seq >= AudioSeqWrapGuard) throw new InvalidOperationException("Audio key must be refreshed before the nonce counter wraps.");
+            if (!_audioStarted) { _audioFirst = seq; _audioStarted = true; }
+            else if (seq - _audioFirst >= AudioSeqSpan) throw new InvalidOperationException("Audio key must be refreshed before the nonce counter wraps.");
             Span<byte> nonce = stackalloc byte[12];
             nonce.Clear();
             packet.AsSpan(1, 4).CopyTo(nonce);

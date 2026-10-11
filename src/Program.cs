@@ -15,8 +15,8 @@ namespace TailRemote
         {
             try
             {
-                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  TailRemote " + Updater.Current + ": " + what + Environment.NewLine;
-                System.IO.File.AppendAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TailRemote-crash.txt"), text);
+                string text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  Kova " + Updater.Current + ": " + what + Environment.NewLine;
+                System.IO.File.AppendAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Kova-crash.txt"), text);
                 DiagLog.Write("problem: " + what);
             }
             catch { }
@@ -78,10 +78,10 @@ namespace TailRemote
             {
                 Speech.Init();
                 SetupForm? setup = null;
-                RunWindow(() => setup = new SetupForm("Setting up the TailRemote audio device", async (report, ct) =>
+                RunWindow(() => setup = new SetupForm("Setting up the Kova audio device", async (report, ct) =>
                 {
                     await AudioSetup.RunAsync(report, ct);
-                    return "Done. The TailRemote audio device is ready and is the default output.";
+                    return "Done. The Kova audio device is ready and is the default output.";
                 }));
                 return setup!.Result;
             }
@@ -89,8 +89,12 @@ namespace TailRemote
             if (args.Length == 3 && args[0] == "--firewall" && int.TryParse(args[2], out int fwPort))
                 return Firewall.Apply(args[1] == "open", fwPort);
 
-            if (args.Length == 2 && args[0] == "--service")
+            if ((args.Length == 2 || args.Length == 3) && args[0] == "--service" && args[1] is "install" or "remove")
+            {
+                // The window that asked, so waiting for TailRemote to stop does not wait on it.
+                if (args.Length == 3 && int.TryParse(args[2], out int windowPid)) ServiceHost.WindowPid = windowPid;
                 return args[1] == "install" ? ServiceHost.Install() : ServiceHost.Remove();
+            }
             if (args.Length == 1 && args[0] == "--service") return ServiceHost.RunService();
             if (args.Length == 1 && args[0] == "--agent") return Agent.Run();
             if (args.Length == 2 && args[0] == "--capturetest") return CaptureTest(args[1]);
@@ -99,7 +103,7 @@ namespace TailRemote
             {
                 Speech.Init();
                 SetupForm? remove = null;
-                RunWindow(() => remove = new SetupForm("Removing the TailRemote audio device", AudioSetup.RemoveAsync));
+                RunWindow(() => remove = new SetupForm("Removing the Kova audio device", AudioSetup.RemoveAsync));
                 return remove!.Result;
             }
 
@@ -226,7 +230,7 @@ namespace TailRemote
 
         private static Form MenuTestWindow(bool direct)
         {
-            var form = new Form { Text = "TailRemote menu test", ClientSize = new System.Drawing.Size(420, 120), Font = new System.Drawing.Font("Segoe UI", 10f) };
+            var form = new Form { Text = "Kova menu test", ClientSize = new System.Drawing.Size(420, 120), Font = new System.Drawing.Font("Segoe UI", 10f) };
             var bar = new MenuStrip { Dock = DockStyle.Top, LayoutStyle = ToolStripLayoutStyle.Flow };
             var about = new ToolStripMenuItem("&About");
             void List() { using var f = new ListViewerForm("Test results", new[] { "Download: 100 megabits per second", "Upload: 20 megabits per second" }, _ => false); f.ShowDialog(form); }
@@ -264,7 +268,7 @@ namespace TailRemote
             {
                 try { run(); }
                 catch (Exception e) { failed = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e); }
-            }) { Name = "TailRemote window" };
+            }) { Name = "Kova window" };
             t.SetApartmentState(System.Threading.ApartmentState.STA);
             t.Start();
             t.Join();
@@ -276,7 +280,7 @@ namespace TailRemote
         {
             try
             {
-                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TailRemote", "old");
+                string dir = Path.Combine(Names.LocalDir, "old");
                 if (!Directory.Exists(dir)) return;
                 foreach (string f in Directory.GetFiles(dir)) { try { File.Delete(f); } catch { } }
                 if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir);
@@ -311,7 +315,7 @@ namespace TailRemote
                 try
                 {
                     Step("set text (SetDataObject, copy, as when text arrives)");
-                    Clipboard.SetDataObject("TailRemote clipboard test", true, 2, 50);
+                    Clipboard.SetDataObject("Kova clipboard test", true, 2, 50);
                     Step("read text: " + Clipboard.GetText());
                     Step("set text (DataObject UnicodeText, as the service's agent does)");
                     Clipboard.SetDataObject(new DataObject(DataFormats.UnicodeText, "agent test"), true, 2, 50);
@@ -583,6 +587,91 @@ namespace TailRemote
                 lossless += " | damaged logins: retried, never blocked";
             }
 
+            // The 2.2 login, on a host of its own so its wrong guesses cannot block the one above:
+            // one salt per start of hosting, and a client gets in again after the host restarts with
+            // a new one; a key exchange that is not a real point is a wrong password (padded, never a
+            // crash); an older host gets "update both"; the UDP hello's MAC holds.
+            {
+                static byte[] Salt(int port)
+                {
+                    using var t = new System.Net.Sockets.TcpClient("127.0.0.1", port);
+                    var s = t.GetStream();
+                    s.ReadTimeout = 3000;
+                    byte[] h = new byte[Protocol.HelloBytes];
+                    Protocol.ReadExactly(s, h);
+                    return h[Protocol.HelloSaltAt..(Protocol.HelloSaltAt + Protocol.SaltBytes)];
+                }
+                byte[] firstSalt;
+                using (var h1 = new Host(47998, "second", null, _ => { }))
+                {
+                    firstSalt = Salt(47998);
+                    if (!Salt(47998).AsSpan().SequenceEqual(firstSalt)) return Fail("a host changed its salt between logins");
+                    using (var p1 = new Player(Player.NoDevice, _ => { }))
+                    using (Client.Connect("127.0.0.1", 47998, "second", p1, _ => { })) { }
+                    using var t = new System.Net.Sockets.TcpClient("127.0.0.1", 47998);
+                    var s = t.GetStream();
+                    s.ReadTimeout = 5000;
+                    byte[] hello = new byte[Protocol.HelloBytes];
+                    Protocol.ReadExactly(s, hello);
+                    byte[] answer = new byte[Protocol.AnswerBytes];
+                    Protocol.Magic.CopyTo(answer, 0);
+                    answer[Protocol.AnswerPublicAt] = 4; // the rest of the point is zeros: not on the curve
+                    Protocol.AddCheck(answer);
+                    s.Write(answer);
+                    byte[] reply = new byte[Protocol.ReplyBytes];
+                    try { Protocol.ReadExactly(s, reply); }
+                    catch (Exception e) { return Fail("a forged key exchange got no refusal: " + e.Message); }
+                    if (reply[0] != 0 || !Protocol.CheckOk(reply)) return Fail("a forged key exchange was not refused like a wrong password");
+                }
+                using (var h2 = new Host(47998, "second", null, _ => { }))
+                {
+                    if (Salt(47998).AsSpan().SequenceEqual(firstSalt)) return Fail("hosting again kept the same salt");
+                    using var p2 = new Player(Player.NoDevice, _ => { });
+                    try { using (Client.Connect("127.0.0.1", 47998, "second", p2, _ => { })) { } }
+                    catch (Exception e) { return Fail("could not log in again after the host restarted: " + e.Message); }
+                }
+
+                var oldHost = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                oldHost.Start();
+                int oldPort = ((System.Net.IPEndPoint)oldHost.LocalEndpoint).Port;
+                var oldServe = System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        using var a = oldHost.AcceptTcpClient();
+                        byte[] b = new byte[24];
+                        "TRM7"u8.CopyTo(b);
+                        a.GetStream().Write(b);
+                        System.Threading.Thread.Sleep(1000);
+                    }
+                    catch { }
+                });
+                try
+                {
+                    using var p3 = new Player(Player.NoDevice, _ => { });
+                    using (Client.Connect("127.0.0.1", oldPort, "second", p3, _ => { })) { }
+                    return Fail("an older host was accepted");
+                }
+                catch (Exception e) when (e.Message.Contains("different Kova version")) { }
+                catch (Exception e) { return Fail("an older host gave the wrong message: " + e.Message); }
+                finally { oldHost.Stop(); }
+
+                byte[] k1 = new byte[32], k2 = new byte[32], n1 = new byte[16], n2 = new byte[16];
+                k2[0] = 1;
+                using var sender = new SecureLink(k1, n1, n2, isHost: false);
+                using var receiver = new SecureLink(k1, n1, n2, isHost: true);
+                using var stranger = new SecureLink(k2, n1, n2, isHost: true);
+                byte[] udpHello = new byte[Protocol.UdpHelloBytes];
+                udpHello[0] = Protocol.UdpHello;
+                udpHello[3] = 7;
+                sender.SignHello(udpHello);
+                if (!receiver.HelloOk(udpHello)) return Fail("a signed UDP hello was refused");
+                if (stranger.HelloOk(udpHello)) return Fail("a UDP hello from another login was accepted");
+                udpHello[12] ^= 1;
+                if (receiver.HelloOk(udpHello)) return Fail("a changed UDP hello was accepted");
+                lossless += " | 2.2 login: new salt per start, re-login after restart, forged key refused, old host told to update, UDP hello MAC";
+            }
+
             // Clipboard files and folders both ways, into a temporary holding folder, checked byte for byte.
             string dir = Path.Combine(Path.GetTempPath(), "tailremote-selftest-files");
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
@@ -610,7 +699,7 @@ namespace TailRemote
                 return Fail("clipboard files arrived wrong");
 
             // Big clipboard text the other way, over the file connection.
-            string bigText = string.Concat(Enumerable.Repeat("TailRemote clipboard, the long way round. ", 120_000)); // about 5 MB
+            string bigText = string.Concat(Enumerable.Repeat("Kova clipboard, the long way round. ", 120_000)); // about 5 MB
             string? gotText = null;
             c.ClipboardReceived += t => gotText = t;
             host.ControllerFiles.SendText(bigText);
@@ -641,7 +730,7 @@ namespace TailRemote
             if (!listing.Contains("\tloose file.bin\t")) return Fail("remote folder listing: " + listing);
             if (!c.ListFolderAsync("").GetAwaiter().GetResult().Contains("D\t")) return Fail("remote drives were not listed");
             string info = c.RequestInfoAsync().GetAwaiter().GetResult();
-            if (!info.Contains("Name: " + Environment.MachineName) || !info.Contains("TailRemote: " + Updater.Current)) return Fail("remote info: " + info);
+            if (!info.Contains("Name: " + Environment.MachineName) || !info.Contains("Kova: " + Updater.Current)) return Fail("remote info: " + info);
             FileChannel.DownloadsOverride = Path.Combine(dir, "got"); // never the real Downloads
             FileChannel.Transfer? fetched = null;
             c.TransferProgress += t => { if (t.Finished && !t.Outgoing && !t.Clipboard) fetched = t; };
@@ -691,7 +780,7 @@ namespace TailRemote
             host.Leave(Protocol.LeavingUpdating, "9.9.9");
             host.Dispose();
             for (int i = 0; i < 60 && goneWhy == null; i++) System.Threading.Thread.Sleep(50);
-            if (goneWhy != "The remote PC is updating TailRemote to version 9.9.9." || c.Leaving != Protocol.LeavingUpdating)
+            if (goneWhy != "The remote PC is updating Kova to version 9.9.9." || c.Leaving != Protocol.LeavingUpdating)
                 return Fail("updating host: the controller said " + (goneWhy ?? "nothing"));
             lossless += " | update goodbye";
 
@@ -737,7 +826,7 @@ namespace TailRemote
                     if (top.Placement != ToolStripItemPlacement.Main) return Fail("the " + (top.Text ?? "").Replace("&", "") + " menu is hidden off the menu bar");
                 lossless += " | window with " + items + " menu items";
                 if (!AboutMenu.Resource("CHANGES.txt").Split('\n').Any(l => l.Trim() == Updater.Current.ToString()) || AboutMenu.Resource("README.txt").Length == 0)
-                    return Fail("the changelog inside TailRemote has no section for " + Updater.Current + ", or the guide is missing");
+                    return Fail("the changelog inside Kova has no section for " + Updater.Current + ", or the guide is missing");
             }
             Directory.Delete(dir, true);
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "tailremote-selftest.txt"), "ok, ping " + c.LastPingMs + " ms. " + Dump() + lossless + CableReport());

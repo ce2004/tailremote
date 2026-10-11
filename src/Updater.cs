@@ -16,7 +16,7 @@ namespace TailRemote
     /// </summary>
     internal static class Updater
     {
-        private const string Repo = "ce2004/tailremote";
+        private const string Repo = "ce2004/kova";
 
         public sealed record Release(Version Version, string Notes, string Url, string? Sha256);
 
@@ -30,13 +30,21 @@ namespace TailRemote
         }
 
         private static string AssetName =>
-            "TailRemote-" + (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : "x64") + ".exe";
+            "Kova-" + (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "arm64" : "x64") + ".exe";
 
         private static HttpClient Http()
         {
             var h = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-            h.DefaultRequestHeaders.UserAgent.ParseAdd("TailRemote/" + Current);
+            h.DefaultRequestHeaders.UserAgent.ParseAdd("Kova/" + Current);
             return h;
+        }
+
+        /// <summary>The newest version on GitHub, whatever this copy is.</summary>
+        public static async Task<Version> LatestAsync()
+        {
+            using var h = Http();
+            using var doc = JsonDocument.Parse(await h.GetStringAsync("https://api.github.com/repos/" + Repo + "/releases/latest"));
+            return Version.Parse(doc.RootElement.GetProperty("tag_name").GetString()!.TrimStart('v'));
         }
 
         /// <summary>The latest release, or null when this copy is already up to date.</summary>
@@ -89,11 +97,16 @@ namespace TailRemote
                 // so it does not need "old" to be absent first.
                 File.Replace(fresh, exe, old, ignoreMetadataErrors: true);
             }
-            catch
+            catch (Exception e)
             {
                 // Leave nothing half-done behind: the running exe stays where it was.
                 try { if (!File.Exists(exe) && File.Exists(old)) File.Move(old, exe); } catch { }
                 try { File.Delete(fresh); } catch { }
+                // In Program Files, a copy not running as administrator cannot change its own folder,
+                // and "Access to the path ... is denied" says nothing about what to do.
+                if (e is UnauthorizedAccessException)
+                    throw new InvalidOperationException("Nothing was changed. Kova is in " + Path.GetDirectoryName(exe) +
+                        ", and this copy could not change it (" + e.Message + "). If Kova is in Program Files, open it with Run as administrator, then update again.", e);
                 throw;
             }
             string args = beforeStart();
@@ -108,7 +121,7 @@ namespace TailRemote
                 // caller just needs a clear, user-facing explanation instead of a raw Process.Start
                 // failure or a silent crash.
                 throw new InvalidOperationException("Updated to version " + r.Version +
-                    ", but it could not restart automatically (" + e.Message + "). Please start TailRemote yourself.", e);
+                    ", but it could not restart automatically (" + e.Message + "). Please start Kova yourself.", e);
             }
         }
 
@@ -116,7 +129,13 @@ namespace TailRemote
         public static void FinishUpdate(int oldPid)
         {
             try { Process.GetProcessById(oldPid).WaitForExit(15000); } catch { }
-            for (int i = 0; i < 20 && !CleanLeftovers(); i++) System.Threading.Thread.Sleep(250);
+            // In the background: when the service runs the same file, its running copy is one of the
+            // leftovers and cannot go until it restarts, and five seconds of retries here held up
+            // everything, NVDA's first words included.
+            new System.Threading.Thread(() =>
+            {
+                for (int i = 0; i < 20 && !CleanLeftovers(); i++) System.Threading.Thread.Sleep(250);
+            }) { IsBackground = true, Name = "Kova leftovers" }.Start();
         }
 
         /// <summary>Deletes TailRemote's own leftovers from earlier updates (name.old, name.old-...). True if none are left.</summary>

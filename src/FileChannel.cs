@@ -72,6 +72,16 @@ namespace TailRemote
         /// </summary>
         public Func<bool>? MayChooseFolder;
 
+        /// <summary>
+        /// Hosting as the service: the signed-in user, whose rights files sent into a chosen folder are
+        /// made with (null from it: nobody is signed in, so refused). Unset in the window, which already
+        /// runs as its user. Made as SYSTEM, they could go anywhere, System32 included.
+        /// </summary>
+        public Func<System.Security.Principal.WindowsIdentity?>? FolderUser;
+
+        /// <summary>Said when the service cannot act for anyone: nobody is signed in on the host PC.</summary>
+        public const string NobodySignedIn = "Nobody is signed in on the remote PC, so its files cannot be reached. Sign in there first.";
+
         /// <summary>The other PC's address, shown with each transfer.</summary>
         public volatile string PeerName = "";
 
@@ -82,6 +92,12 @@ namespace TailRemote
 
         /// <summary>True while a batch is going either way (the client then measures its ping more often).</summary>
         public bool Busy => _out != null || (_in is In b && Now - b.LastActivity < 60_000); // a receiver waiting for its sender to come back is not busy
+        /// <summary>
+        /// Anything not yet ended, however long it has been waiting. Whether to keep a channel for a
+        /// reconnecting PC goes by this, not Busy: a send paused over a minute ago is still not to
+        /// be thrown away when the connection drops again before its next piece.
+        /// </summary>
+        public bool HasWork => _out != null || _in != null;
 
         public sealed class Transfer
         {
@@ -107,11 +123,11 @@ namespace TailRemote
         }
 
         /// <summary>Where arriving clipboard files are held until pasted: %LOCALAPPDATA%\TailRemote\Clipboard.</summary>
-        public static string Staging => StagingOverride ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TailRemote", "Clipboard");
+        public static string Staging => StagingOverride ?? Path.Combine(Names.LocalDir, "Clipboard");
         /// <summary>The self-test receives into a temporary folder instead.</summary>
         public static string? StagingOverride;
         /// <summary>Where Send files puts what arrives: Downloads\TailRemote.</summary>
-        public static string Downloads => DownloadsOverride ?? Path.Combine(MyDownloads.Value, "TailRemote");
+        public static string Downloads => DownloadsOverride ?? Path.Combine(MyDownloads.Value, "Kova");
         // Where Downloads really is (moved to another drive or OneDrive included), not just the profile's.
         private static readonly Lazy<string> MyDownloads = new(() =>
             NativeService.MyFolder(NativeService.FolderDownloads) ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
@@ -146,8 +162,8 @@ namespace TailRemote
         {
             Id = id ?? RandomNumberGenerator.GetBytes(16);
             _nextId = (uint)RandomNumberGenerator.GetInt32(int.MaxValue);
-            new Thread(WatchLoop) { IsBackground = true, Name = "TailRemote files watch" }.Start();
-            new Thread(DialLoop) { IsBackground = true, Name = "TailRemote files dial" }.Start();
+            new Thread(WatchLoop) { IsBackground = true, Name = "Kova files watch" }.Start();
+            new Thread(DialLoop) { IsBackground = true, Name = "Kova files dial" }.Start();
         }
 
         /// <summary>The controlling PC only: opens one more lane to the host, or returns null.</summary>
@@ -222,8 +238,8 @@ namespace TailRemote
             lock (_stops) foreach (var (id, at) in _stops) if (Now - at < 2 * GiveUpMs) lane.Control.Enqueue(IdMessage(Stop, id));
             // Below normal: keys and sound run on their own threads at higher priority, so even a
             // transfer using every core can never hold up a keystroke or the audio.
-            new Thread(() => ReadLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files in", Priority = ThreadPriority.BelowNormal }.Start();
-            new Thread(() => WriteLoop(lane), 256 << 10) { IsBackground = true, Name = "TailRemote files out", Priority = ThreadPriority.BelowNormal }.Start();
+            new Thread(() => ReadLoop(lane), 256 << 10) { IsBackground = true, Name = "Kova files in", Priority = ThreadPriority.BelowNormal }.Start();
+            new Thread(() => WriteLoop(lane), 256 << 10) { IsBackground = true, Name = "Kova files out", Priority = ThreadPriority.BelowNormal }.Start();
             _out?.Changed.Set();
         }
 
@@ -893,6 +909,15 @@ namespace TailRemote
             public required byte Kind;
             public required (string Rel, long Length)?[] Entries;
             public string? Into; // KindTo: the folder the controller chose, already checked
+            public System.Security.Principal.WindowsIdentity? MakeAs; // KindTo from the service: made as this user (FolderUser)
+
+            /// <summary>
+            /// Every file operation in a chosen folder goes through here: as the signed-in user when the
+            /// service receives (MakeAs), so nothing there is ever done with SYSTEM's rights, not even
+            /// after a folder was swapped for a link to somewhere else while the batch waited.
+            /// </summary>
+            public T As<T>(Func<T> f) => MakeAs is { } u ? System.Security.Principal.WindowsIdentity.RunImpersonated(u.AccessToken, f) : f();
+            public void As(Action f) { if (MakeAs is { } u) System.Security.Principal.WindowsIdentity.RunImpersonated(u.AccessToken, f); else f(); }
             public readonly object Gate = new();
             public readonly Transfer T = new() { What = "files" };
             public readonly Stopwatch Clock = new();
@@ -911,6 +936,7 @@ namespace TailRemote
             public long Total, Done;
             public double LastReport, Speed, Moving; // speed lately, and the time data was really arriving
             public long LastDone;
+            public long NameBytes; // the list's names so far, capped (MaxNameBytes) as they arrive
 
             public long Length(int i) => Entries[i]!.Value.Length;
         }
@@ -938,10 +964,11 @@ namespace TailRemote
             if (count < 1 || count > 1_000_000 || first < 0 || first >= count) return;
             int start = 22;
             string? into = null, refusal = null;
+            System.Security.Principal.WindowsIdentity? makeAs = null;
             if (kind is < KindFiles or > KindTo)
                 // A kind this version does not know (from a newer PC): refused out loud, so its sender is
                 // not left waiting, and nothing is written anywhere.
-                refusal = "The other PC could not take this: its TailRemote is too old for it. Update TailRemote there.";
+                refusal = "The other PC could not take this: its Kova is too old for it. Update Kova there.";
             else if (kind == KindTo)
             {
                 if (m.Length < 24) return;
@@ -954,16 +981,23 @@ namespace TailRemote
                 // the host's own lock is never taken inside this channel's (the host closes channels
                 // while holding it).
                 bool may = MayChooseFolder?.Invoke() == true;
-                string? folder = may ? Destination(into) : null;
+                string? folder = null;
                 if (!may) refusal = "The remote PC only takes files into a folder of your choosing from a PC controlling it.";
-                else if (folder == null) refusal = "The remote PC did not take the files: " + into + " is not a folder there.";
+                else if (FolderUser != null && (makeAs = FolderUser()) == null) refusal = NobodySignedIn;
+                else
+                {
+                    // Checked as that user too: as SYSTEM, the answer told whether another user's folder existed.
+                    string? asked = into;
+                    folder = makeAs is { } u ? System.Security.Principal.WindowsIdentity.RunImpersonated(u.AccessToken, () => Destination(asked)) : Destination(asked);
+                    if (folder == null) refusal = "The remote PC did not take the files: " + into + " is not a folder there.";
+                }
                 into = folder;
             }
             In b;
             In? old = null;
             lock (_inGate)
             {
-                if (_results.TryGetValue(id, out var r)) { Tell(lane, FinishedMessage(id, r.Outcome, r.Why)); return; }
+                if (_results.TryGetValue(id, out var r)) { makeAs?.Dispose(); Tell(lane, FinishedMessage(id, r.Outcome, r.Why)); return; }
                 if (_in is In cur && cur.Id == id) b = cur;
                 else
                 {
@@ -971,18 +1005,20 @@ namespace TailRemote
                     if (refusal != null)
                     {
                         DiagLog.Write("files: refused an offer of kind " + kind + ": " + refusal);
+                        makeAs?.Dispose();
                         Remember(id, EndedBadly, refusal);
                         Tell(lane, FinishedMessage(id, EndedBadly, refusal));
                         return;
                     }
                     old = _in;
-                    b = new In { Id = id, Kind = kind, Entries = new (string, long)?[count], Into = into };
+                    b = new In { Id = id, Kind = kind, Entries = new (string, long)?[count], Into = into, MakeAs = makeAs };
                     b.T.Clipboard = kind is KindFiles or KindText;
                     b.T.Peer = PeerName;
                     if (kind == KindText) b.T.What = "clipboard text";
                     _in = b;
                 }
             }
+            if (makeAs != null && !ReferenceEquals(b.MakeAs, makeAs)) makeAs.Dispose(); // a later part of a batch that already has its user
             if (old != null) EndIn(old, EndedStopped, "The other PC sent something newer, so " + old.T.What + " was stopped.", "Something newer was sent.", null, tell: true);
             bool ready = false;
             try
@@ -1003,7 +1039,13 @@ namespace TailRemote
                             if (pos + 10 + bytes > m.Length) throw new InvalidDataException("a damaged list of files");
                             string rel = Encoding.UTF8.GetString(m, pos + 10, bytes);
                             pos += 10 + bytes;
-                            if (b.Entries[i] == null) { b.Entries[i] = (rel, length); b.Have++; }
+                            if (b.Entries[i] == null)
+                            {
+                                b.NameBytes += bytes;
+                                if (b.NameBytes > MaxNameBytes) throw new InvalidDataException("a list of files far too long to be real");
+                                b.Entries[i] = (rel, length);
+                                b.Have++;
+                            }
                         }
                         if (b.Have == count) { Prepare(b); ready = true; }
                     }
@@ -1033,22 +1075,114 @@ namespace TailRemote
             b.Total = b.Entries.Sum(e => Math.Max(0, e!.Value.Length));
             if (b.Kind == KindText)
             {
-                if (count != 1 || b.Length(0) < 0 || b.Length(0) > MaxText) throw new InvalidDataException("The other PC copied more text than TailRemote can carry (512 MB).");
+                if (count != 1 || b.Length(0) < 0 || b.Length(0) > MaxText) throw new InvalidDataException("The other PC copied more text than Kova can carry (512 MB).");
                 b.Text = new byte[b.Length(0)];
             }
             else
             {
+                string folder;
                 if (b.Kind == KindFiles)
-                {
-                    CleanStaging();
                     // Its own folder, even when several PCs send at the same moment.
-                    b.Folder = Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + b.Id.ToString("x8"));
-                }
+                    folder = Path.GetFullPath(Path.Combine(Staging, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + b.Id.ToString("x8")));
                 else if (b.Kind == KindTo)
                     // Checked again now the whole list is here; never made if it has gone meanwhile.
-                    b.Folder = Destination(b.Into) ?? throw new InvalidDataException((b.Into ?? "the folder") + " is not a folder here.");
-                else b.Folder = Downloads;
+                    folder = b.As(() => Destination(b.Into)) ?? throw new InvalidDataException((b.Into ?? "the folder") + " is not a folder here.");
+                else folder = Downloads;
+                // Everything checked before anything is made: one bad entry used to fail the batch
+                // after earlier ones were already made, leaving empty files and folders behind (and
+                // the next send of the same thing became "name (2)").
+                Validate(b, folder);
+                if (b.Kind == KindFiles)
+                {
+                    lock (ActiveStaging) ActiveStaging.Add(folder);
+                    CleanStaging();
+                }
+                b.Folder = folder;
                 if (b.Kind != KindTo) Directory.CreateDirectory(b.Folder);
+                var reserved = new List<string>();
+                try
+                {
+                    // As the signed-in user when the service receives into a chosen folder: whatever
+                    // that user could not make there is refused. The handles made stay usable after.
+                    b.As(() => MakeEntries(b, reserved));
+                }
+                catch
+                {
+                    // Nothing half-made stays behind: the batch's own holding folder, or the names it
+                    // reserved in Downloads or the chosen folder (made just now, so nothing else is in them).
+                    try
+                    {
+                        if (b.Kind == KindFiles) Directory.Delete(b.Folder, true);
+                        else b.As(() => { foreach (string r in reserved) { if (Directory.Exists(r)) Directory.Delete(r, true); else File.Delete(r); } });
+                    }
+                    catch { }
+                    b.Tops.Clear();
+                    StagingEnded(b);
+                    throw;
+                }
+                b.T.What = b.Tops.Count == 1 ? b.Tops[0] : b.Tops.Count + " items";
+            }
+            b.T.Total = b.Total;
+            b.Prepared = true;
+            b.Clock.Start();
+        }
+
+        // A hostile or broken PC must not be able to fill this PC's memory with names: at most this
+        // much in one batch (a million files of ordinary depth come nowhere near it).
+        private const long MaxNameBytes = 256L << 20;
+        private const int MaxPathChars = 32_000; // Windows' own limit for a path
+
+        /// <summary>
+        /// Checks the whole list before anything is made: every path stays inside, names are not
+        /// absurd, and there is room on the drive. Two files that would land on the same name (on
+        /// Windows, names that differ only in capital letters do) get "name (2)" and so on, as
+        /// Downloads does, instead of failing the whole batch.
+        /// </summary>
+        private static void Validate(In b, string folder)
+        {
+            var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < b.Entries.Length; i++)
+            {
+                var (rel, length) = b.Entries[i]!.Value;
+                // The list's total size is capped as it arrives (MaxNameBytes); here, each path's own.
+                if (rel.Length > MaxPathChars) throw new InvalidDataException("a list of files far too long to be real");
+                string path = SafePath(folder, rel) ?? throw new InvalidDataException("a path that leaves the folder");
+                if (length < 0) folders.Add(path);
+                else for (string? d = Path.GetDirectoryName(path); d != null && d.Length > folder.Length; d = Path.GetDirectoryName(d)) folders.Add(d);
+            }
+            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < b.Entries.Length; i++)
+            {
+                var (rel, length) = b.Entries[i]!.Value;
+                if (length < 0) continue;
+                string path = SafePath(folder, rel)!;
+                if (files.Add(path) && !folders.Contains(path)) continue;
+                int cut = Math.Max(rel.LastIndexOf('\\'), rel.LastIndexOf('/')) + 1;
+                string parent = rel[..cut], name = rel[cut..];
+                string stem = Path.GetFileNameWithoutExtension(name), ext = Path.GetExtension(name);
+                for (int n = 2; ; n++)
+                {
+                    string fresh = parent + stem + " (" + n + ")" + ext;
+                    string freshPath = SafePath(folder, fresh) ?? throw new InvalidDataException("a path that leaves the folder");
+                    if (folders.Contains(freshPath) || !files.Add(freshPath)) continue;
+                    b.Entries[i] = (fresh, length);
+                    break;
+                }
+            }
+            try
+            {
+                long free = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(folder))!).AvailableFreeSpace;
+                if (b.Total > free) throw new InvalidDataException("there is not enough free space on the receiving PC: it needs " + Size(b.Total) + ", and " + Size(free) + " is free.");
+            }
+            catch (InvalidDataException) { throw; }
+            catch { } // a drive Windows will not describe: the writes themselves say if it is full
+        }
+
+        /// <summary>Makes the folders and empty files of a checked list. reserved: the top names made in Downloads or the chosen folder.</summary>
+        private static void MakeEntries(In b, List<string> reserved)
+        {
+            int count = b.Entries.Length;
+            {
                 var renamed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var tops = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var made = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1060,7 +1194,7 @@ namespace TailRemote
                 for (int i = 0; i < count; i++)
                 {
                     var (rel, length) = b.Entries[i]!.Value;
-                    if (SafePath(b.Folder, rel) == null) throw new InvalidDataException("a path that leaves the folder");
+                    if (SafePath(b.Folder!, rel) == null) throw new InvalidDataException("a path that leaves the folder");
                     string top = rel.Split('\\', '/')[0];
                     if (b.Kind is KindDownloads or KindTo)
                     {
@@ -1074,16 +1208,16 @@ namespace TailRemote
                             {
                                 while (true)
                                 {
-                                    fresh = Unique(b.Folder, top);
-                                    string chosen = Path.Combine(b.Folder, fresh);
-                                    if (rel == top && length >= 0) { using (File.OpenHandle(chosen, FileMode.CreateNew, FileAccess.Write)) { } break; }
+                                    fresh = Unique(b.Folder!, top);
+                                    string chosen = Path.Combine(b.Folder!, fresh);
+                                    if (rel == top && length >= 0) { using (File.OpenHandle(chosen, FileMode.CreateNew, FileAccess.Write)) { } reserved.Add(chosen); break; }
                                     // Directory.CreateDirectory is not exclusive (a no-op if the name is
                                     // already there), so something else racing the exact chosen name
                                     // between Unique()'s check and here would otherwise be silently
                                     // merged into. Detect that and pick another name instead.
                                     bool existed = Directory.Exists(chosen);
                                     Directory.CreateDirectory(chosen);
-                                    if (!existed) break;
+                                    if (!existed) { reserved.Add(chosen); break; }
                                 }
                             }
                             renamed[top] = fresh;
@@ -1091,7 +1225,7 @@ namespace TailRemote
                         rel = fresh + rel[top.Length..];
                         top = fresh;
                     }
-                    string path = SafePath(b.Folder, rel)!;
+                    string path = SafePath(b.Folder!, rel)!;
                     // Folders and empty files now; a file with something in it is made when its first
                     // piece arrives, by whichever lane brings it, so a million files are made by 16
                     // threads side by side instead of one by one before anything moves.
@@ -1107,11 +1241,7 @@ namespace TailRemote
                     b.Paths[i] = path;
                     if ((i & 4095) == 0) b.LastActivity = Now; // a long list is still being worked through
                 }
-                b.T.What = b.Tops.Count == 1 ? b.Tops[0] : b.Tops.Count + " items";
             }
-            b.T.Total = b.Total;
-            b.Prepared = true;
-            b.Clock.Start();
         }
 
         /// <summary>A piece, in the lane's own buffer (m, length bytes): written, then confirmed. Nothing may keep m.</summary>
@@ -1154,7 +1284,8 @@ namespace TailRemote
                         if (h == null)
                         {
                             // Its folder was made while preparing.
-                            h = File.OpenHandle(b.Paths[e], FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read | FileShare.Delete);
+                            // As the user in a chosen folder (b.As): this is where a file with content is really made.
+                            h = b.As(() => File.OpenHandle(b.Paths[e], FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read | FileShare.Delete));
                             lock (b.Gate)
                             {
                                 if (b.Ended) { h.Dispose(); return; }
@@ -1251,6 +1382,7 @@ namespace TailRemote
                 if (_in == b) _in = null;
                 Remember(b.Id, EndedWell, "");
             }
+            StagingEnded(b);
             Tell(lane, FinishedMessage(b.Id, EndedWell, ""));
             DiagLog.Write("files: " + t.Result);
             Progress?.Invoke(t);
@@ -1274,7 +1406,8 @@ namespace TailRemote
             }
             // Nothing that arrived is thrown away (Conner): finished files stay as they are, a file cut
             // off part-way is kept and named "(incomplete)", and the Files line says where they are.
-            var (whole, files, part) = KeepWhatArrived(b);
+            var (whole, files, part, moved) = KeepWhatArrived(b);
+            StagingEnded(b);
             if (whole + part > 0)
                 why += " What had arrived was kept: " + whole + " of " + files + (files == 1 ? " file" : " files") +
                     (part > 0 ? ", and " + part + " only partly, marked incomplete" : "") +
@@ -1298,7 +1431,21 @@ namespace TailRemote
             t.Result = why;
             try { Progress?.Invoke(t); } catch { }
             // Clipboard files: whatever arrived goes onto the clipboard, as a finished batch would.
-            if (b.Kind == KindFiles && whole + part > 0) try { FilesReceived?.Invoke(b.Tops.Select(x => Path.Combine(b.Folder!, x)).ToArray()); } catch { }
+            // Only what is really there: a file cut off part-way now has "(incomplete)" in its name,
+            // and one that never got anything is gone, so their old names would paste nothing.
+            if (b.Kind == KindFiles && whole + part > 0)
+                try
+                {
+                    var there = new List<string>();
+                    foreach (string top in b.Tops)
+                    {
+                        string full = Path.Combine(b.Folder!, top);
+                        if (moved.TryGetValue(full, out var now)) { if (now != null) there.Add(now); }
+                        else if (File.Exists(full) || Directory.Exists(full)) there.Add(full);
+                    }
+                    if (there.Count > 0) FilesReceived?.Invoke(there.ToArray());
+                }
+                catch { }
             GiveBackMemory(b.Entries.Length, b.Total);
         }
 
@@ -1308,9 +1455,11 @@ namespace TailRemote
         /// goes. Returns the files that arrived whole, all the files, and those kept part-received.
         /// A lane may still be finishing a write, so a file that is busy is tried again a few times.
         /// </summary>
-        private static (int Whole, int Files, int Part) KeepWhatArrived(In b)
+        private static (int Whole, int Files, int Part, Dictionary<string, string?> Moved) KeepWhatArrived(In b)
         {
-            if (b.Folder == null || b.Kind == KindText || !b.Prepared) return (0, 0, 0);
+            // Where each file that did not arrive whole ends up: its "(incomplete)" name, or null if it went.
+            var moved = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            if (b.Folder == null || b.Kind == KindText || !b.Prepared) return (0, 0, 0, moved);
             int whole = 0, files = 0, part = 0;
             for (int i = 0; i < b.Entries.Length; i++)
             {
@@ -1320,31 +1469,58 @@ namespace TailRemote
                 if (got >= length) { whole++; continue; }
                 if (got > 0) part++;
                 string path = b.Paths[i];
-                FixUp(path, got > 0, 0);
+                if (!b.As(() => File.Exists(path))) { moved[path] = null; continue; }
+                if (got > 0)
+                {
+                    // The name is chosen once, so the clipboard can be given it even while a lane is
+                    // still finishing a write and the rename has to wait.
+                    // Claimed at once with an empty placeholder, which the rename then replaces: chosen
+                    // but not claimed, the name could be taken before a delayed rename, which then gave up
+                    // and left the clipboard a file that did not exist.
+                    string dir = Path.GetDirectoryName(path)!;
+                    string to = "";
+                    bool claimed = false;
+                    for (int tries = 0; tries < 5 && !claimed; tries++)
+                    {
+                        to = Path.Combine(dir, Unique(dir, Path.GetFileNameWithoutExtension(path) + " (incomplete)" + Path.GetExtension(path)));
+                        string name = to;
+                        try { b.As(() => { using (new FileStream(name, FileMode.CreateNew)) { } }); claimed = true; }
+                        catch (IOException) { }
+                        catch { break; }
+                    }
+                    moved[path] = to;
+                    FixUp(b, path, to, claimed, 0);
+                }
+                else
+                {
+                    try { if (b.As(() => { if (new FileInfo(path).Length != 0) return false; File.Delete(path); return true; })) moved[path] = null; } catch { }
+                }
             }
-            return (whole, files, part);
+            return (whole, files, part, moved);
 
-            static void FixUp(string path, bool someArrived, int attempt)
+            static void FixUp(In b, string path, string to, bool claimed, int attempt)
             {
                 try
                 {
-                    if (!File.Exists(path)) return;
-                    if (!someArrived) { if (new FileInfo(path).Length == 0) File.Delete(path); return; }
-                    string dir = Path.GetDirectoryName(path)!;
-                    File.Move(path, Path.Combine(dir, Unique(dir, Path.GetFileNameWithoutExtension(path) + " (incomplete)" + Path.GetExtension(path))));
+                    // Over the placeholder only: never over anything else.
+                    b.As(() => { if (File.Exists(path)) File.Move(path, to, overwrite: claimed); });
                 }
                 catch when (attempt < 10)
                 {
-                    ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(200); FixUp(path, someArrived, attempt + 1); });
+                    ThreadPool.QueueUserWorkItem(_ => { Thread.Sleep(200); FixUp(b, path, to, claimed, attempt + 1); });
                 }
-                catch { }
+                catch
+                {
+                    // Given up: the empty placeholder must not stay behind looking like the file.
+                    try { if (claimed) b.As(() => { if (File.Exists(to) && new FileInfo(to).Length == 0) File.Delete(to); }); } catch { }
+                }
             }
         }
 
-        /// <summary>A folder as the Files line says it: "Downloads, TailRemote" for the usual one.</summary>
+        /// <summary>A folder as the Files line says it: "Downloads, Kova" for the usual one.</summary>
         private static string Where(string folder) =>
-            string.Equals(Path.GetFullPath(folder).TrimEnd('\\'), Path.GetFullPath(Path.Combine(MyDownloads.Value, "TailRemote")).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
-                ? "Downloads, TailRemote" : folder;
+            string.Equals(Path.GetFullPath(folder).TrimEnd('\\'), Path.GetFullPath(Path.Combine(MyDownloads.Value, "Kova")).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+                ? "Downloads, Kova" : folder;
 
         private void OnStop(uint id)
         {
@@ -1425,9 +1601,19 @@ namespace TailRemote
             catch { return null; }
         }
 
+        // Holding folders of clipboard batches not yet ended (still arriving, or paused waiting for
+        // their sender to come back). Lock on the set itself.
+        private static readonly HashSet<string> ActiveStaging = new(StringComparer.OrdinalIgnoreCase);
+
+        private static void StagingEnded(In b)
+        {
+            if (b.Kind == KindFiles && b.Folder != null) lock (ActiveStaging) ActiveStaging.Remove(b.Folder);
+        }
+
         /// <summary>
         /// Clears old batches out of the holding folder: never the newest (the clipboard points at
-        /// it), and never one from the last 10 minutes, which may still be arriving from another PC.
+        /// it), never one still arriving or paused (however old: a second PC's sends used to delete
+        /// a first PC's paused batch from under it), and never one written to in the last 10 minutes.
         /// </summary>
         private static void CleanStaging()
         {
@@ -1436,7 +1622,16 @@ namespace TailRemote
                 if (!Directory.Exists(Staging)) return;
                 var cutoff = DateTime.UtcNow.AddMinutes(-10);
                 foreach (var old in new DirectoryInfo(Staging).GetDirectories().OrderByDescending(d => d.Name).Skip(1))
-                    if (old.CreationTimeUtc < cutoff) try { old.Delete(true); } catch { }
+                {
+                    if (old.CreationTimeUtc >= cutoff) continue;
+                    lock (ActiveStaging) if (ActiveStaging.Contains(old.FullName)) continue;
+                    try
+                    {
+                        if (old.EnumerateFiles("*", SearchOption.AllDirectories).Any(f => f.LastWriteTimeUtc >= cutoff)) continue;
+                        old.Delete(true);
+                    }
+                    catch { }
+                }
             }
             catch { }
         }

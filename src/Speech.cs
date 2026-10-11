@@ -28,7 +28,7 @@ namespace TailRemote
             if (Interlocked.CompareExchange(ref _init, 1, 0) != 0) return;
             Load();
             if (_speakText == null) return;
-            new Thread(Pump) { IsBackground = true, Name = "TailRemote speech" }.Start();
+            new Thread(Pump) { IsBackground = true, Name = "Kova speech" }.Start();
         }
 
         public static void Speak(string message, bool interrupt = true)

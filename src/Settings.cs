@@ -65,9 +65,8 @@ namespace TailRemote
         /// <summary>What was running when TailRemote last closed: "host", "connect" or "". Used by --resume.</summary>
         public string ResumeState { get; set; } = "";
 
-        // TAILREMOTE_SETTINGS_DIR: test copies keep their settings apart from the real ones.
-        private static string Dir => Environment.GetEnvironmentVariable("TAILREMOTE_SETTINGS_DIR") is { Length: > 0 } test ? test
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TailRemote");
+        // KOVA_SETTINGS_DIR: test copies keep their settings apart from the real ones.
+        private static string Dir => Environment.GetEnvironmentVariable("KOVA_SETTINGS_DIR") is { Length: > 0 } test ? test : Names.UserDir;
         internal static string FilePath => Path.Combine(Dir, "settings.json");
         // Save() writes here first, then atomically replaces FilePath, so a crash or power loss
         // mid-write can never leave a half-written settings.json as the live file.
@@ -113,7 +112,7 @@ namespace TailRemote
         public static Settings Import(byte[] data, string password)
         {
             int head = BackupMagic.Length;
-            if (data.Length < head + 44 || !data.AsSpan(0, head).SequenceEqual(BackupMagic)) throw new InvalidDataException("That is not a TailRemote settings backup.");
+            if (data.Length < head + 44 || !data.AsSpan(0, head).SequenceEqual(BackupMagic)) throw new InvalidDataException("That is not a Kova settings backup.");
             byte[] salt = data[head..(head + 16)], nonce = data[(head + 16)..(head + 28)], tag = data[(head + 28)..(head + 44)], secret = data[(head + 44)..];
             byte[] plain = new byte[secret.Length];
             try

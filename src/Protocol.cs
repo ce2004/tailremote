@@ -15,8 +15,8 @@ namespace TailRemote
     /// never waited for or resent.
     ///
     /// Handshake (every login message ends with a 4-byte damage check, see AddCheck):
-    ///   host:   "TRM8" + host nonce (16) + salt (16) + host P-256 public key (65)
-    ///   client: "TRM8" + client nonce (16) + client P-256 public key (65)
+    ///   host:   "TRM9" + host nonce (16) + salt (16) + host P-256 public key (65)
+    ///   client: "TRM9" + client nonce (16) + client P-256 public key (65)
     ///           + HMAC(session, "C" + host nonce + client nonce)
     ///   host:   0 after a 2 s pause (wrong password, same size), or
     ///           1 + role (1) + session token (8) + HMAC(session, "H" + client nonce + host nonce)
@@ -41,9 +41,10 @@ namespace TailRemote
     internal static class Protocol
     {
         public const int DefaultPort = 47120;
-        public static readonly byte[] Magic = "TRM8"u8.ToArray(); // 8: key exchange and per-host salt (2.2.0); 7 added the login check
-        /// <summary>A file lane (FileChannel): "TRF9", session token (8), channel id (16), the lane's fresh random value (16), padded, then the check.</summary>
-        public static readonly byte[] FileMagic = "TRF9"u8.ToArray();
+        public static readonly byte[] Magic = "TRM9"u8.ToArray(); // 9: file lanes prove the session key, signed audio pongs (2.3.0); 8 added the key exchange
+        /// <summary>A file lane (FileChannel): "TRFA", session token (8), channel id (16), the lane's fresh random value (16), LaneProof (32), padded, then the check.</summary>
+        public static readonly byte[] FileMagic = "TRFA"u8.ToArray();
+        public const int LaneProofAt = 44;
 
         // Client to host
         public const byte Key = 1;      // vk u16, scan u16, flags u8 (1 = up, 2 = extended)
@@ -58,6 +59,7 @@ namespace TailRemote
         public const byte Fetch = 10;        // UTF-8 paths, one per line: the host sends them to this controller like Send files
         public const byte InfoRequest = 11;  // the host answers with Info
         public const byte SpeedTestRequest = 12; // the host runs an internet speed test and answers with SpeedResult
+        public const byte AudioPause = 14; // u8: 1 = send this PC no sound at all (muted while not controlling, or waiting in the background), 0 = send it again
         public const byte ClipboardRequest = 13; // the controller asks the host to send its clipboard here (text or files), like Send the clipboard but pulled
         // A clipboard pull reads the clipboard and fans a transfer out to every controller; the host
         // window's message pump drowns under the progress updates if the controller mashes or holds
@@ -82,7 +84,8 @@ namespace TailRemote
         // UDP
         public const byte UdpHello = 0xA0;  // token[8] stamp[8] mac[16] (SecureLink.SignHello), client to host, every second
         public const int UdpHelloBytes = 1 + 8 + 8 + SecureLink.HelloMacBytes;
-        public const byte UdpPong = 0xA8;   // stamp[8], host to client: the hello's stamp straight back, so the audio path's own ping is measured
+        public const int UdpPongBytes = 1 + 8 + SecureLink.HelloMacBytes; // the hello's stamp, signed by the host the same way (SignHello)
+        public const byte UdpPong = 0xA8;   // stamp[8] mac[16], host to client: the hello's stamp straight back, so the audio path's own ping is measured
         // 0xA1 to 0xA5 were the lossless formats (up to 1.7): never reuse them
         public const byte UdpOpus = 0xA6; // u32 sequence (5 ms ticks), then sealed: u8 ticks, Opus packet
 
@@ -233,7 +236,10 @@ namespace TailRemote
                 });
                 return mine.DeriveRawSecretAgreement(other.PublicKey);
             }
-            catch (CryptographicException) { return null; }
+            // Windows reports a point that is not on the curve as PlatformNotSupportedException, not
+            // CryptographicException: caught only as the latter, a forged key ended the login without
+            // the wrong-password pause, and a client heard "not valid for this platform".
+            catch (Exception e) when (e is CryptographicException or PlatformNotSupportedException or ArgumentException) { return null; }
         }
 
         /// <summary>
@@ -245,10 +251,25 @@ namespace TailRemote
         public static byte[] SessionKey(byte[] passwordKey, byte[] shared, ReadOnlySpan<byte> hello, ReadOnlySpan<byte> answerHead)
         {
             using var h = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            h.AppendData("TailRemote login 8 "u8);
+            h.AppendData("Kova login 8 "u8);
             h.AppendData(hello);
             h.AppendData(answerHead);
             return HKDF.DeriveKey(HashAlgorithmName.SHA256, shared, 32, passwordKey, h.GetHashAndReset());
+        }
+
+        /// <summary>
+        /// A file lane's proof that it comes from the PC that logged in: the session token travels in
+        /// the clear (in every UDP hello), and a lane opened on it alone could stop that PC's transfers.
+        /// Over this lane's own hello nonce, so a recorded one is no use on another lane.
+        /// </summary>
+        public static byte[] LaneProof(byte[] sessionKey, ReadOnlySpan<byte> laneHelloNonce, ReadOnlySpan<byte> channel, ReadOnlySpan<byte> laneValue)
+        {
+            byte[] msg = new byte[1 + laneHelloNonce.Length + channel.Length + laneValue.Length];
+            msg[0] = (byte)'L';
+            laneHelloNonce.CopyTo(msg.AsSpan(1));
+            channel.CopyTo(msg.AsSpan(1 + laneHelloNonce.Length));
+            laneValue.CopyTo(msg.AsSpan(1 + laneHelloNonce.Length + channel.Length));
+            return HMACSHA256.HashData(sessionKey, msg);
         }
 
         public static byte[] Proof(byte[] key, char side, ReadOnlySpan<byte> first, ReadOnlySpan<byte> second)

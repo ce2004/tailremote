@@ -116,7 +116,7 @@ namespace TailRemote
             _deviceId = deviceId;
             _status = status;
             if (deviceId == NoDevice) _stop = true;
-            _thread = new Thread(Run) { IsBackground = true, Name = "TailRemote playback", Priority = ThreadPriority.Highest };
+            _thread = new Thread(Run) { IsBackground = true, Name = "Kova playback", Priority = ThreadPriority.Highest };
             _thread.Start();
         }
 

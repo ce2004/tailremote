@@ -5,20 +5,20 @@ using System.Threading.Tasks;
 namespace TailRemote
 {
     /// <summary>
-    /// Opens and closes ports in Windows Firewall for TailRemote. Every rule it
-    /// makes is named "TailRemote port N" (one for TCP, one for UDP), and it only
+    /// Opens and closes ports in Windows Firewall for Kova. Every rule it
+    /// makes is named "Kova port N" (one for TCP, one for UDP), and it only
     /// ever touches rules with that name, so nothing another program set up is
     /// changed. The ports are remembered in the settings, so a port used once
     /// can still be closed after the port setting has moved on.
     /// </summary>
     internal static class Firewall
     {
-        public static string RuleName(int port) => "TailRemote port " + port;
+        public static string RuleName(int port) => Names.FirewallRule(port);
 
-        /// <summary>Whether TailRemote's rule for this port exists. Needs no administrator rights.</summary>
+        /// <summary>Whether Kova's rule for this port exists. Needs no administrator rights.</summary>
         public static bool IsOpen(int port) => Run("netsh", "advfirewall firewall show rule name=\"" + RuleName(port) + "\"") == 0;
 
-        /// <summary>Opens or closes a port through an elevated copy of TailRemote. False if refused or failed.</summary>
+        /// <summary>Opens or closes a port through an elevated copy of Kova. False if refused or failed.</summary>
         public static Task<bool> SetAsync(int port, bool open) => Task.Run(() =>
         {
             try

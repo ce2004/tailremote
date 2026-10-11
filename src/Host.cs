@@ -46,6 +46,14 @@ namespace TailRemote
         // When the last clipboard pull was let through, for coalescing a flood of them (see ReadLoop).
         private long _lastClipboardRequestAt = long.MinValue / 2;
 
+        /// <summary>
+        /// Hosting as the service: the user signed in at the screen (null: nobody is). Get files,
+        /// folder listing and sending into a chosen folder use only that user's rights; as SYSTEM, the
+        /// password alone opened every user's files and every system folder. Unset in the window,
+        /// which already runs as its user.
+        /// </summary>
+        public Func<System.Security.Principal.WindowsIdentity?>? FileUser { get; init; }
+
         /// <summary>Sends Ctrl+Alt+Del; set only when hosting as the service. Returns false if it could not.</summary>
         public Func<bool>? SecureAttention { get; init; }
 
@@ -78,6 +86,7 @@ namespace TailRemote
             public uint PeerFeatures;
             public volatile bool Ready; // its features message came: it has said everything it wants first (a locked bitrate)
             public volatile int Quality; // the bitrate step (0 = the best); the client asks for lower while its connection struggles
+            public volatile bool Paused; // it asked for no sound (AudioPause): muted, so nothing is encoded or sent for it
             public volatile IPEndPoint? AudioTo;
             public long HeardAt; // when its last UDP hello came (every second): no hello for 3 s, no audio
             public long HelloStamp = long.MinValue; // the newest UDP hello's stamp (UdpLoop only): an older one is a replay
@@ -99,8 +108,6 @@ namespace TailRemote
             _key = Protocol.DeriveKey(password, _salt);
             _listenKey = string.IsNullOrEmpty(listenPassword) ? null : Protocol.DeriveKey(listenPassword, _salt);
             _status = msg => { DiagLog.Write("host: " + msg); status(msg); };
-            new Thread(LogLoop) { IsBackground = true, Name = "TailRemote host log" }.Start();
-            new Thread(KeySafety) { IsBackground = true, Name = "TailRemote key safety" }.Start();
 
             _listener = new TcpListener(IPAddress.IPv6Any, port);
             _listener.Server.DualMode = true;
@@ -123,11 +130,14 @@ namespace TailRemote
                     : "Port " + port + " is already used by another program on this PC. Choose another port.");
             }
             IgnoreUdpResets(_udp.Client);
+            // Only once the port is ours: started before it, a busy port left these two running for good.
+            new Thread(LogLoop) { IsBackground = true, Name = "Kova host log" }.Start();
+            new Thread(KeySafety) { IsBackground = true, Name = "Kova key safety" }.Start();
 
             lock (_gate) StartCapture();
             _wifi = new WlanStreaming("host"); // steady Wi-Fi while hosting
-            new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote accept" }.Start();
-            new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote host udp" }.Start();
+            new Thread(AcceptLoop) { IsBackground = true, Name = "Kova accept" }.Start();
+            new Thread(UdpLoop) { IsBackground = true, Name = "Kova host udp" }.Start();
         }
 
         public void Dispose()
@@ -296,11 +306,41 @@ namespace TailRemote
         }
         private readonly Dictionary<IPAddress, (int Fails, long Since, long BlockedUntil)> _guesses = new();
 
+        // Five guesses a minute per address block is no limit for someone with thousands of addresses
+        // (a botnet, or many IPv6 blocks): past this many wrong passwords in a minute from blocks
+        // that have never logged in, every such block is turned away at once until the minute is up.
+        // PCs that have logged in before carry on as normal.
+        private const int StrangerFailsPerMinute = 30;
+        private readonly Queue<long> _strangerFails = new(); // when each recent one came; under _guesses
+
+        // Each refusal waits out WrongPasswordDelayMs on its own thread, after giving its login slot
+        // back, so nothing else bounds how many are waiting. Past this many, a new login from a block
+        // that has never logged in is hung up on before its proof is even checked: answering it at
+        // once would tell a guesser "wrong" without the pause.
+        private const int MaxRefusing = 64;
+        private int _refusing;
+
+        /// <summary>Call under _guesses.</summary>
+        private bool StrangersLocked(long now)
+        {
+            while (_strangerFails.Count > 0 && now - _strangerFails.Peek() >= 60_000) _strangerFails.Dequeue();
+            return _strangerFails.Count >= StrangerFailsPerMinute;
+        }
+
+        private bool Known(IPAddress a)
+        {
+            a = Bucket(a);
+            lock (_guesses) return _known.Contains(a);
+        }
+
         /// <summary>After 5 wrong passwords in a minute, an address is refused at once for a minute.</summary>
         private bool Blocked(IPAddress a)
         {
             a = Bucket(a);
-            lock (_guesses) return _guesses.TryGetValue(a, out var g) && g.BlockedUntil > Environment.TickCount64;
+            long now = Environment.TickCount64;
+            lock (_guesses)
+                return (_guesses.TryGetValue(a, out var g) && g.BlockedUntil > now)
+                    || (!_known.Contains(a) && StrangersLocked(now));
         }
 
         /// <summary>Counts a wrong password; returns what to log, or null. A flood never floods the log.</summary>
@@ -310,11 +350,28 @@ namespace TailRemote
             long now = Environment.TickCount64;
             lock (_guesses)
             {
-                if (_guesses.Count > 10_000) _guesses.Clear(); // never grows without bound
+                if (_guesses.Count > 10_000)
+                {
+                    // Never grows without bound, but only what no longer matters goes: wiping the lot
+                    // (as this used to) lifted every block, so rotating through 10,000 addresses was
+                    // never blocked at all.
+                    foreach (var k in _guesses.Where(e => now - e.Value.Since >= 60_000 && e.Value.BlockedUntil <= now).Select(e => e.Key).ToList())
+                        _guesses.Remove(k);
+                    if (_guesses.Count > 10_000)
+                        foreach (var k in _guesses.Where(e => e.Value.BlockedUntil <= now).OrderBy(e => e.Value.Since).Take(_guesses.Count - 10_000).Select(e => e.Key).ToList())
+                            _guesses.Remove(k);
+                }
                 (int Fails, long Since, long BlockedUntil) g = _guesses.TryGetValue(bucket, out var old) && now - old.Since < 60_000 ? old : (0, now, 0L);
                 g.Fails++;
                 if (g.Fails >= 5 && g.BlockedUntil <= now) g.BlockedUntil = now + 60_000;
                 _guesses[bucket] = g;
+                if (!_known.Contains(bucket))
+                {
+                    bool wasLocked = StrangersLocked(now);
+                    _strangerFails.Enqueue(now);
+                    if (!wasLocked && StrangersLocked(now))
+                        return "Too many wrong passwords from many places: PCs that have not connected before are turned away for a minute.";
+                }
                 return g.Fails == 1 ? "Refused " + a + ": wrong password."
                      : g.Fails == 5 ? "Refused " + a + " for a minute: too many wrong passwords."
                      : null;
@@ -348,8 +405,14 @@ namespace TailRemote
         /// <summary>Capture runs for as long as this PC hosts; with nobody connected it sends nothing. Call under _gate.</summary>
         private void StartCapture()
         {
-            if (!_stop && _capture == null)
-                _capture = new LoopbackCapture(SendAudio, msg => { _status(msg); Broadcast(msg); }, _captureDevice, _nextSeq);
+            if (_stop || _capture != null) return;
+            // Only the current capture sends: one that was late to stop (SetCaptureDevice waits 2
+            // seconds, then carries on) and drains its buffer afterwards would otherwise share each
+            // session's packet buffer and the encoder with the new one, and could seal two packets
+            // under the same number.
+            LoopbackCapture? mine = null;
+            mine = _capture = new LoopbackCapture((seq, pcm) => { if (ReferenceEquals(Volatile.Read(ref _capture), mine)) SendAudio(seq, pcm); },
+                msg => { _status(msg); Broadcast(msg); }, _captureDevice, _nextSeq);
         }
 
         private void StopCapture(LoopbackCapture? c)
@@ -410,7 +473,7 @@ namespace TailRemote
             try { System.Threading.Tasks.Task.WaitAll(sends, 1000); } catch { }
             _status(why switch
             {
-                Protocol.LeavingUpdating => "Told the connected PCs this PC is updating TailRemote.",
+                Protocol.LeavingUpdating => "Told the connected PCs this PC is updating Kova.",
                 Protocol.LeavingRestarting => "Told the connected PCs this PC is restarting.",
                 _ => "Told the connected PCs hosting is stopping.",
             });
@@ -432,7 +495,9 @@ namespace TailRemote
                 var ra = ((IPEndPoint)tcp.Client.RemoteEndPoint!).Address;
                 if (ra.IsIPv4MappedToIPv6) ra = ra.MapToIPv4();
                 if (Blocked(ra)) { try { tcp.Dispose(); } catch { } continue; } // a guessing address is turned away before any work
-                new Thread(() => Serve(tcp)) { IsBackground = true, Name = "TailRemote session" }.Start();
+                // Out of threads or memory under a flood: drop this one, never the whole host.
+                try { new Thread(() => Serve(tcp)) { IsBackground = true, Name = "Kova session" }.Start(); }
+                catch { try { tcp.Dispose(); } catch { } }
             }
         }
 
@@ -478,6 +543,10 @@ namespace TailRemote
                         if (owner == null) Thread.Sleep(50);
                     }
                     if (owner == null) { tcp.Dispose(); return; }
+                    // Only the PC that logged in can open a lane: checked before its transfers are touched.
+                    if (!CryptographicOperations.FixedTimeEquals(answer.AsSpan(Protocol.LaneProofAt, 32),
+                            Protocol.LaneProof(owner.Key, nonce, answer.AsSpan(12, 16), answer.AsSpan(28, 16))))
+                    { tcp.Dispose(); return; }
                     // One more lane for the controller's channel. A channel this PC already has
                     // (the controller's main connection dropped and came back: kept, or still on
                     // its old session that has not timed out yet) carries on with what it was doing.
@@ -510,6 +579,7 @@ namespace TailRemote
                             // like every other remote tool. (When this is the service, the files are written
                             // as the service, exactly as Send files writes into Downloads, TailRemote.)
                             files.MayChooseFolder = () => IsController(o);
+                            files.FolderUser = FileUser;
                             files.PeerName = owner.Address.ToString();
                         }
                     }
@@ -517,6 +587,7 @@ namespace TailRemote
                     handedOff = true;
                     return;
                 }
+                if (Volatile.Read(ref _refusing) >= MaxRefusing && !Known(remote)) { tcp.Dispose(); return; } // see MaxRefusing
                 byte[] clientNonce = answer[4..20];
                 byte role = 0;
                 byte[]? key = null;
@@ -543,10 +614,15 @@ namespace TailRemote
                     EndHandshake(remote, tcp); counted = false; // give the slot back before the slow part, so guesses cannot hold slots
                     string? note = WrongPassword(remote);
                     if (note != null) _status(note);
-                    Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
-                    byte[] refuse = new byte[Protocol.ReplyBytes]; // the same size as an acceptance
-                    Protocol.AddCheck(refuse);
-                    try { stream.Write(refuse); } catch { }
+                    Interlocked.Increment(ref _refusing);
+                    try
+                    {
+                        Thread.Sleep(WrongPasswordDelayMs); // slows down anyone guessing passwords
+                        byte[] refuse = new byte[Protocol.ReplyBytes]; // the same size as an acceptance
+                        Protocol.AddCheck(refuse);
+                        try { stream.Write(refuse); } catch { }
+                    }
+                    finally { Interlocked.Decrement(ref _refusing); }
                     tcp.Dispose();
                     return;
                 }
@@ -667,14 +743,14 @@ namespace TailRemote
                         ReleaseHeld(s);
                         break;
                     case Protocol.SecureAttention when IsController(s):
-                        if (SecureAttention == null) Protocol.SendMessage(s.Link, s.Stream, "Control Alt Delete needs the TailRemote service on the remote PC.");
+                        if (SecureAttention == null) Protocol.SendMessage(s.Link, s.Stream, "Control Alt Delete needs the Kova service on the remote PC.");
                         else if (!SecureAttention()) Protocol.SendMessage(s.Link, s.Stream, "The remote PC could not send Control Alt Delete.");
                         break;
                     case Protocol.UpdateTo when IsController(s):
                         {
                             string version = System.Text.Encoding.UTF8.GetString(m, 1, m.Length - 1);
                             void Reply(string msg) { try { Protocol.SendMessage(s.Link, s.Stream, msg); } catch { } }
-                            if (UpdateRequested == null) Reply("TailRemote on the remote PC cannot update itself from here.");
+                            if (UpdateRequested == null) Reply("Kova on the remote PC cannot update itself from here.");
                             else ThreadPool.QueueUserWorkItem(_ => UpdateRequested(version, Reply));
                         }
                         break;
@@ -687,8 +763,15 @@ namespace TailRemote
                             {
                                 // Never let a problem here end the host (or the service): it is said instead.
                                 string listing;
-                                try { listing = RemoteTools.ListFolder(path); }
+                                System.Security.Principal.WindowsIdentity? user = null;
+                                try
+                                {
+                                    if (FileUser == null) listing = RemoteTools.ListFolder(path);
+                                    else if ((user = FileUser()) == null) listing = "E\t" + FileChannel.NobodySignedIn;
+                                    else listing = System.Security.Principal.WindowsIdentity.RunImpersonated(user.AccessToken, () => RemoteTools.ListFolder(path));
+                                }
                                 catch (Exception e) { listing = "E\t" + e.Message; }
+                                finally { user?.Dispose(); }
                                 byte[] body = System.Text.Encoding.UTF8.GetBytes(listing);
                                 byte[] r = new byte[5 + body.Length];
                                 r[0] = Protocol.FolderList;
@@ -704,7 +787,17 @@ namespace TailRemote
                             FileChannel? files;
                             lock (_gate) files = s.Files;
                             if (files == null) Protocol.SendMessage(s.Link, s.Stream, "The file connection is not open yet. Try again in a moment.");
-                            else if (paths.Length > 0) ThreadPool.QueueUserWorkItem(_ => { try { files.SendFiles(paths, toClipboard: false); } catch { } });
+                            else if (paths.Length > 0) ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                try
+                                {
+                                    // Read as the signed-in user when this is the service (FileUser); the batch keeps the identity to open each file.
+                                    System.Security.Principal.WindowsIdentity? user = null;
+                                    if (FileUser != null && (user = FileUser()) == null) { Protocol.SendMessage(s.Link, s.Stream, FileChannel.NobodySignedIn); return; }
+                                    files.SendFiles(paths, toClipboard: false, asUser: user);
+                                }
+                                catch { }
+                            });
                         }
                         break;
                     case Protocol.InfoRequest when IsController(s):
@@ -748,6 +841,9 @@ namespace TailRemote
                         if (nowReq - prevReq >= Protocol.ClipboardPullThrottleMs &&
                             Interlocked.CompareExchange(ref _lastClipboardRequestAt, nowReq, prevReq) == prevReq)
                             ClipboardRequested?.Invoke();
+                        break;
+                    case Protocol.AudioPause when m.Length == 2:
+                        s.Paused = m[1] != 0;
                         break;
                     case Protocol.AudioQuality when m.Length == 2:
                         s.Quality = Math.Min((int)m[1], Protocol.OpusSteps.Length - 1);
@@ -811,7 +907,7 @@ namespace TailRemote
                 // Kept for the controller's next connection (a dropped one comes straight back),
                 // so its transfers carry on; stopping hosting ends them. With nothing going there
                 // is nothing to carry on: closed at once (it would otherwise hold two threads for a minute).
-                if (_stop || !f.Busy) f.Dispose();
+                if (_stop || !f.HasWork) f.Dispose();
                 else
                 {
                     f.Detach();
@@ -837,22 +933,31 @@ namespace TailRemote
         /// </summary>
         private void SendAudio(uint seq, short[]? pcm)
         {
+            // Still one at a time, should a capture be swapped between the check above and here.
+            lock (_opus) SendAudioLocked(seq, pcm);
+        }
+
+        private void SendAudioLocked(uint seq, short[]? pcm)
+        {
             var all = AllSessions();
             if (all.Length == 0) return;
             // Only to PCs that are really there: one that has gone quiet (no hello for 3
             // seconds) gets nothing, rather than a stream nobody hears until it times out.
             long now = Environment.TickCount64;
             Array.Clear(_wanted);
-            foreach (var s in all) if (s.Ready && s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) _wanted[s.Quality] = true;
+            foreach (var s in all) if (s.Ready && !s.Paused && s.AudioTo != null && now - Volatile.Read(ref s.HeardAt) < 3000) _wanted[s.Quality] = true;
             _opus.Feed(seq, pcm, _wanted);
             foreach (var s in all)
             {
                 var to = s.AudioTo;
-                if (to == null || !s.Ready || now - Volatile.Read(ref s.HeardAt) >= 3000 || !_opus.Ready(s.Quality, out uint first, out int ticks, out var packet)) continue;
+                if (to == null || !s.Ready || s.Paused || now - Volatile.Read(ref s.HeardAt) >= 3000 || !_opus.Ready(s.Quality, out uint first, out int ticks, out var packet)) continue;
                 // The packet number is also the audio nonce: never send one at or before what
                 // this session already has (after a change of step, the new step's packet can
                 // start earlier). The player fills the gap.
                 if (s.SentAny && (int)(first - s.SentUntil) < 0) continue;
+                // Months into one connection: closing it ends its session as any drop does, and the
+                // PC reconnects with new keys, rather than the sound stopping for good.
+                if (s.Link.AudioWornOut(first)) { try { s.Tcp.Dispose(); } catch { } continue; }
                 s.SentUntil = first + (uint)ticks;
                 s.SentAny = true;
                 byte[] a = s.Audio;
@@ -896,8 +1001,12 @@ namespace TailRemote
                 s.AudioTo = new IPEndPoint(any.Address, any.Port);
                 Volatile.Write(ref s.HeardAt, Environment.TickCount64);
                 // Straight back, on the same path the sound takes: the client's audio ping.
-                d[8] = Protocol.UdpPong;
-                try { _udp.Send(d.AsSpan(8, 9), s.AudioTo); } catch { }
+                // Signed like the hello, so nobody else can fake the ping the sound and the file pacing go by.
+                byte[] pong = new byte[Protocol.UdpPongBytes];
+                pong[0] = Protocol.UdpPong;
+                d.AsSpan(9, 8).CopyTo(pong.AsSpan(1));
+                s.Link.SignHello(pong);
+                try { _udp.Send(pong, pong.Length, s.AudioTo); } catch { }
             }
         }
     }

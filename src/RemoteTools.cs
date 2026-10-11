@@ -14,6 +14,9 @@ namespace TailRemote
     /// </summary>
     internal static class RemoteTools
     {
+        private static readonly Guid FolderDesktop = new("B4BFCC3A-DB2C-424C-B029-7FE99A87C641");
+        private static readonly Guid FolderDocuments = new("FDD39AD0-238F-46AF-ADB4-6C85480369C7");
+
         public const int MaxEntries = 5000;
 
         /// <summary>
@@ -31,19 +34,22 @@ namespace TailRemote
                 if (path.Length == 0)
                 {
                     // The usual folders of whoever is signed in here (the service runs as the system, which has none worth showing).
-                    if (!System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem)
+                    bool isSystem;
+                    using (var me = System.Security.Principal.WindowsIdentity.GetCurrent()) isSystem = me.IsSystem;
+                    if (!isSystem)
                     {
+                        // Asked with this thread's own user: when the service lists as the signed-in user,
+                        // Environment.GetFolderPath can still answer with the system's profile.
                         foreach (var (folder, name) in new[]
                         {
-                            (Environment.SpecialFolder.Desktop, "Desktop"),
-                            (Environment.SpecialFolder.MyDocuments, "Documents"),
+                            (FolderDesktop, "Desktop"),
+                            (FolderDocuments, "Documents"),
+                            (NativeService.FolderDownloads, "Downloads"),
                         })
                         {
-                            string f = Environment.GetFolderPath(folder);
-                            if (f.Length > 0 && Directory.Exists(f)) Line('D', f, name);
+                            string? f = NativeService.ThreadUserFolder(folder);
+                            if (!string.IsNullOrEmpty(f) && Directory.Exists(f)) Line('D', f, name);
                         }
-                        string downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-                        if (Directory.Exists(downloads)) Line('D', downloads, "Downloads");
                     }
                     else if (Directory.Exists(@"C:\Users")) Line('D', @"C:\Users", "Users (everyone's folders)");
                     foreach (var d in DriveInfo.GetDrives())
@@ -77,7 +83,7 @@ namespace TailRemote
                 }
                 return sb.ToString();
             }
-            catch (UnauthorizedAccessException) { return "E\tTailRemote on the remote PC is not allowed into that folder.\n"; }
+            catch (UnauthorizedAccessException) { return "E\tKova on the remote PC is not allowed into that folder.\n"; }
             catch (Exception e) { return "E\t" + e.Message.Replace('\n', ' ').Replace('\t', ' ') + "\n"; }
         }
 
@@ -111,7 +117,7 @@ namespace TailRemote
                 }
                 catch { }
             }
-            lines.Add("TailRemote: " + tailRemote);
+            lines.Add("Kova: " + tailRemote);
             return string.Join("\n", lines);
         }
 

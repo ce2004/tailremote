@@ -13,7 +13,7 @@ namespace TailRemote
     /// </summary>
     internal static class AboutMenu
     {
-        public const string Website = "https://github.com/ce2004/tailremote";
+        public const string Website = "https://github.com/ce2004/kova";
 
         public static ToolStripMenuItem Build(Form owner, MenuStrip bar, ToolStripMenuItem update)
         {
@@ -25,9 +25,9 @@ namespace TailRemote
                 Menus.Action("Read the &guide...", () => ShowGuide(owner), Keys.F1),
                 Menus.Action("&Keyboard shortcuts...", () => Show(owner, "Keyboard shortcuts", Shortcuts(bar), l => !l.Contains(':'))),
                 new ToolStripSeparator(),
-                Menus.Action("&About TailRemote...", () => Show(owner, "About TailRemote", AboutLines(), _ => false)),
+                Menus.Action("&About Kova...", () => Show(owner, "About Kova", AboutLines(), _ => false)),
                 Menus.Action("&Licences and credits...", () => Show(owner, "Licences and credits", Licences(), l => l.StartsWith("== "))),
-                Menus.Action("Open the TailRemote &website", () => Open(Website)),
+                Menus.Action("Open the Kova &website", () => Open(Website)),
                 Menus.Action("&Report a problem on GitHub", () => Open(Website + "/issues/new")),
                 Menus.Action("Open the l&og file", () =>
                 {
@@ -62,14 +62,14 @@ namespace TailRemote
                 if (line.Length == 0) continue;
                 lines.Add(Version.TryParse(line, out _) ? "Version " + line + (line == Updater.Current.ToString() ? ", this one" : "") : line);
             }
-            Show(owner, "TailRemote changelog", lines, l => l.StartsWith("Version "));
+            Show(owner, "Kova changelog", lines, l => l.StartsWith("Version "));
         }
 
         /// <summary>The README, a line each; its section names are the headings.</summary>
         private static void ShowGuide(Form owner)
         {
             var lines = Resource("README.txt").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
-            Show(owner, "TailRemote guide", lines, IsGuideHeading);
+            Show(owner, "Kova guide", lines, IsGuideHeading);
         }
 
         private static bool IsGuideHeading(string l) => !l.StartsWith("-") && !(l.Length > 1 && char.IsDigit(l[0]) && l.Contains(". ")) && l.Length < 60 && !l.EndsWith(".");
@@ -78,7 +78,7 @@ namespace TailRemote
         {
             var lines = new List<string>
             {
-                "TailRemote " + Updater.Current + " for " + (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "ARM64" : "x64") + " Windows",
+                "Kova " + Updater.Current + " for " + (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "ARM64" : "x64") + " Windows",
                 "Running from " + Environment.ProcessPath,
                 "Settings are in " + Path.GetDirectoryName(Settings.FilePath),
                 "Received files go to " + FileChannel.Downloads,
@@ -111,7 +111,7 @@ namespace TailRemote
         {
             var lines = new List<string>
             {
-                "Anywhere in TailRemote",
+                "Anywhere in Kova",
                 "Open the menus: Alt, then Right and Left Arrow between them, Down Arrow through one, Escape to go back",
                 "Turn a setting on or off: Enter, and the menu stays open",
                 "Control the remote PC, or come back to this one: Control Shift Enter",

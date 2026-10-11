@@ -8,11 +8,11 @@ namespace TailRemote
     /// Start hosting at sign-in through a scheduled task that runs with highest
     /// privileges (so keys reach administrator windows), plus a firewall rule.
     /// Changing either needs administrator rights, so the change is made by a
-    /// second, elevated copy of TailRemote run with --startup on or off.
+    /// second, elevated copy of Kova run with --startup on or off.
     /// </summary>
     internal static class Startup
     {
-        private const string TaskName = "TailRemote Host";
+        private const string TaskName = Names.Task;
         // The catch-all rule older versions made. Removed here; Port editor manages ports now.
         private const string RuleName = "TailRemote";
 

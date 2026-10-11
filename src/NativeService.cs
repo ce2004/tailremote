@@ -92,12 +92,35 @@ namespace TailRemote
             finally { CloseHandle(token); }
         }
 
+        /// <summary>A known folder of the user this thread runs as (the impersonated one, if any), or null.</summary>
+        public static string? ThreadUserFolder(Guid folder)
+        {
+            using var me = System.Security.Principal.WindowsIdentity.GetCurrent();
+            if (SHGetKnownFolderPath(ref folder, 0, me.Token, out IntPtr p) != 0) return null;
+            try { return Marshal.PtrToStringUni(p); }
+            finally { Marshal.FreeCoTaskMem(p); }
+        }
+
         /// <summary>This user's own folder, wherever it really is, or null if Windows does not say.</summary>
         public static string? MyFolder(Guid folder)
         {
             if (SHGetKnownFolderPath(ref folder, 0, IntPtr.Zero, out IntPtr p) != 0) return null;
             try { return Marshal.PtrToStringUni(p); }
             finally { Marshal.FreeCoTaskMem(p); }
+        }
+
+        /// <summary>
+        /// The user signed in at the screen, to act as them, or null if nobody is. The service runs as
+        /// SYSTEM, which may read and write anywhere: what a controlling PC does with files must have
+        /// only that user's rights.
+        /// </summary>
+        public static System.Security.Principal.WindowsIdentity? ConsoleUser()
+        {
+            uint session = WTSGetActiveConsoleSessionId();
+            if (session == 0xFFFFFFFF || !WTSQueryUserToken(session, out IntPtr token)) return null;
+            try { return new System.Security.Principal.WindowsIdentity(token); }
+            catch { return null; }
+            finally { CloseHandle(token); }
         }
 
         /// <summary>The signed-in user's profile folder in a session, or null if nobody is signed in.</summary>

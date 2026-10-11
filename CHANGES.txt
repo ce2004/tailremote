@@ -1,3 +1,25 @@
+2.3.0
+Changed: TailRemote is now called Kova. It works on any network, not just Tailscale, and video is on the way. The download is Kova-x64.exe or Kova-arm64.exe, files you receive go to Downloads, Kova, and the project lives at github.com/ce2004/kova.
+Changed: be careful updating to Kova, and have another way to control each PC before you start, such as Remote Desktop or someone sitting at it. TailRemote cannot update itself to Kova: download Kova from github.com/ce2004/kova on every PC. Kova starts with fresh settings, so set your password again and add your saved PCs again. On a PC that runs TailRemote as a Windows service, turn off Run as a Windows service in TailRemote first, then open Kova, set the same password and turn it on there. Doing that cuts off the TailRemote connection to that PC, so do it with your other way in. Every PC must be on Kova: older versions cannot connect to it and say the other PC has a different version.
+New feature: File, Update the remote PC now updates the other PC to the newest version on GitHub, even before this PC has it, so next time you can update a remote PC from here first.
+Changed: when Kova runs as a Windows service, Get files, sending files into a folder you choose, and browsing the remote PC's folders now have only the signed-in user's rights, never full control of the PC. When nobody is signed in there, Kova says so.
+Changed: someone who can see your traffic can no longer cut off your file transfers or fake the sound's ping.
+Changed: the wrong-password protection now holds up against someone guessing from many different internet addresses at once.
+Bug fixed: you could not connect to a PC still using a 5-character password, so it could not be updated from here, and a PC hosting by itself stopped hosting after an update if its password was that short. It now keeps hosting and asks for a longer one.
+Bug fixed: settings backups made with a 5-character password could not be restored.
+Changed: with Mute the remote PC while you are not controlling it turned on, or with a PC waiting in the background, the remote PC now sends no sound at all instead of a few kilobits nobody hears, which saves data. The window used to say the sound was at 6 kilobits per second and locked, as if your chosen sound quality was not working. It now says the sound is muted, and what it goes back to when you control that PC again.
+Bug fixed: connecting to or disconnecting from one PC could throw away another PC's paused transfer.
+Bug fixed: clipboard files still arriving from one PC could be deleted when another PC sent clipboard files.
+Bug fixed: two names in a folder that differed only in capital letters stopped the whole folder from sending and left empty files behind. The second one now arrives as name (2).
+Bug fixed: after a clipboard transfer was stopped, pasting could fail because the clipboard was given files that were no longer there.
+Bug fixed: files too big for the receiving PC's free space are now refused at once, instead of filling its drive.
+Bug fixed: after about eight months of hosting without a restart, the sound stopped for good.
+Bug fixed: if two PCs asked a remote PC to update at the same moment, both updates ran and one said it failed.
+Bug fixed: NVDA could miss the question when turning on Run as a Windows service, and the window could freeze for two seconds after an update.
+Bug fixed: Apply settings to the service always took ten seconds, and removing the service could leave its saved passwords and an old firewall port behind.
+Bug fixed: if an update went wrong on a PC where the window and the service share Kova, going back to the previous version could restore the broken one.
+Bug fixed: updating without administrator rights, with Kova in Program Files, only said "access denied". It now says what to do.
+
 2.2.1
 Bug fixed: on a PC that runs the TailRemote service, updating with Check for updates left the service on the old version until you pressed Apply settings to the service. The service now updates by itself straight after, and if it cannot be reached, TailRemote says so.
 

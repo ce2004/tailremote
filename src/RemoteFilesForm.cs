@@ -129,7 +129,7 @@ namespace TailRemote
             // The drives and usual folders are a list, not a folder anything can go into.
             if (_path.Length == 0) { _say("Open a folder on the remote PC first."); return; }
             if (_client() is not Client c) { _say("Not connected to the remote PC."); return; }
-            if (!c.CanSendTo) { _say("The remote PC has an older TailRemote that cannot take files into a folder. Update it first."); return; }
+            if (!c.CanSendTo) { _say("The remote PC has an older Kova that cannot take files into a folder. Update it first."); return; }
             if (_picking) { _say("The file picker is already open."); return; }
             if (_sentInto != null) { _say("Still sending the last ones into " + _sentInto + ". Send more when they have gone."); return; }
             string into = _path;
@@ -142,7 +142,7 @@ namespace TailRemote
             if (_client() is not Client now || !now.SendFilesTo(paths, into)) { _say("Not connected to the remote PC, so nothing was sent."); return; }
             _sentInto = into;
             string what = paths.Length == 1 ? System.IO.Path.GetFileName(paths[0].TrimEnd('\\')) : paths.Length + " items";
-            _say("Sending " + what + " into " + into + " on the remote PC. TailRemote says when it has gone.");
+            _say("Sending " + what + " into " + into + " on the remote PC. Kova says when it has gone.");
         }
 
         /// <summary>Files sent from here finished going: said, and the folder they went into shows them.</summary>
@@ -234,7 +234,7 @@ namespace TailRemote
             foreach (ListViewItem i in _list.Items) i.Checked = false;
             _filling = false;
             Relabel();
-            _say("Getting " + (chosen.Count == 1 ? chosen[0].Name : chosen.Count + " items") + " into " + FileChannel.Downloads + ". TailRemote says when they have arrived; each one says getting, then got.");
+            _say("Getting " + (chosen.Count == 1 ? chosen[0].Name : chosen.Count + " items") + " into " + FileChannel.Downloads + ". Kova says when they have arrived; each one says getting, then got.");
         }
     }
 

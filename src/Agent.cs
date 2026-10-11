@@ -45,6 +45,7 @@ namespace TailRemote
                         string.IsNullOrEmpty(cfg.CaptureDevice) ? null : cfg.CaptureDevice)
                     {
                         SecureAttention = SendSecureAttention,
+                        FileUser = NativeService.ConsoleUser, // file tools with the signed-in user's rights, never SYSTEM's
                     };
                     break;
                 }
@@ -105,8 +106,8 @@ namespace TailRemote
             // and which the user's Explorer could not paste from.
             string local = (profile != null ? NativeService.UserFolder(session, NativeService.FolderLocalAppData) : null) ?? Path.Combine(root, "AppData", "Local");
             string downloads = (profile != null ? NativeService.UserFolder(session, NativeService.FolderDownloads) : null) ?? Path.Combine(root, "Downloads");
-            FileChannel.StagingOverride = Path.Combine(local, "TailRemote", "Clipboard");
-            FileChannel.DownloadsOverride = _windowFolder ?? Path.Combine(downloads, "TailRemote");
+            FileChannel.StagingOverride = Path.Combine(local, "Kova", "Clipboard");
+            FileChannel.DownloadsOverride = _windowFolder ?? Path.Combine(downloads, "Kova");
         }
 
         /// <summary>Where the TailRemote window says received files go; null: the signed-in user's Downloads\TailRemote.</summary>
@@ -136,7 +137,7 @@ namespace TailRemote
             public ClipboardSetter()
             {
                 var t = new Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
-                    { IsBackground = true, Name = "TailRemote agent clipboard" };
+                    { IsBackground = true, Name = "Kova agent clipboard" };
                 t.SetApartmentState(ApartmentState.STA);
                 t.Start();
             }
@@ -186,7 +187,7 @@ namespace TailRemote
             public ClipboardReader()
             {
                 var t = new Thread(() => { foreach (var job in _jobs.GetConsumingEnumerable()) try { job(); } catch { } })
-                    { IsBackground = true, Name = "TailRemote agent clipboard read" };
+                    { IsBackground = true, Name = "Kova agent clipboard read" };
                 t.SetApartmentState(ApartmentState.STA);
                 t.Start();
             }

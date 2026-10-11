@@ -20,7 +20,7 @@ namespace TailRemote
         private static volatile bool _enabled;
         private static Timer? _flush;
 
-        public static string FilePath => Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory, "TailRemote-log.txt");
+        public static string FilePath => Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory, "Kova-log.txt");
 
         public static bool Enabled
         {
@@ -35,7 +35,7 @@ namespace TailRemote
                     {
                         Open();
                         _flush ??= new Timer(_ => Flush(), null, 1000, 1000);
-                        WriteLocked("Logging started. TailRemote " + Updater.Current + ", " +
+                        WriteLocked("Logging started. Kova " + Updater.Current + ", " +
                             System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture + " on " +
                             System.Runtime.InteropServices.RuntimeInformation.OSArchitecture + ", " + Environment.OSVersion.VersionString +
                             ", " + Environment.ProcessorCount + " processors.");

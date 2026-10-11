@@ -40,7 +40,7 @@ namespace TailRemote
             _onPacket = onPacket;
             _emit = Emit;
             _status = status;
-            _thread = new Thread(Run) { IsBackground = true, Name = "TailRemote capture", Priority = ThreadPriority.Highest };
+            _thread = new Thread(Run) { IsBackground = true, Name = "Kova capture", Priority = ThreadPriority.Highest };
             _thread.Start();
         }
 

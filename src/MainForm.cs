@@ -32,7 +32,7 @@ namespace TailRemote
         private readonly MenuItem _transferStop = new("&Stop the file transfer") { Enabled = false, WhyNot = "Nothing is being sent or received." };
         // Where Send files and Send a folder from the other PC are saved: the menu item says where.
         private readonly MenuItem _pickReceiveFolder = new("Pic&k where received files go");
-        private readonly MenuItem _logging = Menus.Check("Enable lo&gging (writes TailRemote-log.txt next to TailRemote)");
+        private readonly MenuItem _logging = Menus.Check("Enable lo&gging (writes Kova-log.txt next to Kova)");
         private readonly MenuItem _sounds = new("Sounds for connecting, clipboard and fi&les...");
         private readonly MenuItem _speedUp = Menus.Check("Catch up b&y fast-forwarding the sound, same pitch (otherwise it skips ahead)");
         private readonly MenuItem _startup = Menus.CheckAsking("Start &hosting when Windows starts (asks for administrator)...");
@@ -75,7 +75,7 @@ namespace TailRemote
         private string? _bestAddress;
         private readonly System.Collections.Generic.List<(string Id, string Name)> _devices = new();
 
-        private readonly NotifyIcon _tray = new() { Text = "TailRemote, hosting", Icon = SystemIcons.Application };
+        private readonly NotifyIcon _tray = new() { Text = "Kova, hosting", Icon = SystemIcons.Application };
         private bool _reallyExit; // Stop hosting and exit, from the tray: close for real
         private Client? _client;
         private Player? _player;       // kept between connections: no device opens or closes on connect
@@ -95,7 +95,7 @@ namespace TailRemote
             _autoHost = autoHost;
             _autoConnect = autoConnect;
             _updated = updated;
-            Text = "TailRemote";
+            Text = "Kova";
             Font = new Font("Segoe UI", 10f);
             ClientSize = new Size(420, 120);
             StartPosition = FormStartPosition.CenterScreen;
@@ -242,11 +242,11 @@ namespace TailRemote
             _audioSetup.Click += (_, _) => Menus.AfterMenu(() => SetUpAudio());
             _audioRemove.Click += (_, _) => Menus.AfterMenu(() => RemoveAudio());
             _portEditor.Click += (_, _) => Menus.AfterMenu(() => { SaveSettings(); using var f = new PortEditorForm(_settings); f.ShowDialog(this); });
-            _startup.CheckedChanged += (_, _) => StartupChanged();
-            _service.CheckedChanged += (_, _) => { if (!_settingService) ServiceChanged(); };
+            _startup.CheckedChanged += (_, _) => Menus.AfterMenu(StartupChanged); // after the menu closes, so NVDA reads what comes up
+            _service.CheckedChanged += (_, _) => { if (!_settingService) Menus.AfterMenu(ServiceChanged); };
             _titleTimer.Tick += (_, _) => UpdateTitle();
             var trayMenu = new ContextMenuStrip();
-            trayMenu.Items.Add("&Open TailRemote", null, (_, _) => RestoreFromTray());
+            trayMenu.Items.Add("&Open Kova", null, (_, _) => RestoreFromTray());
             _trayExit = (ToolStripMenuItem)trayMenu.Items.Add("&Stop hosting and exit", null, (_, _) => { _reallyExit = true; RestoreFromTray(); Close(); });
             _tray.ContextMenuStrip = trayMenu;
             _tray.Click += (_, e) => { if (e is not MouseEventArgs m || m.Button == MouseButtons.Left) RestoreFromTray(); };
@@ -318,7 +318,7 @@ namespace TailRemote
             _startup.Available = host;
             _service.Available = host;
             _startup.Enabled = !_service.Checked; // the service replaces the at-sign-in task
-            _startup.WhyNot = "Not needed: the TailRemote service already starts with Windows.";
+            _startup.WhyNot = "Not needed: the Kova service already starts with Windows.";
             UpdateButtons();
         }
 
@@ -415,7 +415,7 @@ namespace TailRemote
                     }
                 }
             })
-                { IsBackground = true, Name = "TailRemote clipboard" };
+                { IsBackground = true, Name = "Kova clipboard" };
             t.SetApartmentState(System.Threading.ApartmentState.STA); // the clipboard needs it
             t.Start();
             return jobs;
@@ -436,9 +436,9 @@ namespace TailRemote
                     if (ServiceHost.InstalledVersion() is Version v && v < Updater.Current)
                     {
                         OfferServiceUpdate();
-                        Say("The TailRemote service is still on version " + v + " and is updating itself to " + Updater.Current + ". Try again in a minute.");
+                        Say("The Kova service is still on version " + v + " and is updating itself to " + Updater.Current + ". Try again in a minute.");
                     }
-                    else Say("The TailRemote service is not answering. Check that it is running, or press Apply settings to the service.");
+                    else Say("The Kova service is not answering. Check that it is running, or press Apply settings to the service.");
                     return false;
                 }
                 if (!link.HasController) { Say("No one is controlling this PC, so there is no one to send to."); return false; }
@@ -583,7 +583,7 @@ namespace TailRemote
                     done.TrySetResult(files.ShowDialog() == DialogResult.OK ? files.FileNames : null);
                 }
                 catch (Exception e) { done.TrySetException(e); }
-            }) { IsBackground = true, Name = "TailRemote file picker" };
+            }) { IsBackground = true, Name = "Kova file picker" };
             t.SetApartmentState(System.Threading.ApartmentState.STA);
             t.Start();
             return done.Task;
@@ -622,7 +622,7 @@ namespace TailRemote
                         done.TrySetResult(pick.ShowDialog() == DialogResult.OK ? pick.SelectedPath : null);
                     }
                     catch (Exception e) { done.TrySetException(e); }
-                }) { IsBackground = true, Name = "TailRemote folder picker" };
+                }) { IsBackground = true, Name = "Kova folder picker" };
                 t.SetApartmentState(System.Threading.ApartmentState.STA);
                 t.Start();
                 string? chosen = await done.Task;
@@ -715,20 +715,25 @@ namespace TailRemote
         {
             c = _client!;
             if (_client == null || _client.ListenOnly) { Say(_client == null ? "Connect first." : "Listeners cannot do that."); return false; }
-            if (!_client.CanRemoteTools) { Say("The remote PC's TailRemote is too old for that. Update it once with Check for updates on that PC."); return false; }
+            if (!_client.CanRemoteTools) { Say("The remote PC's Kova is too old for that. Update it once with Check for updates on that PC."); return false; }
             return true;
         }
 
-        private void UpdateRemote()
+        private async void UpdateRemote()
         {
             if (!CanUseRemote(out var c)) return;
-            if (c.HostVersion is Version v && v >= Updater.Current)
+            // The newest on GitHub, not just this PC's own version: a release that changes how the PCs
+            // connect means the remote PC must be updated first, while this one can still reach it.
+            Version want = Updater.Current;
+            try { var latest = await Updater.LatestAsync(); if (latest > want) want = latest; } catch { } // offline: this PC's own version, as before
+            if (_client != c) return;
+            if (c.HostVersion is Version v && v >= want)
             {
-                Say("The remote PC already has TailRemote " + v + (v == Updater.Current ? ", the same as this PC." : ", newer than this PC's " + Updater.Current + "."));
+                Say("The remote PC already has Kova " + v + (v == want ? ", the newest." : ", newer than " + want + "."));
                 return;
             }
-            c.RequestUpdate(Updater.Current);
-            Say("Asked the remote PC to update to TailRemote " + Updater.Current + ".");
+            c.RequestUpdate(want);
+            Say("Asked the remote PC to update to Kova " + want + ".");
         }
 
         private async void RemoteInfo()
@@ -764,7 +769,7 @@ namespace TailRemote
                 _qualitySaid = c.AudioQuality;
                 _updateRemote.Text = "Update the remote P&C to this PC's version (it has " + hv + ", this PC has " + Updater.Current + ")";
                 if (hv < Updater.Current && !c.ListenOnly && _versionTold.Add(c))
-                    Speak("The remote PC has TailRemote " + hv + ", older than this PC's " + Updater.Current + ". File, Update the remote PC brings it up to date.");
+                    Speak("The remote PC has Kova " + hv + ", older than this PC's " + Updater.Current + ". File, Update the remote PC brings it up to date.");
                 return;
             }
             int q = c.AudioQuality;
@@ -802,8 +807,8 @@ namespace TailRemote
         }
 
         // ---- Several PCs at once ----
-        // Switching to another PC keeps the one in front connected, in the background: silent, at
-        // the lowest bitrate, its transfers still going. Switching back is instant, with no login.
+        // Switching to another PC keeps the one in front connected, in the background: silent, with
+        // no sound sent at all, its transfers still going. Switching back is instant, with no login.
 
         private static bool SamePc(string a, int portA, string b, int portB) => portA == portB && string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
 
@@ -964,28 +969,31 @@ namespace TailRemote
                 try
                 {
                     using FileDialog d = save
-                        ? new SaveFileDialog { Title = "Back up TailRemote's settings to", FileName = "TailRemote settings.trbackup", DefaultExt = "trbackup" }
-                        : new OpenFileDialog { Title = "Restore TailRemote's settings from" };
-                    d.Filter = "TailRemote settings backups (*.trbackup)|*.trbackup|All files|*.*";
+                        ? new SaveFileDialog { Title = "Back up Kova's settings to", FileName = "Kova settings.trbackup", DefaultExt = "trbackup" }
+                        : new OpenFileDialog { Title = "Restore Kova's settings from" };
+                    d.Filter = "Kova settings backups (*.trbackup)|*.trbackup|All files|*.*";
                     done.TrySetResult(d.ShowDialog() == DialogResult.OK ? d.FileName : null);
                 }
                 catch (Exception e) { done.TrySetException(e); }
-            }) { IsBackground = true, Name = "TailRemote backup picker" };
+            }) { IsBackground = true, Name = "Kova backup picker" };
             t.SetApartmentState(System.Threading.ApartmentState.STA);
             t.Start();
             return done.Task;
         }
 
-        /// <summary>Asks until it is long enough (saying why first), or null when cancelled.</summary>
-        private string? AskBackupPassword(string prompt)
+        /// <summary>
+        /// Asks until it is long enough (saying why first), or null when cancelled. minimum: a
+        /// restore takes any length, since a backup made before 2.2.0 may have a 5-character one.
+        /// </summary>
+        private string? AskBackupPassword(string prompt, int minimum = MinPasswordLength)
         {
             string? problem = null;
             while (true)
             {
                 using var f = new TextForm("Backup password", problem == null ? prompt : problem + " " + prompt, "", secret: true);
                 if (f.ShowDialog(this) != DialogResult.OK) return null;
-                if (f.Value.Length >= MinPasswordLength) return f.Value;
-                problem = "That has " + f.Value.Length + (f.Value.Length == 1 ? " character" : " characters") + ": it needs at least " + MinPasswordLength + ".";
+                if (f.Value.Length >= minimum) return f.Value;
+                problem = "That has " + f.Value.Length + (f.Value.Length == 1 ? " character" : " characters") + ": it needs at least " + minimum + ".";
             }
         }
 
@@ -1022,7 +1030,7 @@ namespace TailRemote
             try
             {
                 // A backup is a few kilobytes: anything big is some other file, not read whole.
-                if (new System.IO.FileInfo(path).Length > 4 << 20) { Say("That is not a TailRemote settings backup: it is far too big."); return; }
+                if (new System.IO.FileInfo(path).Length > 4 << 20) { Say("That is not a Kova settings backup: it is far too big."); return; }
                 data = System.IO.File.ReadAllBytes(path);
             }
             catch (Exception e) { Say("Could not read the file: " + e.Message); return; }
@@ -1030,7 +1038,7 @@ namespace TailRemote
             string? problem = null;
             while (restored == null)
             {
-                string? pw = AskBackupPassword((problem != null ? problem + " " : "") + "The backup's password:");
+                string? pw = AskBackupPassword((problem != null ? problem + " " : "") + "The backup's password:", minimum: 1);
                 if (pw == null) return;
                 try { restored = Settings.Import(data, pw); }
                 catch (System.Security.Cryptography.CryptographicException) { problem = "That password is not the backup's."; }
@@ -1038,7 +1046,7 @@ namespace TailRemote
                 catch (Exception e) { Say(e.Message); return; }
             }
             int n = restored.SavedPcs.Count;
-            if (MessageBox.Show(this, "Replace TailRemote's settings on this PC with the backup's? It has " + n + (n == 1 ? " saved PC" : " saved PCs") + ".",
+            if (MessageBox.Show(this, "Replace Kova's settings on this PC with the backup's? It has " + n + (n == 1 ? " saved PC" : " saved PCs") + ".",
                     "Restore settings", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             // Again: the window could be used while the boxes were open (a connection started meanwhile).
             if (Busy) { Say("Not restored: disconnect, or stop hosting, first."); return; }
@@ -1086,7 +1094,7 @@ namespace TailRemote
         {
             var c = _client;
             if (c == null || c.ListenOnly) { Say("Connect first."); return; }
-            if (!c.CanRestart) { Say("The remote PC's TailRemote is too old to restart it. Update it first."); return; }
+            if (!c.CanRestart) { Say("The remote PC's Kova is too old to restart it. Update it first."); return; }
             // A checkbox must be ticked before Restart turns on, so a reflexive Enter cannot restart the remote PC.
             using (var dlg = new RestartConfirmForm())
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -1295,7 +1303,7 @@ namespace TailRemote
         {
             string address = _address.Text.Trim();
             if (address.Length == 0) { Later(() => _address.Ask(this, "Type the address first.")); return; }
-            if (!CheckPassword() || !CheckPort(out int port)) return;
+            if (!CheckPassword(hosting: false) || !CheckPort(out int port)) return;
             var pc = _settings.SavedPcs.Find(p => string.Equals(p.Address, address, StringComparison.OrdinalIgnoreCase) && p.Port == port);
             // Already there with the same password: nothing to do. (The stored form is re-encrypted
             // differently each time, so compare the password itself, not the stored bytes.)
@@ -1336,11 +1344,13 @@ namespace TailRemote
             }
             if (_updated) Say("Updated to version " + Updater.Current + ".");
             OfferServiceUpdate();
-            if (_autoHost && _service.Checked) Log("The TailRemote service is hosting this PC, so this window does not.");
+            if (_autoHost && _service.Checked) Log("The Kova service is hosting this PC, so this window does not.");
             else if (_autoHost)
             {
                 _mode.SelectedIndex = 1;
-                Go();
+                _hostingByItself = true;
+                try { Go(); }
+                finally { _hostingByItself = false; }
                 BeginInvoke(() => HideToTray(announce: false)); // started with Windows: out of the way
             }
             else if (_autoConnect && !HostMode && _address.Text.Trim().Length > 0) Go();
@@ -1348,7 +1358,7 @@ namespace TailRemote
 
         /// <summary>
         /// Settings, Mute the remote PC while you are not controlling it: the PC in front is
-        /// silent while the keys are on this PC, at the lowest bitrate (a few kilobits, which saves
+        /// silent while the keys are on this PC, the host sending it no sound at all (which saves
         /// data on a phone connection), and the connection stays up. Controlling it again brings
         /// the sound straight back at its best. Listen-only connections are always heard.
         /// </summary>
@@ -1382,28 +1392,34 @@ namespace TailRemote
             string t;
             if (_client != null)
             {
-                t = "TailRemote - " + (_client.ListenOnly ? "listening" : _keys?.Remote == true ? "controlling remote" : "connected");
+                t = "Kova - " + (_client.ListenOnly ? "listening" : _keys?.Remote == true ? "controlling remote" : "connected");
                 if (_client.LastPingMs >= 0) t += ", ping " + _client.LastPingMs + " ms";
                 int audio = _client.AudioDelayMs;
                 if (audio >= 0) t += ", audio " + (audio + _client.PingForAudio / 2) + " ms";
-                if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
+                // Muted on purpose (Mute the remote PC while you are not controlling it) is said as that:
+                // its few kilobits read as "sound at 6 kbit/s", as if the quality lock were not working.
+                if (_client.Muted) t += ", sound muted while you are not controlling it";
+                else if (_client.ReducedSound is string reduced) t += ", sound at " + reduced;
                 if (_parked.Count > 0) t += ", " + _parked.Count + " more in the background";
                 WatchConnection(_client);
             }
-            else if (_reconnecting) t = "TailRemote - reconnecting";
+            else if (_reconnecting) t = "Kova - reconnecting";
             else if ((_host?.Connected ?? (_serviceLink?.Connected == true ? _serviceLink.Counts : null)) is (int controlling, int listening))
             {
-                t = "TailRemote - hosting" + (_host == null ? " as the service" : "");
+                t = "Kova - hosting" + (_host == null ? " as the service" : "");
                 // More than one PC: how many, and what they are doing.
                 if (controlling + listening > 1)
                     t += ", " + (controlling + listening) + " PCs connected (" + controlling + " controlling" + (listening > 0 ? ", " + listening + " listening" : "") + ")";
             }
-            else t = "TailRemote";
+            else t = "Kova";
             if (Text != t) Text = t;
             // The Streaming line, read with Tab: what is coming in right now.
             string st = _client == null ? (_reconnecting ? "Not connected: trying again every second" : "Not connected")
-                : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
-                  (_client.LockedStep >= 0 ? ", locked" : ", variable") +
+                : (_client.Muted
+                    ? "Muted while you are not controlling it. Controlling it brings the sound back, " +
+                      (_quality.SelectedIndex > 0 ? "locked at " + Protocol.OpusSteps[_quality.SelectedIndex - 1].Kbps + " kilobits per second" : "variable")
+                    : "Streaming at " + Protocol.OpusSteps[_client.AudioQuality].Kbps + " kilobits per second" +
+                      (_client.LockedStep >= 0 ? ", locked" : ", variable")) +
                   (_client.AudioDelayMs >= 0 ? ", audio delay " + (_client.AudioDelayMs + _client.PingForAudio / 2) + " ms" : "") +
                   (_player?.RidingOutMs > 0 ? ", riding out stalls (" + _player.RidingOutMs + " ms of it)" : "") +
                   (WlanStreaming.State is string wifi ? ". " + wifi : "") +
@@ -1457,7 +1473,7 @@ namespace TailRemote
                     }
                     else if (stuck < 1500) reported = false;
                 }
-            }) { IsBackground = true, Name = "TailRemote watchdog" }.Start();
+            }) { IsBackground = true, Name = "Kova watchdog" }.Start();
         }
 
         private void Go()
@@ -1475,7 +1491,7 @@ namespace TailRemote
         private async void StartHost()
         {
             Doing("starting hosting");
-            if (ServiceHost.IsInstalled()) { Say("The TailRemote service is hosting this PC. Use Apply settings to the service instead."); return; }
+            if (ServiceHost.IsInstalled()) { Say("The Kova service is hosting this PC. Use Apply settings to the service instead."); return; }
             if (!CheckPassword()) return;
             if (!CheckListenPassword()) return;
             string listen = _listenPassword.Text;
@@ -1495,7 +1511,7 @@ namespace TailRemote
                 // Audio settings and device names are never changed by themselves (they are other
                 // programs' too): only Set up audio device does that, when pressed.
                 if (Wasapi.OutputDevices().Count == 0)
-                    Say("This PC has no sound output, so the other PC will hear nothing. Press Set up audio device if you want TailRemote to add one.");
+                    Say("This PC has no sound output, so the other PC will hear nothing. Press Set up audio device if you want Kova to add one.");
                 if (!Startup.IsElevated()) Log("Not running as administrator, so keys cannot reach administrator windows. Start hosting when Windows starts runs it as administrator.");
             }
             catch (Exception e) { Say("Could not start hosting: " + e.Message); }
@@ -1521,11 +1537,24 @@ namespace TailRemote
 
         public const int MinPasswordLength = 6;
 
-        /// <summary>Refuses a password shorter than 6 characters.</summary>
-        private bool CheckPassword()
+        // Hosting started by itself (at sign-in, or the new copy after an update): nobody is there to
+        // type a longer password, and refusing would leave the PC unreachable, so a short one still hosts.
+        private bool _hostingByItself;
+
+        /// <summary>
+        /// Refuses a password shorter than 6 characters for hosting. For connecting (or saving a PC
+        /// to connect to) only an empty one is refused: the other PC decides, and one still on an
+        /// older 5-character password must stay reachable, or it could never be updated from here.
+        /// </summary>
+        private bool CheckPassword(bool hosting = true)
         {
             int n = _password.Text.Length;
-            if (n >= MinPasswordLength) return true;
+            if (n >= MinPasswordLength || (n > 0 && !hosting)) return true;
+            if (n > 0 && _hostingByItself)
+            {
+                Speak("This PC's password has only " + n + " characters. Choose one of at least " + MinPasswordLength + ", on this PC and the ones that connect to it.");
+                return true;
+            }
             string why = n == 0 ? "Type a password first." : "The password needs at least " + MinPasswordLength + " characters. It has " + n + ".";
             Log(why);
             Later(() => _password.Ask(this, why));
@@ -1542,6 +1571,12 @@ namespace TailRemote
         {
             string listen = _listenPassword.Text;
             if (listen.Length == 0 || (listen.Length >= MinPasswordLength && listen != _password.Text)) return true;
+            if (_hostingByItself && listen != _password.Text)
+            {
+                // As with the main password: refusing here would leave a PC that hosts by itself unreachable.
+                Speak("The listen-only password has only " + listen.Length + " characters. Choose one of at least " + MinPasswordLength + ".");
+                return true;
+            }
             string why = listen == _password.Text
                 ? "The listen-only password must be different from the main password, or empty."
                 : "The listen-only password needs at least " + MinPasswordLength + " characters, or leave it empty.";
@@ -1577,7 +1612,7 @@ namespace TailRemote
         {
             string address = _address.Text.Trim();
             if (address.Length == 0) { Later(() => _address.Ask(this, "Type the address first.")); return; }
-            if (!CheckPassword()) return;
+            if (!CheckPassword(hosting: false)) return;
             if (!CheckPort(out int port)) return;
             if (!quiet && FindParked(address, port) is Parked waiting) { Unpark(waiting); return; } // already connected, in the background
             _connecting = true;
@@ -1696,15 +1731,15 @@ namespace TailRemote
                 _expectUpdate = leavingDetail;
                 _reconnecting = true;
                 _retryTimer.Start();
-                Say(why + " TailRemote reconnects as soon as it is back.");
+                Say(why + " Kova reconnects as soon as it is back.");
             }
             else if (_expectRestart)
             {
                 // Expected: keep trying until it is back, however long the restart takes.
                 _reconnecting = true;
                 _retryTimer.Start();
-                Say(leaving == Protocol.LeavingShutdown ? why + " TailRemote reconnects if it comes back."
-                    : "The remote PC is restarting. TailRemote reconnects as soon as it is back.");
+                Say(leaving == Protocol.LeavingShutdown ? why + " Kova reconnects if it comes back."
+                    : "The remote PC is restarting. Kova reconnects as soon as it is back.");
             }
             else if (leaving == Protocol.LeavingStopped)
             {
@@ -1749,23 +1784,28 @@ namespace TailRemote
         private async void CheckForUpdates()
         {
             Doing("checking for updates");
-            if (_updating) { Say("TailRemote is already updating."); return; }
+            if (_updating) { Say("Kova is already updating."); return; }
+            _updating = true; // from the start: a remote request during the question box must not start a second download
             _update.Enabled = false;
             Say("Checking for updates.");
             try
             {
                 var r = await Updater.CheckAsync();
-                if (r == null) { Say("TailRemote " + Updater.Current + " is the latest version."); return; }
+                if (r == null) { Say("Kova " + Updater.Current + " is the latest version."); return; }
                 string notes = r.Notes.Trim().Length > 0 ? r.Notes.Trim() : "No notes.";
                 var answer = MessageBox.Show(this, "Version " + r.Version + " is available. You have " + Updater.Current + "." +
-                    Environment.NewLine + Environment.NewLine + notes + Environment.NewLine + Environment.NewLine + "Update now? TailRemote restarts and carries on where it was.",
-                    "TailRemote update", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2); // default No: a stray Enter must not kick off an update + restart
+                    Environment.NewLine + Environment.NewLine + notes + Environment.NewLine + Environment.NewLine + "Update now? Kova restarts and carries on where it was.",
+                    "Kova update", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2); // default No: a stray Enter must not kick off an update + restart
                 if (answer != DialogResult.Yes) return;
                 Say("Downloading version " + r.Version + ". Everything carries on until it is ready.");
                 await InstallUpdate(r);
             }
             catch (Exception e) { Say("Update failed: " + e.Message); }
-            finally { if (!IsDisposed) _update.Enabled = true; }
+            finally
+            {
+                if (!_reallyExit) _updating = false;
+                if (!IsDisposed) _update.Enabled = true;
+            }
         }
 
         /// <summary>
@@ -1775,22 +1815,26 @@ namespace TailRemote
         private async void RemoteUpdate(string requested, Action<string> reply)
         {
             Doing("updating for the controlling PC");
-            if (!Version.TryParse(requested, out var want)) { reply("TailRemote on the remote PC did not understand the version " + requested + "."); return; }
-            if (_updating) { reply("TailRemote on the remote PC is already updating."); return; }
-            if (want <= Updater.Current) { reply("The remote PC already has TailRemote " + Updater.Current + "."); return; }
+            if (!Version.TryParse(requested, out var want)) { reply("Kova on the remote PC did not understand the version " + requested + "."); return; }
+            if (_updating) { reply("Kova on the remote PC is already updating."); return; }
+            if (want <= Updater.Current) { reply("The remote PC already has Kova " + Updater.Current + "."); return; }
+            // Taken before the first wait, so two controllers asking at once cannot both download
+            // into the same file: the second is told it is already updating.
+            _updating = true;
             try
             {
                 var r = await Updater.CheckAsync();
                 if (r == null || r.Version != want)
                 {
-                    reply("The remote PC did not update: the newest TailRemote on GitHub is " + (r?.Version ?? Updater.Current) + ", not " + want + ".");
+                    reply("The remote PC did not update: the newest Kova on GitHub is " + (r?.Version ?? Updater.Current) + ", not " + want + ".");
                     return;
                 }
-                reply("The remote PC is downloading TailRemote " + r.Version + ". Everything carries on until it is ready.");
-                Log("The controlling PC asked to update TailRemote to " + r.Version + ".");
+                reply("The remote PC is downloading Kova " + r.Version + ". Everything carries on until it is ready.");
+                Log("The controlling PC asked to update Kova to " + r.Version + ".");
                 await InstallUpdate(r);
             }
             catch (Exception e) { reply("The remote PC could not update: " + e.Message); }
+            finally { if (!_reallyExit) _updating = false; }
         }
 
         /// <summary>
@@ -1831,35 +1875,35 @@ namespace TailRemote
 
         private async void SetUpAudio()
         {
-            if (AudioSetup.IsReady()) { Say("The TailRemote audio device is already set up."); return; }
+            if (AudioSetup.IsReady()) { Say("The Kova audio device is already set up."); return; }
             bool have = AudioSetup.FindCable() != null;
-            string plan = "Set up audio device gives this PC an output called TailRemote, so everything this PC plays can be heard on the other PC. It will:" + Environment.NewLine + Environment.NewLine +
+            string plan = "Set up audio device gives this PC an output called Kova, so everything this PC plays can be heard on the other PC. It will:" + Environment.NewLine + Environment.NewLine +
                 (have ? "" :
                 "1. Download VB-Cable, a free virtual audio device by VB-Audio, from vb-audio.com, and check it is genuine." + Environment.NewLine +
                 "2. Open VB-Cable's installer. You press Install Driver." + Environment.NewLine) +
-                (have ? "1. " : "3. ") + "Name VB-Cable's output TailRemote and make it this PC's default output. Your speakers stop being the default." + Environment.NewLine +
+                (have ? "1. " : "3. ") + "Name VB-Cable's output Kova and make it this PC's default output. Your speakers stop being the default." + Environment.NewLine +
                 (have ? "2. " : "4. ") + "Turn off VB-Cable's extra output, CABLE In 16 Ch." + Environment.NewLine + Environment.NewLine +
                 "Windows asks for administrator permission first. Remove audio device undoes all of it.";
             if (MessageBox.Show(this, plan, "Set up audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
             _audioSetup.Enabled = _audioRemove.Enabled = false;
             bool ok = await AudioSetup.RunElevatedAsync();
-            Say(ok ? "The TailRemote audio device is set up." : "Audio device setup did not finish.");
+            Say(ok ? "The Kova audio device is set up." : "Audio device setup did not finish.");
             _audioSetup.Enabled = _audioRemove.Enabled = true;
         }
 
         private async void RemoveAudio()
         {
-            if (!AudioSetup.Installed()) { Say("There is no TailRemote audio device on this PC."); return; }
+            if (!AudioSetup.Installed()) { Say("There is no Kova audio device on this PC."); return; }
             var other = AudioSetup.OtherOutput();
             string plan = "Remove audio device will:" + Environment.NewLine + Environment.NewLine +
                 "1. " + (other != null ? "Make " + other.Value.Name + " the default output." : "There is no other output on this PC, so it will have no sound output afterwards.") + Environment.NewLine +
-                "2. Move programs off the TailRemote device. Any program still using it is cut off." + Environment.NewLine +
+                "2. Move programs off the Kova device. Any program still using it is cut off." + Environment.NewLine +
                 "3. Remove VB-Cable completely, including its driver. If you use VB-Cable for anything else, that stops working too." + Environment.NewLine + Environment.NewLine +
                 "Windows asks for administrator permission first.";
             if (MessageBox.Show(this, plan, "Remove audio device", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK) return; // default Cancel: removing the driver is destructive
             _audioSetup.Enabled = _audioRemove.Enabled = false;
             bool ok = await AudioSetup.RemoveElevatedAsync();
-            Say(ok ? "The TailRemote audio device is removed." : "Removing the audio device did not finish.");
+            Say(ok ? "The Kova audio device is removed." : "Removing the audio device did not finish.");
             _audioSetup.Enabled = _audioRemove.Enabled = true;
         }
 
@@ -1870,10 +1914,10 @@ namespace TailRemote
             bool want = _service.Checked;
             if (want == ServiceHost.IsInstalled()) return;
             string plan = want
-                ? "Run TailRemote as a Windows service?" + Environment.NewLine + Environment.NewLine +
-                  "The service starts with Windows, before anyone signs in, and has full system access. Whoever knows the TailRemote password can then use the lock screen, sign in, and approve administrator prompts on this PC, and Control Alt End sends Control Alt Delete." + Environment.NewLine + Environment.NewLine +
+                ? "Run Kova as a Windows service?" + Environment.NewLine + Environment.NewLine +
+                  "The service starts with Windows, before anyone signs in, and has full system access. Whoever knows the Kova password can then use the lock screen, sign in, and approve administrator prompts on this PC, and Control Alt End sends Control Alt Delete." + Environment.NewLine + Environment.NewLine +
                   "It uses this window's port and passwords, opens the port in Windows Firewall, and replaces Start hosting when Windows starts. Windows asks for administrator permission."
-                : "Remove the TailRemote service? This PC stops hosting until you start hosting here again. Windows asks for administrator permission.";
+                : "Remove the Kova service? This PC stops hosting until you start hosting here again. Windows asks for administrator permission.";
             if (MessageBox.Show(this, plan, want ? "Run as a Windows service" : "Remove the service", MessageBoxButtons.OKCancel,
                     want ? MessageBoxIcon.Warning : MessageBoxIcon.Question,
                     want ? MessageBoxDefaultButton.Button1 : MessageBoxDefaultButton.Button2) != DialogResult.OK // removing defaults to Cancel; installing (what the user just asked for) keeps OK
@@ -1890,7 +1934,7 @@ namespace TailRemote
             SetServiceBox(now);
             _startup.Checked = Startup.IsEnabled();
             if (ok && now == want)
-                Say(want ? "The TailRemote service is running and hosting this PC on port " + _settings.Port + "." : "The TailRemote service is removed.");
+                Say(want ? "The Kova service is running and hosting this PC on port " + _settings.Port + "." : "The Kova service is removed.");
             else
                 Say((want ? "The service was not set up: " : "The service was not removed: ") + ServiceHost.LastError());
             UpdateMode();
@@ -1927,8 +1971,13 @@ namespace TailRemote
             // tell it: the service compares GitHub with what it really runs, so if it is already
             // current, nothing happens.
             if (!_updated && v >= Updater.Current) return;
-            if (ServiceHost.NudgeUpdate()) Log("The TailRemote service is updating itself to version " + Updater.Current + ".");
-            else Say("Could not ask the TailRemote service to update itself. If it is still on an older version, press Apply settings to the service.");
+            // Off the window's thread: the pipe waits up to 2 seconds for a service that is not
+            // there. The problem is spoken after "Updated to version", never over it.
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                if (ServiceHost.NudgeUpdate()) Later(() => Log("The Kova service is updating itself to version " + Updater.Current + "."));
+                else Later(() => Speak("Could not ask the Kova service to update itself. If it is still on an older version, press Apply settings to the service."));
+            });
         }
 
         private async void StartupChanged()
@@ -1937,7 +1986,7 @@ namespace TailRemote
             if (want == Startup.IsEnabled()) return;
             SaveSettings();
             Say("Windows asks for administrator permission.");
-            if (await Startup.SetAsync(want)) Say(want ? "TailRemote will start hosting, as administrator, when you sign in." : "TailRemote will no longer start with Windows.");
+            if (await Startup.SetAsync(want)) Say(want ? "Kova will start hosting, as administrator, when you sign in." : "Kova will no longer start with Windows.");
             else
             {
                 Say("That needs administrator permission, and it was not given.");
@@ -1986,13 +2035,13 @@ namespace TailRemote
                 _keys.Toggle();
             }
             if (_trayExit != null) _trayExit.Text = connected ? "&Disconnect and exit" : "&Stop hosting and exit";
-            _tray.Text = connected ? "TailRemote, connected" : "TailRemote, hosting";
+            _tray.Text = connected ? "Kova, connected" : "Kova, hosting";
             _tray.Visible = true;
             Hide();
             if (announce)
                 Speech.Speak(connected
-                    ? "TailRemote is still connected, and you still hear the other PC. It is in the notification area: press Windows B to find it. Use its menu to disconnect and exit."
-                    : "TailRemote is still hosting, in the notification area. Press Windows B to find it. Use its menu to stop hosting and exit.");
+                    ? "Kova is still connected, and you still hear the other PC. It is in the notification area: press Windows B to find it. Use its menu to disconnect and exit."
+                    : "Kova is still hosting, in the notification area. Press Windows B to find it. Use its menu to stop hosting and exit.");
         }
 
         /// <summary>File, Exit: closes for real, ending hosting or the connection (the X only hides to the tray then).</summary>

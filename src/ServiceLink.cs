@@ -23,7 +23,7 @@ namespace TailRemote
     /// </summary>
     internal static class ServiceLink
     {
-        private const string PipeName = "TailRemoteFiles";
+        private const string PipeName = Names.FilesPipe;
         // Window to agent:
         private const byte SendText = (byte)'t', SendClipFiles = (byte)'f', SendDownloads = (byte)'d', CancelAll = (byte)'x', ReceiveIn = (byte)'o';
         // Agent to window:
@@ -88,7 +88,7 @@ namespace TailRemote
                 _host = host;
                 uint mine = (uint)System.Diagnostics.Process.GetCurrentProcess().SessionId;
                 _session = session ?? (() => mine);
-                new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote service link" }.Start();
+                new Thread(AcceptLoop) { IsBackground = true, Name = "Kova service link" }.Start();
             }
 
             /// <summary>Hands something to every connected window; false if none is connected (the agent then does it itself).</summary>
@@ -147,24 +147,29 @@ namespace TailRemote
                 bool first = true, warned = false;
                 while (true)
                 {
+                    // Claimed before the attempt, win or lose (as AgentLink does): if something squats on the
+                    // name at the first try, every retry demanding FirstPipeInstance would fail for as long as
+                    // the service runs, even after the squatter is gone. The window still checks that the pipe
+                    // is owned by SYSTEM, so a squatter can never pose as the service.
+                    bool useFirst = first;
+                    first = false;
                     try
                     {
                         // Asynchronous: one thread reads while another writes. On a plain pipe Windows makes a
                         // waiting read hold up every write, and nothing ever reached the window. The first
                         // one must be the first of its name: if another program made it first, it is not ours.
                         var pipe = NamedPipeServerStreamAcl.Create(PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
-                            PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : 0), 0, 0, sec);
-                        first = false;
+                            PipeOptions.Asynchronous | (useFirst ? PipeOptions.FirstPipeInstance : 0), 0, 0, sec);
                         pipe.WaitForConnection();
                         // Only a window in this session (the one at the screen): never another account
                         // that is also signed in, which would otherwise hear what arrives for the clipboard.
                         if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out uint session) || session != _session())
                         {
-                            ServiceHost.Log("Service link: refused a TailRemote window from another session (" + session + ").");
+                            ServiceHost.Log("Service link: refused a Kova window from another session (" + session + ").");
                             pipe.Dispose();
                             continue;
                         }
-                        new Thread(() => Serve(pipe)) { IsBackground = true, Name = "TailRemote service link window" }.Start();
+                        new Thread(() => Serve(pipe)) { IsBackground = true, Name = "Kova service link window" }.Start();
                     }
                     catch (Exception e)
                     {
@@ -184,7 +189,7 @@ namespace TailRemote
                     // Who the window runs as: files it sends are opened as that user, never as SYSTEM.
                     pipe.RunAsClient(() => user = WindowsIdentity.GetCurrent(TokenAccessLevels.Query | TokenAccessLevels.Impersonate | TokenAccessLevels.Duplicate));
                     lock (_windows) _windows.Add(outbox);
-                    ServiceHost.Log("Service link: the TailRemote window of " + user?.Name + " is connected.");
+                    ServiceHost.Log("Service link: the Kova window of " + user?.Name + " is connected.");
                     new Thread(() =>
                     {
                         try
@@ -205,7 +210,7 @@ namespace TailRemote
                         }
                         catch { }
                         try { pipe.Dispose(); } catch { }
-                    }) { IsBackground = true, Name = "TailRemote service link out" }.Start();
+                    }) { IsBackground = true, Name = "Kova service link out" }.Start();
                     while (pipe.IsConnected)
                     {
                         var (type, p) = Read(pipe);
@@ -249,7 +254,7 @@ namespace TailRemote
             /// <summary>How many PCs control and listen to the service's host.</summary>
             public (int Controlling, int Listening) Counts { get; private set; }
 
-            public Client() => new Thread(Loop) { IsBackground = true, Name = "TailRemote service link" }.Start();
+            public Client() => new Thread(Loop) { IsBackground = true, Name = "Kova service link" }.Start();
 
             public void Dispose()
             {
@@ -286,6 +291,7 @@ namespace TailRemote
                 {
                     try
                     {
+                        // Impersonation allowed: the agent opens the files this user sends as this user.
                         // Impersonation allowed: the agent opens the files this user sends as this user.
                         var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
                         pipe.Connect(2000);

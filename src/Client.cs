@@ -50,6 +50,7 @@ namespace TailRemote
         public int Port => _hostUdp.Port;
         private volatile bool _udpBlocked;
         private long _lastUdpPong;
+        private long _lastPongStamp = long.MinValue; // the newest audio pong's stamp (UDP receive thread only)
         private IPEndPoint _hostUdp = null!;
         /// <summary>Buffered audio plus the output device, in ms; -1 while nothing plays.</summary>
         public int AudioDelayMs => _player.DelayMs;
@@ -84,7 +85,7 @@ namespace TailRemote
                 try { done = tcp.ConnectAsync(addrs, port).Wait(answerMs); }
                 catch (AggregateException e) when (e.InnerException is SocketException se && se.SocketErrorCode == SocketError.ConnectionRefused)
                 {
-                    throw new InvalidOperationException(address + " is on, but TailRemote is not hosting there. Start hosting on that PC.");
+                    throw new InvalidOperationException(address + " is on, but Kova is not hosting there. Start hosting on that PC.");
                 }
                 if (!done)
                     throw new TimeoutException("No answer from " + address + ". It may be off or not hosting, or its port is not open: use Port editor on that PC.");
@@ -103,8 +104,8 @@ namespace TailRemote
                 Protocol.ReadExactly(stream, hello.AsSpan(0, 4));
                 if (!hello.AsSpan(0, 4).SequenceEqual(Protocol.Magic))
                     throw new InvalidOperationException(hello.AsSpan(0, 3).SequenceEqual("TRM"u8)
-                        ? "The other PC has a different TailRemote version, or the connection damaged its first message. Update both to the latest."
-                        : "That is not a TailRemote host, or the connection damaged its first message.");
+                        ? "The other PC has a different Kova version, or the connection damaged its first message. Update both to the latest."
+                        : "That is not a Kova host, or the connection damaged its first message.");
                 Protocol.ReadExactly(stream, hello.AsSpan(4));
                 if (!Protocol.CheckOk(hello)) throw new InvalidOperationException(Protocol.DamagedLogin);
                 byte[] hostNonce = hello[4..20];
@@ -117,7 +118,7 @@ namespace TailRemote
                 using (var exchange = Protocol.NewExchange())
                 {
                     byte[] shared = Protocol.SharedSecret(exchange, hello.AsSpan(Protocol.HelloPublicAt, Protocol.PublicKeyBytes))
-                        ?? throw new InvalidOperationException("That is not a TailRemote host, or the connection damaged its first message.");
+                        ?? throw new InvalidOperationException("That is not a Kova host, or the connection damaged its first message.");
                     Protocol.WritePublic(exchange, answer.AsSpan(Protocol.AnswerPublicAt, Protocol.PublicKeyBytes));
                     key = Protocol.SessionKey(passwordKey, shared, hello, answer.AsSpan(0, Protocol.AnswerProofAt));
                     System.Security.Cryptography.CryptographicOperations.ZeroMemory(shared);
@@ -169,9 +170,12 @@ namespace TailRemote
                     string to = address.Trim().ToLowerInvariant() + ":" + port;
                     lock (KeptGate)
                     {
-                        files = _kept != null && _keptFor == to && !_kept.Gone ? _kept : null;
-                        if (files == null) _kept?.Dispose();
-                        _kept = null;
+                        int i = _kept.FindIndex(k => k.For == to);
+                        if (i >= 0)
+                        {
+                            files = _kept[i].Files.Gone ? null : _kept[i].Files;
+                            _kept.RemoveAt(i);
+                        }
                     }
                     files ??= new FileChannel();
                     filesTo = to;
@@ -191,26 +195,57 @@ namespace TailRemote
             }
             catch (System.IO.IOException)
             {
-                if (files != null) lock (KeptGate) { _kept = files; _keptFor = filesTo; }
+                if (files != null) Keep(filesTo!, files);
                 udp?.Dispose(); tcp.Dispose(); throw new InvalidOperationException("The host closed the connection.");
             }
             catch
             {
-                if (files != null) lock (KeptGate) { _kept = files; _keptFor = filesTo; }
+                if (files != null) Keep(filesTo!, files);
                 udp?.Dispose(); tcp.Dispose(); throw;
             }
         }
 
-        // A file channel whose main connection dropped, kept for the next connection to the same host.
+        // File channels whose main connection dropped, each kept for the next connection to its own
+        // host, oldest first. One per PC: with several PCs connected at once, one slot for all meant
+        // connecting to (or letting go of) any other PC ended a waiting transfer to this one.
         private static readonly object KeptGate = new();
-        private static FileChannel? _kept;
-        private static string? _keptFor;
+        private static readonly List<(string For, FileChannel Files)> _kept = new();
+        private const int MaxKept = 8;
         private string? _filesFor;
+
+        private static void Keep(string to, FileChannel files)
+        {
+            lock (KeptGate)
+            {
+                int i = _kept.FindIndex(k => k.For == to);
+                if (i >= 0)
+                {
+                    if (_kept[i].Files != files) _kept[i].Files.Dispose();
+                    _kept.RemoveAt(i);
+                }
+                _kept.RemoveAll(k => k.Files.Gone);
+                // Nothing going: nothing to carry on, and kept it could push out a PC's paused transfer.
+                if (!files.HasWork) { files.Dispose(); return; }
+                _kept.Add((to, files));
+                while (_kept.Count > MaxKept)
+                {
+                    // Full: one that has since finished goes first, the oldest only if all are busy.
+                    int drop = _kept.FindIndex(k => !k.Files.HasWork);
+                    if (drop < 0) drop = 0;
+                    _kept[drop].Files.Dispose();
+                    _kept.RemoveAt(drop);
+                }
+            }
+        }
 
         /// <summary>Stop pressed while not connected: transfers waiting for a reconnection are stopped for good.</summary>
         public static void ForgetTransfers()
         {
-            lock (KeptGate) { _kept?.Dispose(); _kept = null; }
+            lock (KeptGate)
+            {
+                foreach (var k in _kept) k.Files.Dispose();
+                _kept.Clear();
+            }
         }
 
         /// <summary>
@@ -237,6 +272,7 @@ namespace TailRemote
                 token.CopyTo(answer, 4);
                 channel.CopyTo(answer, 12);
                 laneValue.CopyTo(answer, 28);
+                Protocol.LaneProof(key, hello.AsSpan(4, 16), channel, laneValue).CopyTo(answer, Protocol.LaneProofAt);
                 Protocol.AddCheck(answer);
                 s.Write(answer);
                 return (tcp, new SecureLink(key, hostNonce, myNonce, isHost: false, FileChannel.LanePurpose(hello.AsSpan(4, 16), laneValue)));
@@ -338,11 +374,11 @@ namespace TailRemote
 
         private void Start()
         {
-            new Thread(SendLoop) { IsBackground = true, Name = "TailRemote send", Priority = ThreadPriority.AboveNormal }.Start();
-            new Thread(TcpLoop) { IsBackground = true, Name = "TailRemote tcp" }.Start();
-            new Thread(UdpLoop) { IsBackground = true, Name = "TailRemote udp", Priority = ThreadPriority.Highest }.Start();
-            new Thread(Heartbeat) { IsBackground = true, Name = "TailRemote heartbeat" }.Start();
-            new Thread(QualityLoop) { IsBackground = true, Name = "TailRemote quality" }.Start();
+            new Thread(SendLoop) { IsBackground = true, Name = "Kova send", Priority = ThreadPriority.AboveNormal }.Start();
+            new Thread(TcpLoop) { IsBackground = true, Name = "Kova tcp" }.Start();
+            new Thread(UdpLoop) { IsBackground = true, Name = "Kova udp", Priority = ThreadPriority.Highest }.Start();
+            new Thread(Heartbeat) { IsBackground = true, Name = "Kova heartbeat" }.Start();
+            new Thread(QualityLoop) { IsBackground = true, Name = "Kova quality" }.Start();
             _wifi = new WlanStreaming("client"); // steady Wi-Fi while connected
         }
 
@@ -357,7 +393,7 @@ namespace TailRemote
             // The host said why it is going: that, not how the socket happened to break.
             if (why != null) why = Leaving switch
             {
-                Protocol.LeavingUpdating => "The remote PC is updating TailRemote" + (LeavingDetail.Length > 0 ? " to version " + LeavingDetail : "") + ".",
+                Protocol.LeavingUpdating => "The remote PC is updating Kova" + (LeavingDetail.Length > 0 ? " to version " + LeavingDetail : "") + ".",
                 Protocol.LeavingRestarting => "The remote PC is restarting.",
                 Protocol.LeavingShutdown => "The remote PC is shutting down or restarting.",
                 Protocol.LeavingStopped => "The remote PC stopped hosting.",
@@ -379,12 +415,7 @@ namespace TailRemote
                 // carry on); disconnected on purpose, they pause. Either way they carry on where they
                 // were on the next connection to this host, however long that takes. Only Stop ends them.
                 if (why == null) _files.Pause(); else _files.Detach();
-                lock (KeptGate)
-                {
-                    if (_kept != _files) _kept?.Dispose();
-                    _kept = _files;
-                    _keptFor = _filesFor;
-                }
+                Keep(_filesFor!, _files);
             }
             _wifi?.Dispose();
             if (why != null) Disconnected?.Invoke(why);
@@ -486,7 +517,19 @@ namespace TailRemote
         /// A connection waiting in the background (several PCs at once): its sound is not played
         /// (the PC in front is the one heard), and it starts afresh when it comes to the front.
         /// </summary>
-        public volatile bool Muted;
+        public bool Muted
+        {
+            get => _muted;
+            set
+            {
+                if (_muted == value) return;
+                _muted = value;
+                // Not even a few kilobits nobody hears: the host sends no sound at all until unmuted,
+                // which saves the data on a phone connection. The UDP hello and its ping carry on.
+                try { Write(new[] { Protocol.AudioPause, (byte)(value ? 1 : 0) }); } catch { }
+            }
+        }
+        private volatile bool _muted;
 
         /// <summary>Back to the best sound at once (coming to the front), unless the quality is locked.</summary>
         public void StartBest()
@@ -628,7 +671,7 @@ namespace TailRemote
             var socket = e as SocketException ?? e.InnerException as SocketException;
             return socket?.SocketErrorCode switch
             {
-                SocketError.ConnectionReset or SocketError.ConnectionAborted => "the remote PC's TailRemote closed suddenly, or the network dropped.",
+                SocketError.ConnectionReset or SocketError.ConnectionAborted => "the remote PC's Kova closed suddenly, or the network dropped.",
                 SocketError.TimedOut => "the remote PC stopped answering.",
                 SocketError.NetworkDown or SocketError.NetworkUnreachable or SocketError.HostUnreachable => "this PC lost its network connection.",
                 _ => e.Message,
@@ -684,7 +727,7 @@ namespace TailRemote
 
         private void UdpLoop()
         {
-            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0 || TestCellMs > 0 || TestScanMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "TailRemote test jitter" }.Start();
+            if (TestJitterMs > 0 || TestLagMs > 0 || TestStallMs > 0 || TestDialupKbps > 0 || TestCellMs > 0 || TestScanMs > 0) new Thread(JitterLoop) { IsBackground = true, Name = "Kova test jitter" }.Start();
             var any = new IPEndPoint(IPAddress.IPv6Any, 0);
             while (!_closed)
             {
@@ -763,9 +806,13 @@ namespace TailRemote
 
         private void HandlePacket(byte[] d)
         {
-            if (d.Length == 9 && d[0] == Protocol.UdpPong)
+            if (d.Length == Protocol.UdpPongBytes && d[0] == Protocol.UdpPong)
             {
+                // Only the host's, and only newer than the last: a replayed one would fake the ping.
+                if (!_link.HelloOk(d)) return;
                 long sent = BitConverter.ToInt64(d, 1);
+                if (sent <= _lastPongStamp) return;
+                _lastPongStamp = sent;
                 long ms = (Stopwatch.GetTimestamp() - sent) * 1000 / Stopwatch.Frequency;
                 if (ms < 0 || ms >= 10_000) return;
                 Volatile.Write(ref _lastUdpPong, Environment.TickCount64);
@@ -794,15 +841,21 @@ namespace TailRemote
             _queue.TryAdd(seq, (d, now));
             while (_queue.Count > 0)
             {
-                uint first = _queue.Keys[0];
-                var (data, at) = _queue.Values[0];
+                // The earliest counting from _next, not the smallest number: where the host's packet
+                // number wraps (every 248 days of hosting) the small new numbers sorted first.
+                int pick = 0;
+                if (_haveNext)
+                    for (int i = 1; i < _queue.Count; i++)
+                        if ((int)(_queue.Keys[i] - _next) < (int)(_queue.Keys[pick] - _next)) pick = i;
+                uint first = _queue.Keys[pick];
+                var (data, at) = _queue.Values[pick];
                 if (_haveNext && first != _next)
                 {
                     // A gap before the first one waiting: wait for it, a little.
                     if (_gapSince == 0) _gapSince = at;
                     if (now - _gapSince < _player.ReorderWaitMs && _queue.Count < 32) break;
                 }
-                _queue.RemoveAt(0);
+                _queue.RemoveAt(pick);
                 _gapSince = 0;
                 Deliver(data, at);
             }

@@ -35,14 +35,14 @@ jobs:
           foreach ($arch in 'arm64', 'x64') {
             dotnet publish TailRemote.csproj -c Release -r "win-$arch" -o "out/$arch" -p:Version=${{ steps.ver.outputs.version }}
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
-            Copy-Item "out/$arch/TailRemote.exe" "dist/TailRemote-$arch.exe"
+            Copy-Item "out/$arch/Kova.exe" "dist/Kova-$arch.exe"
           }
           Get-ChildItem dist
 
       - name: Self-test (x64)
         shell: pwsh
         run: |
-          $p = Start-Process dist/TailRemote-x64.exe -ArgumentList '--selftest' -PassThru -Wait
+          $p = Start-Process dist/Kova-x64.exe -ArgumentList '--selftest' -PassThru -Wait
           Get-Content "$env:TEMP/tailremote-selftest.txt"
           exit $p.ExitCode
 
@@ -63,4 +63,4 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create '${{ github.ref_name }}' dist/TailRemote-arm64.exe dist/TailRemote-x64.exe --title "TailRemote ${{ steps.ver.outputs.version }}" --notes-file notes.txt
+        run: gh release create '${{ github.ref_name }}' dist/Kova-arm64.exe dist/Kova-x64.exe --title "Kova ${{ steps.ver.outputs.version }}" --notes-file notes.txt

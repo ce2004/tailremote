@@ -30,7 +30,7 @@ namespace TailRemote
             {
                 using var http = new HttpClient(new SocketsHttpHandler { MaxConnectionsPerServer = 16, AutomaticDecompression = DecompressionMethods.None })
                     { Timeout = Timeout.InfiniteTimeSpan };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("TailRemote/" + Updater.Current);
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("Kova/" + Updater.Current);
                 var lines = new List<string>();
 
                 // Which Cloudflare data centre answers (an airport code, like FRA), and this PC's

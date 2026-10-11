@@ -56,7 +56,7 @@ namespace TailRemote
                         int a = WlanSetInterface(_handle, ref guid, MediaStreamingMode, 4, ref on, IntPtr.Zero);
                         int b = WlanSetInterface(_handle, ref guid, BackgroundScanEnabled, 4, ref off, IntPtr.Zero);
                         done.Add(name + ": streaming mode " + (a == 0 ? "on" : "refused (" + a + ")") + ", background scans " + (b == 0 ? "off" : "refused (" + b + ")") +
-                            (a != 0 || b != 0 ? (Startup.IsElevated() ? "" : "; this may need TailRemote running as administrator") : ""));
+                            (a != 0 || b != 0 ? (Startup.IsElevated() ? "" : "; this may need Kova running as administrator") : ""));
                     }
                 }
                 finally { WlanFreeMemory(list); }

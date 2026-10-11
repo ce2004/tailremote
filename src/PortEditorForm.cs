@@ -36,8 +36,8 @@ namespace TailRemote
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
             var panel = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Padding = new Padding(12) };
-            panel.Controls.Add(new Label { Text = "&Ports TailRemote has used, and whether Windows Firewall lets them in", AutoSize = true });
-            _list.AccessibleName = "Ports TailRemote has used";
+            panel.Controls.Add(new Label { Text = "&Ports Kova has used, and whether Windows Firewall lets them in", AutoSize = true });
+            _list.AccessibleName = "Ports Kova has used";
             panel.Controls.Add(_list);
             Menus.FocusWhenShown(this, () => _list);
             var row = new FlowLayoutPanel { AutoSize = true };

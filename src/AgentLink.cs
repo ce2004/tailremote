@@ -19,7 +19,7 @@ namespace TailRemote
     /// </summary>
     internal static class AgentLink
     {
-        private const string PipeName = "TailRemoteAgent";
+        private const string PipeName = Names.AgentPipe;
         // Service to agent: type a key, set the clipboard (text / files), and ask the agent to read its clipboard.
         private const byte KeyMessage = (byte)'K', TextMessage = (byte)'T', FilesMessage = (byte)'F', GetMessage = (byte)'G';
         // Agent to service: the clipboard it read, in answer to a GetMessage (text, or file paths).
@@ -48,8 +48,8 @@ namespace TailRemote
 
             public Server()
             {
-                new Thread(AcceptLoop) { IsBackground = true, Name = "TailRemote agent link" }.Start();
-                new Thread(WriteLoop) { IsBackground = true, Name = "TailRemote agent link out", Priority = ThreadPriority.AboveNormal }.Start();
+                new Thread(AcceptLoop) { IsBackground = true, Name = "Kova agent link" }.Start();
+                new Thread(WriteLoop) { IsBackground = true, Name = "Kova agent link out", Priority = ThreadPriority.AboveNormal }.Start();
             }
 
             /// <summary>Hands a key to the agent; false if no agent is there (nobody's session yet, or it is starting).</summary>
@@ -128,7 +128,7 @@ namespace TailRemote
                         var old = Interlocked.Exchange(ref _pipe, pipe);
                         try { old?.Dispose(); } catch { }
                         while (_out.TryTake(out _)) { }
-                        new Thread(() => ReadLoop(pipe)) { IsBackground = true, Name = "TailRemote agent link in" }.Start();
+                        new Thread(() => ReadLoop(pipe)) { IsBackground = true, Name = "Kova agent link in" }.Start();
                         ServiceHost.Log("The agent in the signed-in session is connected.");
                     }
                     catch (Exception e)

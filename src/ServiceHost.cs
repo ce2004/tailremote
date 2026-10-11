@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -27,11 +28,10 @@ namespace TailRemote
     /// </summary>
     internal static class ServiceHost
     {
-        public const string Name = "TailRemoteHost";
-
-        public static string InstallDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "TailRemote");
-        public static string InstalledExe => Path.Combine(InstallDir, "TailRemote.exe");
-        public static string DataDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "TailRemote");
+        public const string Name = Names.Service;
+        public static string InstallDir => Names.InstallDir;
+        public static string InstalledExe => Names.InstalledExe;
+        public static string DataDir => Names.DataDir;
         private static string ConfigPath => Path.Combine(DataDir, "service.json");
         public static string LogPath => Path.Combine(DataDir, "service.log");
 
@@ -70,11 +70,13 @@ namespace TailRemote
         public static bool IsInstalled() => RunHidden("sc.exe", "query " + Name) == 0;
 
         /// <summary>The version of the copy the service runs, or null.</summary>
-        public static Version? InstalledVersion()
+        public static Version? InstalledVersion() => VersionOf(InstalledExe);
+
+        private static Version? VersionOf(string path)
         {
             try
             {
-                var v = FileVersionInfo.GetVersionInfo(InstalledExe);
+                var v = FileVersionInfo.GetVersionInfo(path);
                 return new Version(v.FileMajorPart, v.FileMinorPart, v.FileBuildPart);
             }
             catch { return null; }
@@ -85,7 +87,7 @@ namespace TailRemote
         {
             try
             {
-                using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--service " + (install ? "install" : "remove"))
+                using var p = Process.Start(new ProcessStartInfo(Environment.ProcessPath!, "--service " + (install ? "install" : "remove") + " " + Environment.ProcessId)
                 { UseShellExecute = true, Verb = "runas" });
                 if (p == null) return false;
                 p.WaitForExit();
@@ -138,19 +140,12 @@ namespace TailRemote
                     }
                 }
                 WriteConfig(cfg);
+                if (!Register()) return Fail("Windows would not create the service.");
 
-                string bin = "\"" + InstalledExe + "\" --service";
-                if (!IsInstalled())
-                {
-                    if (RunHidden("sc.exe", "create " + Name + " binPath= \"" + bin.Replace("\"", "\\\"") + "\" start= auto DisplayName= \"TailRemote host\"") != 0)
-                        return Fail("Windows would not create the service.");
-                }
-                else RunHidden("sc.exe", "config " + Name + " binPath= \"" + bin.Replace("\"", "\\\"") + "\" start= auto");
-                RunHidden("sc.exe", "description " + Name + " \"Lets another PC control this one through TailRemote, including the lock screen and UAC prompts.\"");
-                RunHidden("sc.exe", "failure " + Name + " reset= 60 actions= restart/2000/restart/5000/restart/10000");
-
-                // The service replaces the at-sign-in task, and opens its port.
+                // The service replaces the at-sign-in task, and opens its port (closing the one it
+                // used before, which Remove would otherwise never close).
                 Startup.Apply(false);
+                if (old != null && old.Port != s.Port) Firewall.Apply(false, old.Port);
                 Firewall.Apply(true, s.Port);
 
                 if (RunHidden("sc.exe", "start " + Name) != 0) return Fail("The service was installed but would not start.");
@@ -177,15 +172,15 @@ namespace TailRemote
                 // back the at-sign-in task the service had replaced.
                 Firewall.Apply(false, cfg?.Port ?? Protocol.DefaultPort);
                 Startup.Apply(true);
-                for (int i = 0; i < 20; i++)
+                // Each on its own: the window often runs from InstallDir, which then cannot go, and
+                // that must not leave the service's saved passwords behind in DataDir.
+                foreach (string dir in new[] { DataDir, InstallDir })
                 {
-                    try
+                    for (int i = 0; i < 20; i++)
                     {
-                        if (Directory.Exists(InstallDir)) Directory.Delete(InstallDir, true);
-                        if (Directory.Exists(DataDir)) Directory.Delete(DataDir, true);
-                        break;
+                        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); break; }
+                        catch { Thread.Sleep(250); }
                     }
-                    catch { Thread.Sleep(250); }
                 }
                 return 0;
             }
@@ -217,14 +212,34 @@ namespace TailRemote
             File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true }));
         }
 
+        /// <summary>Creates the Kova service, or brings its settings up to date. False if Windows would not create it.</summary>
+        private static bool Register()
+        {
+            string bin = "\"" + InstalledExe + "\" --service";
+            string quoted = "\"" + bin.Replace("\"", "\\\"") + "\"";
+            if (!IsInstalled())
+            {
+                if (RunHidden("sc.exe", "create " + Name + " binPath= " + quoted + " start= auto DisplayName= \"Kova host\"") != 0) return false;
+            }
+            else RunHidden("sc.exe", "config " + Name + " binPath= " + quoted + " start= auto DisplayName= \"Kova host\"");
+            RunHidden("sc.exe", "description " + Name + " \"Lets another PC control this one through Kova, including the lock screen and UAC prompts.\"");
+            RunHidden("sc.exe", "failure " + Name + " reset= 60 actions= restart/2000/restart/5000/restart/10000");
+            return true;
+        }
+
+        /// <summary>The window that started this install or remove (passed on its command line), or 0.</summary>
+        public static int WindowPid;
+
         private static void WaitForStopped()
         {
             for (int i = 0; i < 40; i++)
             {
                 bool any = false;
-                foreach (var p in Process.GetProcessesByName("TailRemote"))
+                foreach (var p in Process.GetProcessesByName("Kova"))
                 {
-                    using (p) try { if (string.Equals(p.MainModule?.FileName, InstalledExe, StringComparison.OrdinalIgnoreCase)) any = true; } catch { }
+                    // Not this installer itself, nor the window that started it: both often run from
+                    // InstalledExe too, and never stop, so every Apply used to wait the full 10 seconds.
+                    using (p) try { if (p.Id != Environment.ProcessId && p.Id != WindowPid && string.Equals(p.MainModule?.FileName, InstalledExe, StringComparison.OrdinalIgnoreCase)) any = true; } catch { }
                 }
                 if (!any) return;
                 Thread.Sleep(250);
@@ -287,9 +302,9 @@ namespace TailRemote
             Report(NativeService.SERVICE_START_PENDING);
             CheckRollback();
             // Hosting starts at once, from the service itself: before the sign-in screen exists.
-            new Thread(Agent.StartHosting) { IsBackground = true, Name = "TailRemote service hosting" }.Start();
-            new Thread(UpdateLoop) { IsBackground = true, Name = "TailRemote service updates" }.Start();
-            new Thread(UpdatePipe) { IsBackground = true, Name = "TailRemote update nudge" }.Start();
+            new Thread(Agent.StartHosting) { IsBackground = true, Name = "Kova service hosting" }.Start();
+            new Thread(UpdateLoop) { IsBackground = true, Name = "Kova service updates" }.Start();
+            new Thread(UpdatePipe) { IsBackground = true, Name = "Kova update nudge" }.Start();
             Report(NativeService.SERVICE_RUNNING);
             if (!File.Exists(RollbackNote)) { try { File.Delete(InstalledExe + ".old"); } catch { } } // left by the last self-update
             Log("Service started, version " + Updater.Current + ".");
@@ -365,7 +380,6 @@ namespace TailRemote
 
         // ================= The service keeps itself up to date =================
 
-        private const string UpdatePipeName = "TailRemoteUpdate";
         private static readonly AutoResetEvent CheckNow = new(false);
         private static volatile bool Restarting;
         private static volatile string _restartingTo = "";
@@ -401,9 +415,9 @@ namespace TailRemote
         /// </summary>
         public static void UpdateFor(string version, Action<string> reply)
         {
-            if (!Version.TryParse(version, out var want)) { reply("TailRemote on the remote PC did not understand the version " + version + "."); return; }
-            if (want <= Updater.Current) { reply("The remote PC already has TailRemote " + Updater.Current + "."); return; }
-            if (Restarting) { reply("TailRemote on the remote PC is already updating."); return; }
+            if (!Version.TryParse(version, out var want)) { reply("Kova on the remote PC did not understand the version " + version + "."); return; }
+            if (want <= Updater.Current) { reply("The remote PC already has Kova " + Updater.Current + "."); return; }
+            if (Restarting) { reply("Kova on the remote PC is already updating."); return; }
             Interlocked.Exchange(ref _request, new UpdateRequest(want, reply))?.Reply("Another controlling PC asked for an update at the same time; it is going ahead.");
             CheckNow.Set();
         }
@@ -413,22 +427,45 @@ namespace TailRemote
             var r = Updater.CheckAsync().GetAwaiter().GetResult();
             if (requested != null && r?.Version != requested)
             {
-                reply?.Invoke("The remote PC did not update: the newest TailRemote on GitHub is " + (r?.Version ?? Updater.Current) + ", not " + requested + ".");
+                reply?.Invoke("The remote PC did not update: the newest Kova on GitHub is " + (r?.Version ?? Updater.Current) + ", not " + requested + ".");
                 return;
             }
             if (r == null) return;
             var chosen = WindowVersion();
             if (requested == null && chosen != null && r.Version > chosen)
             {
-                Log("GitHub has " + r.Version + ", but TailRemote on this PC is " + chosen + "; staying in step with it.");
+                Log("GitHub has " + r.Version + ", but Kova on this PC is " + chosen + "; staying in step with it.");
+                return;
+            }
+            if (VersionOf(InstalledExe) == r.Version)
+            {
+                // The window runs this same file and has already updated it: the new version is in
+                // place and this service runs the previous one, renamed to name.old or name.old-....
+                // Swapping again would move the window's new copy aside and record it as the copy to
+                // roll back to, so a bad update could only ever be rolled back to itself. Point the
+                // roll back at the real previous copy instead, and restart into the new one.
+                string? previous = null;
+                try
+                {
+                    previous = Directory.GetFiles(InstallDir, Path.GetFileName(InstalledExe) + ".old*")
+                        .Where(f => !f.Contains(".old-failed-", StringComparison.OrdinalIgnoreCase)) // a copy that already failed is never one to go back to
+                        .OrderByDescending(File.GetLastWriteTimeUtc)
+                        .FirstOrDefault(f => VersionOf(f) == Updater.Current);
+                }
+                catch { }
+                if (previous != null) try { File.WriteAllLines(RollbackNote, new[] { previous, Updater.Current.ToString(), "0" }); } catch { }
+                Log("Kova on this PC already put version " + r.Version + " in place; the service restarts into it.");
+                reply?.Invoke("The remote PC's Kova service is restarting into " + r.Version + ".");
+                _restartingTo = r.Version.ToString();
+                Restarting = true;
                 return;
             }
             Log("Updating the service to version " + r.Version + ".");
-            reply?.Invoke("The remote PC's TailRemote service is downloading " + r.Version + ". Everything carries on until it is ready.");
+            reply?.Invoke("The remote PC's Kova service is downloading " + r.Version + ". Everything carries on until it is ready.");
             byte[] data;
             using (var h = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(10) })
             {
-                h.DefaultRequestHeaders.UserAgent.ParseAdd("TailRemote-service/" + Updater.Current);
+                h.DefaultRequestHeaders.UserAgent.ParseAdd("Kova-service/" + Updater.Current);
                 data = h.GetByteArrayAsync(r.Url).GetAwaiter().GetResult();
             }
             if (r.Sha256 == null || !Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).Equals(r.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -485,7 +522,7 @@ namespace TailRemote
                 {
                     Thread.Sleep(TimeSpan.FromMinutes(2));
                     try { File.Delete(RollbackNote); Log("Version " + Updater.Current + " is running well; the previous copy is no longer kept."); } catch { }
-                }) { IsBackground = true, Name = "TailRemote update check" }.Start();
+                }) { IsBackground = true, Name = "Kova update check" }.Start();
             }
             catch (Exception e) { Log("Roll back check failed: " + e.Message); }
         }
@@ -502,7 +539,7 @@ namespace TailRemote
             {
                 try
                 {
-                    using var pipe = NamedPipeServerStreamAcl.Create(UpdatePipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, sec);
+                    using var pipe = NamedPipeServerStreamAcl.Create(Names.UpdatePipe, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, sec);
                     pipe.WaitForConnection();
                     if (pipe.ReadByte() == 1 && Environment.TickCount64 - last >= 60_000)
                     {
@@ -526,7 +563,7 @@ namespace TailRemote
         {
             try
             {
-                using var pipe = new NamedPipeClientStream(".", UpdatePipeName, PipeDirection.Out);
+                using var pipe = new NamedPipeClientStream(".", Names.UpdatePipe, PipeDirection.Out);
                 pipe.Connect(2000);
                 var v = Updater.Current;
                 pipe.Write(new byte[] { 1, (byte)v.Major, (byte)v.Minor, (byte)Math.Max(0, v.Build) });

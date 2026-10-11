@@ -294,7 +294,7 @@ namespace TailRemote
             var label = new Label
             {
                 Text = "Restart the remote PC now? Programs there close as in a normal restart, and may ask to save first." + Environment.NewLine + Environment.NewLine +
-                       "TailRemote reconnects when it is back. That only happens if the remote PC starts hosting by itself: turn on Start hosting when Windows starts there, or the service.",
+                       "Kova reconnects when it is back. That only happens if the remote PC starts hosting by itself: turn on Start hosting when Windows starts there, or the service.",
                 AutoSize = true,
                 MaximumSize = new System.Drawing.Size(360, 0),
             };
@@ -377,7 +377,7 @@ namespace TailRemote
     /// <summary>
     /// The drop-down of a MenuItem. Enter on a setting, a status line or something that cannot be
     /// used right now is handled here, inside the menu: going through the usual click, the menu
-    /// first began to close and gave the window focus (NVDA said "TailRemote window") before
+    /// first began to close and gave the window focus (NVDA said "Kova window") before
     /// TailRemote kept it open.
     /// </summary>
     internal sealed class StayOpenDropDown : ToolStripDropDownMenu

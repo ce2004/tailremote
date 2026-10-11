@@ -49,7 +49,7 @@ namespace TailRemote
         {
             _ourWindow = ourWindow;
             _proc = Callback;
-            _thread = new Thread(Loop) { IsBackground = true, Name = "TailRemote keyboard", Priority = ThreadPriority.Highest };
+            _thread = new Thread(Loop) { IsBackground = true, Name = "Kova keyboard", Priority = ThreadPriority.Highest };
             _thread.Start();
             _ready.Wait();
         }
